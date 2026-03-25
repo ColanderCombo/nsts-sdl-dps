@@ -1,0 +1,14 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lnk101"
+version = "0.1.0"
+description = "IBM AP-101 linker"
+requires-python = ">=3.8"
+license = {text = "Public Domain"}
+dependencies = ["pyyaml", "typer>=0.9"]
+
+[project.scripts]
+lnk101 = "lnk101.cli:main"

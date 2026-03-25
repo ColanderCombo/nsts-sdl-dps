@@ -1,0 +1,36 @@
+{
+  "name": "tatsu-ebnf",
+  "displayName": "TatSu EBNF Grammar",
+  "description": "Syntax highlighting for TatSu EBNF grammar files",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "tatsu-ebnf",
+        "aliases": [
+          "TatSu EBNF",
+          "tatsu-ebnf"
+        ],
+        "extensions": [
+          ".ebnf",
+          ".tatsu"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "tatsu-ebnf",
+        "scopeName": "source.tatsu-ebnf",
+        "path": "./syntaxes/tatsu-ebnf.tmLanguage.json"
+      }
+    ]
+  }
+}

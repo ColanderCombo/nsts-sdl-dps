@@ -1,0 +1,4 @@
+exit=1
+lines=36
+reason=block within DO WHILE TRUE loop generates no branch instruction. Program loops forever after quit signal. All 8 equation results are correct.
+input=yes

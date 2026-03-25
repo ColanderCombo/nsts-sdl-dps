@@ -1,0 +1,29 @@
+
+ REGRESS_001: PROGRAM;
+
+C '**' EXP expressions generate different calls depending on whether 
+C the arguments are integer or scalar. PASS1/PREPLITE/PREP_LIT uses
+C an inlined AW ('Add Unnormalized Word') instruction 
+C
+    DECLARE SCALAR, A INITIAL(32);
+C For '**' HALMAT generation:
+C   ref. PASS1/SYNTHESI.xpl:1424 /*  <FACTOR>  ::=  <PRIMARY>  <**>  <FACTOR>  */   
+C     for int/scalars will emit XSEXP, XSIEX
+C A^2 -> A * A
+    A = A**2;
+    WRITE(6) A;
+    A = A**10;
+    WRITE(6) A;
+    A = A**31337;
+    WRITE(6) A;
+    A = A**0.5;
+    WRITE(6) A;
+    A = A**0.1;
+    WRITE(6) A;
+    A = A**52.0234;
+    WRITE(6) A;
+    A = A**(-5);
+    WRITE(6) A;
+    A = A**(-0.25);
+Y %SVCI(0);
+ CLOSE REGRESS_001;

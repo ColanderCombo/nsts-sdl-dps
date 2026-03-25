@@ -1,0 +1,17 @@
+
+Input a number (negative to quit): 
+SQRT OF   4.000000E+00  IS   2.000000E+00 
+CHECK:  4.000000E+00 
+Input a number (negative to quit): 
+SQRT OF   9.000000E+00  IS   3.000000E+00 
+CHECK:  9.000000E+00 
+Input a number (negative to quit): 
+SQRT OF   2.000000E+00  IS   1.414213E+00 
+CHECK:  1.999998E+00 
+Input a number (negative to quit): 
+SQRT OF   2.500000E-01  IS   5.000000E-01 
+CHECK:  2.500000E-01 
+Input a number (negative to quit): 
+SQRT OF   1.000000E+02  IS   1.000000E+01 
+CHECK:  1.000000E+02 
+Input a number (negative to quit): 

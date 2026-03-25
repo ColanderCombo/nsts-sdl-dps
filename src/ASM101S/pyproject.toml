@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "asm101s"
+version = "0.1.0"
+description = "IBM AP-101S assembler from virtualagc"
+requires-python = ">=3.8"
+license = {text = "Public Domain"}
+dependencies = [
+    "tatsu>=5.8,<5.13",
+    "typer>=0.9.0",
+]
+
+[project.scripts]
+asm101s = "asm101s.cli:main"

@@ -1,0 +1,4 @@
+exit=1
+lines=0
+reason=FATAL: Program requests input on channel 5 (CHARACTER) but no --infile5 was provided
+input=no

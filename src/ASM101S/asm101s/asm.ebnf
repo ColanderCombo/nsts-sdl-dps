@@ -1,0 +1,294 @@
+# Regarding @@whitespace, it may not be adequate and may require the parser to
+# be called with whitespace=''.  See https://github.com/neogeny/TatSu/issues/337.
+# Regarding @@eol_comments, I find that by default, a string beginning with
+# '#' is treated by the parser as being empty.  I deduce that @@eol_comments
+# is somehow causing this.  The only way to override that seems to be to 
+# assign @@eol_comments some pattern which will never be matched.
+@@grammar :: asm
+@@whitespace :: None
+@@parseinfo :: True
+@@eol_comments :: /@g@a@r@b@a@g@e@/
+
+#---------------------------------------------------------------------
+# Start with a bunch of high-level rules corresponding to entire 
+# fields (name, operation, operand) of source-code lines.
+
+# Used by `joinOperand` for eliminating continuation lines in 
+# macro prototypes.
+operandPrototype0 = 
+    | end0+: ( parameter { ',' parameter } / / )
+    | end1+: ( parameter { ',' parameter } ',' / / )
+    | end2+: ( parameter { ',' parameter } [ ',' [ '&' ] ] ) $
+    | end3+: ( / */ ) $
+    ;
+
+# Used by `joinOperand` for elimination continuation lines in 
+# macro invocations
+operandInvocation0 = 
+    | end0+: ( replacement { ',' replacement } / / )
+    | end2+: ( replacement { ',' replacement } [ ',' [ "'" /[^']*/ ] ] ) $
+    | end3+: ( / */ ) $
+    | end4+: ( /[^ ]+/ / */ ) $
+    ;
+
+# Operand field of macro prototypes (*after* continuation lines are
+# eliminated).
+operandPrototype = 
+    | pi+: parameter { ',' pi+: parameter } / / 
+    | pi+: parameter { ',' pi+: parameter } $
+    | $
+    ;
+
+# Operand field of macro invocation (*after* continuation lines are
+# eliminated).
+operandInvocation = [ pi+: replacement { ',' pi+: replacement } ] ;
+
+# Name field for all code outside of macro definitions.
+nameCode = 
+    | sv+: variable
+    | id+: identifier
+    ;
+
+nameSet =
+    | sv+: sv $
+    | sv+: sv '(' exp+: arithmeticExpression ')' $
+    ;
+    
+nameSet0 =
+    | sv+: sv '(' exp+: arithmeticExpression ')'
+    | sv+: sv
+    ;
+
+# Name field within macro definitions.
+nameMacrodef = 
+    | sequenceSymbol $
+    | subName { '.' subName } $ 
+    ;
+subName = 
+    | variable
+    | identifier
+    ;
+
+# Operation field for all contexts. 
+operationAll = subOperation { '.' subOperation } $ ;
+subOperation = 
+    | variable
+    | identifier
+    ;
+
+# Operand field for an RR instruction.
+rrAll = [ R1+: arithmeticExpression ',' ] R2+: arithmeticExpression ( / / | $ ) ;
+lfxiAll = [ R1+: register ',' ] R2+: ( '-2' | '-1' | register ) ( / / | $ ) ;
+
+# Operand field for an RS or SRS instruction.
+rsAll = 
+    | [ R1+: register ',' ] "=" L2+: lconstant ( / / | $ )
+    | [ R1+: register ',' ] D2+: arithmeticExpression '(' B2+: register ')'  ( / / | $ )
+    | [ R1+: register ',' ] D2+: arithmeticExpression '(' X2+: register ',' B2+: register ')'  ( / / | $ )
+    | [ R1+: register ',' ] D2+: arithmeticExpression '(' ')'  ( / / | $ )
+    | [ R1+: register ',' ] D2+: arithmeticExpression  ( / / | $ )
+    ;
+
+# Operand field for an RI instruction.
+riAll = R2+: register ',' I1+: arithmeticExpression [ "(" ")" ]  ( / / | $ ) ;
+
+# Operand field for an SI instruction.
+siAll = 
+    | D2+: arithmeticExpression '(' B2+: register '),' I1+: arithmeticExpression  ( / / | $ ) 
+    | D2+: arithmeticExpression "," I1+: arithmeticExpression  ( / / | $ ) 
+    ;
+
+# Operand field for an MSC instruction.
+mscAll = 
+    | constant ',' identifier '(' constant ')'  ( / / | $ )
+    | constant ',' identifier  ( / / | $ )
+    | arithmeticExpression '(' constant ')'  ( / / | $ )
+    | arithmeticExpression  ( / / | $ )
+    ;
+
+# Operand field for an BCE instruction.
+bceAll = 
+    | arithmeticExpression '(' constant ')'  ( / / | $ )
+    | arithmeticExpression ',' arithmeticExpression  ( / / | $ )
+    | arithmeticExpression  ( / / | $ )
+    ;
+
+# Opeand field of an AIF.
+aifAll = '(' booleanExpression ')' sequenceSymbol ;
+
+#---------------------------------------------------------------------
+# Now a bunch of rules used by the rules above, but not usually used
+# directly.
+    
+quotedString = "'" /[^']*/ { "''" /[^']*/ } "'" ;
+    
+identifier = /(?<![@#$A-Z0-9&])[@#$A-Z][@#$A-Z0-9]*/ ;
+
+variable = 
+    | subvar variable
+    | subvar '.' variable
+    | subvar '(' arithmeticExpression ')'
+    | subvar 
+    ;
+subvar = sv ;
+
+sequenceSymbol = /[.][@#$A-Z][@#$A-Z0-9]*/ ;
+
+constant = 
+    | /-?[0-9]+/ 
+    | "X'" /[0-9A-F]+/ "'"
+    | "B'" /[0-1]+/ "'" 
+    | "L'" identifier
+    | '*'
+    ;
+lconstant = 
+    | T+: /C/ [ "L" L+: /[0-9]+/ ] "'" C+: ( /[^']*/ { "''" /[^']*/ } ) "'"
+    | T+: /X/ [ "L" L+: /[0-9]+/ ] "'" X+: /[0-9A-F]+/ "'"
+    | T+: /B/ [ "L" L+: /[0-9]+/ ] "'" B+: /[0-1]+/ "'" 
+    | T+: /F/ [ "L" L+: /[0-9]+/ ] [ "S" S+: /-?[0-9]+/ ] "'" F+: floatNumber "'"
+    | T+: /H/ [ "L" L+: /[0-9]+/ ] [ "S" S+: /-?[0-9]+/ ] "'" H+: floatNumber "'"
+    | T+: /E/ [ "L" L+: /[0-9]+/ ] [ "S" S+: /-?[0-9]+/ ] "'" E+: floatNumber "'"
+    | T+: /D/ [ "L" L+: /[0-9]+/ ] [ "S" S+: /-?[0-9]+/ ] "'" D+: floatNumber "'"
+    | T+: /Y/ [ "L" L+: /[0-9]+/ ] "(" T+: identifier ")"
+    | T+: /Z/ [ "L" L+: /[0-9]+/ ] "(" "," A1+: arithmeticExpression "," A2+: arithmeticExpression ")"
+    ;
+
+char = 
+    | substringExpression 
+    | quotedString
+    ;
+    
+substringExpression = quotedString '(' arithmeticExpression ',' arithmeticExpression ')' ;
+
+sdTerm = 
+    | /[0-9]+/ 
+    | "X'" /[0-9A-F]+/ "'"
+    | "B'" /[0-1]+/ "'" 
+    | "C" char
+    ;
+
+dcOperands = dcOperand { ',' dcOperand } ( / / | $ ) ;
+dcOperand = 
+    | [ d+: number ] t+: 'C' [ l+: len ] v+: quotedString 
+    | [ d+: number ] t+: 'X' [ l+: len ] v+: quotedHexString 
+    | [ d+: number ] t+: 'B' [ l+: len ] v+: quotedBinaryString 
+    | [ d+: number ] t+: /[FHED]/ [ l+: len ] v+: quotedFloatList 
+    | [ d+: number ] t+: /[AY]/ [ l+: len ] v+: addresses 
+    | [ d+: number ] t+: 'A'[ l+: len ] h+: quotedHexString
+    | [ d+: number ] t+: 'Z' '(' z: identifier [ ',' [ arithmeticExpression ] [ ',' f: arithmeticExpression ] ] ')'
+    ;
+dsOperands = dsOperand { ',' dsOperand }  ( / / | $ ) ;
+dsOperand = 
+    | [ d+: number ] t+: 'C' [ l+: len ] [ v+: quotedString ]
+    | [ d+: number ] t+: 'X' [ l+: len ] [ v+: quotedHexString ]
+    | [ d+: number ] t+: 'B' [ l+: len ] [ v+: quotedBinaryString ]
+    | [ d+: number ] t+: /[FHED]/ [ l+: len ] [ v+: quotedFloatList ]
+    | [ d+: number ] t+: /[AY]/ [ l+: len ] [ v+: addresses ]
+    ;
+addresses = '(' arithmeticExpression { ',' arithmeticExpression } ')' ;
+len = 'L' [ '.' ] [ '+' | '-' ] number ;
+scale = 'S' [ '+' | '-' ] number;
+exp = 'E' [ '+' | '-' ] number;
+number = ( /[0-9]+/ | '(' arithmeticExpression ')' );
+quotedHexString = "'" /[A-F0-9]+/ "'" ;
+quotedBinaryString = "'" /[01]+/ "'" ;
+quotedFloatList = "'" floatNumber { ',' floatNumber } "'" ;
+floatNumber = 
+    | [ /[-+]/ ] /[0-9]+/ [ '.' /[0-9]*/ ] [ 'E' /[-+]?[0-9]+/ ] 
+    | [ /[-+]/ ] '.' /[0-9]+/ [ 'E' /[-+]?[0-9]+/ ] 
+    ;
+quotedFixedList = "'" fixedNumber { ',' fixedNumber } "'" ;
+fixedNumber = 
+    | [ /[-+]/ ] /[0-9]+/ [ '.' /[0-9]*/ ] 
+    | [ /[-+]/ ] '.' /[0-9]+/  
+    ;
+
+register = 
+    | constant 
+    | identifier 
+    | variable 
+    ;
+
+immediate = 
+    | constant
+    | identifier
+    | variable
+    ;
+
+arithmeticExpressionOnly = arithmeticExpression $ ;
+arithmeticExpression = term  { ( '+' | '-' ) term } ;
+term = factor  { ( '*' | '/' ) factor } ;
+factor = 
+    | /[NKLSI]'/ variable
+    | constant 
+    | identifier 
+    | variable 
+    | '('  arithmeticExpression  ')' 
+    | '*'
+    ;
+
+booleanExpressionOnly = booleanExpression $ ;
+booleanExpression = booleanTerm { / */ 'OR' / */ booleanTerm } ;
+booleanTerm = notFactor { / */ 'AND' / */ notFactor } ;
+notFactor = [ / */ 'NOT' / */ ] booleanFactor ;
+booleanFactor = 
+    | "D'" identifier
+    | "D'" sv
+    | relationalExpression
+    | variable 
+    | '(' booleanExpression ')' 
+    | booleanLiteral 
+    ;
+booleanLiteral = '0' | '1' ;
+relationalExpression = 
+    | arithmeticExpression / */ relOp / */ arithmeticExpression
+    | characterExpression / */ relOp / */ characterExpression
+    ;
+relOp = 'EQ' | 'NE' | 'LT' | 'GT' | 'LE' | 'GE' ;
+
+characterExpressionOnly = characterExpression $ ;
+characterExpression = 
+    | quotedString [ substringNotation ] { [ '.' ] characterExpression } 
+    | "T'" identifier
+    | "T'" sv
+    ;
+substringNotation = '(' arithmeticExpression ',' arithmeticExpression ')' ;
+
+parameter = 
+    | sv '=' /[^, ]*/
+    | sv
+    ;
+    
+sv = /&[@#$A-Z][@#$A-Z0-9]*/ ;
+
+list = listItem { ',' listItem } ;
+listItem = 
+    | '(' list ')'
+    | /[^ ,()]*/
+    ;
+
+replacement = 
+    | identifier "=" "'" /[^']*/ { "''" /[^;]*/ } "'"
+    | identifier "=" ( /[0-9]+/ | identifier ) "(" ( /[0-9]+/ | identifier ) ")"
+    | identifier '=' '(' list ')'
+    | identifier '=' /[^, ()]*/
+    | char
+    | ( /[0-9]+/ | identifier ) "(" ( /[0-9]+/ | identifier ) ")"
+    | '(' list ')'
+    | /[^, ()]*/
+    ;
+
+mnote = 
+    | sev+: /[0-9]+/ ',' msg+: quotedString
+    | com+: '*' ',' msg+: quotedString
+    | msg+: quotedString
+    ;
+
+identifierList = pidentifier { ',' pidentifier } $ ;
+pidentifier = /[#@$A-Z][#@$A-Z0-9]*/ ;
+
+anything = /.*/ $ ;
+
+equOperand = v+: arithmeticExpression ( / / | $ ) ;
+
+expressions = r+: arithmeticExpression { ',' r+: arithmeticExpression }* ( / / | $ ) ;

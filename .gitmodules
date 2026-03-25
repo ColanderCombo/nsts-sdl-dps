@@ -1,0 +1,6 @@
+[submodule "ext/virtualagc"]
+	path = ext/virtualagc
+	url = https://github.com/ColanderCombo/virtualagc.git
+[submodule "ext/sim"]
+	path = ext/sim
+	url = https://github.com/ColanderCombo/nsts-sim-gpc

@@ -1,0 +1,158 @@
+#!/bin/bash
+#
+# halsc — HAL/S-FC Compiler Wrapper
+#
+# Drives the multi-pass HAL/S-FC compiler pipeline (PASS1 → FLO → OPT → AUXP → PASS2)
+# producing an AP-101S object file from HAL/S source.
+#
+# Usage: halsc [options] source.hal
+#
+# Options:
+#   -o FILE          Output object file (default: source.obj)
+#   -v               Verbose output
+#   -k, --keep       Keep intermediate files
+#   --parm=OPTS      Compiler options (e.g. SRN,LISTING2,LIST,NOTABLES,DECK,HALMAT)
+#   --bfs            Use BFS variant
+#   --templib=DIR    Template library path
+#   --errorlib=DIR   Error library path
+#   --listing=FILE   Save listing
+#   --pass1-rpt=FILE Save PASS1 report
+#   --pass2-rpt=FILE Save PASS2 report
+#   --halmat=FILE    Save HALMAT output
+#   --workdir=DIR    Working directory for intermediate files
+
+HALSFC_BINDIR="@WRAPPER_BINDIR@"
+HALSFC_LIBDIR="@WRAPPER_LIBDIR@"
+
+# Defaults
+OUTPUT="" VERBOSE=0 KEEP_TEMPS=0 PARM_STRING="" TARGET="PASS"
+TEMPLIB="" ERRORLIB="${HALSFC_LIBDIR}/ERRORLIB"
+LISTING_FILE="" PASS1_RPT="" PASS2_RPT="" HALMAT_FILE="" WORKDIR=""
+SOURCE_FILE=""
+
+die() { echo "halsc: $*" >&2; exit 1; }
+log() { [[ $VERBOSE -eq 1 ]] && echo "$*" >&2; }
+
+# Resolve a path to absolute relative to $ORIG_PWD
+abs() { [[ "$1" == /* ]] && echo "$1" || echo "${ORIG_PWD}/$1"; }
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -o)             OUTPUT="$2"; shift 2 ;;
+        -v|--verbose)   VERBOSE=1; shift ;;
+        -k|--keep)      KEEP_TEMPS=1; shift ;;
+        --parm=*)       PARM_STRING="${1#--parm=}"; shift ;;
+        --bfs)          TARGET="BFS"; shift ;;
+        --templib=*)    TEMPLIB="${1#--templib=}"; shift ;;
+        --errorlib=*)   ERRORLIB="${1#--errorlib=}"; shift ;;
+        --listing=*)    LISTING_FILE="${1#--listing=}"; shift ;;
+        --pass1-rpt=*)  PASS1_RPT="${1#--pass1-rpt=}"; shift ;;
+        --pass2-rpt=*)  PASS2_RPT="${1#--pass2-rpt=}"; shift ;;
+        --halmat=*)     HALMAT_FILE="${1#--halmat=}"; shift ;;
+        --workdir=*)    WORKDIR="${1#--workdir=}"; shift ;;
+        -h|--help)      sed -n '3,/^[^#]/{ s/^# \?//p }' "$0"; exit 0 ;;
+        -*)             die "unknown option: $1" ;;
+        *)              [[ -n "$SOURCE_FILE" ]] && die "multiple source files not supported"
+                        SOURCE_FILE="$1"; shift ;;
+    esac
+done
+
+[[ -z "$SOURCE_FILE" ]] && die "no input file\nUsage: halsc [options] source.hal"
+[[ -f "$SOURCE_FILE" ]] || die "$SOURCE_FILE: No such file"
+
+SOURCE_FILE="$(realpath "$SOURCE_FILE")"
+SOURCE_NAME="$(basename "${SOURCE_FILE%.*}")"
+ORIG_PWD="$PWD"
+
+# Resolve output paths
+OUTPUT="$(abs "${OUTPUT:-${SOURCE_NAME}.obj}")"
+[[ -n "$LISTING_FILE" ]] && LISTING_FILE="$(abs "$LISTING_FILE")"
+[[ -n "$PASS1_RPT" ]]    && PASS1_RPT="$(abs "$PASS1_RPT")"
+[[ -n "$PASS2_RPT" ]]    && PASS2_RPT="$(abs "$PASS2_RPT")"
+[[ -n "$HALMAT_FILE" ]]  && HALMAT_FILE="$(abs "$HALMAT_FILE")"
+
+# Compiler executables
+if [[ "$TARGET" == "BFS" ]]; then
+    PASS1="${HALSFC_BINDIR}/HALSFC-PASS1B"
+    OPT="${HALSFC_BINDIR}/HALSFC-OPTB"
+    PASS2="${HALSFC_BINDIR}/HALSFC-PASS2B"
+    TEMPLIB_NAME="TEMPLIBB"
+    CARDS_ARG="--pdso=3,cards.bin,E"
+else
+    PASS1="${HALSFC_BINDIR}/HALSFC-PASS1"
+    OPT="${HALSFC_BINDIR}/HALSFC-OPT"
+    PASS2="${HALSFC_BINDIR}/HALSFC-PASS2"
+    TEMPLIB_NAME="TEMPLIB"
+    CARDS_ARG="--ddo=3,cards.bin,E"
+fi
+FLO="${HALSFC_BINDIR}/HALSFC-FLO"
+AUXP="${HALSFC_BINDIR}/HALSFC-AUXP"
+
+for exe in "$PASS1" "$FLO" "$OPT" "$AUXP" "$PASS2"; do
+    [[ -x "$exe" ]] || die "compiler component not found: $exe"
+done
+
+[[ -z "$TEMPLIB" ]] && TEMPLIB="${HALSFC_LIBDIR}/${TEMPLIB_NAME}"
+
+# Working directory
+if [[ -z "$WORKDIR" ]]; then
+    WORKDIR="$(mktemp -d)"; CLEANUP=1
+else
+    mkdir -p "$WORKDIR"; CLEANUP=0
+fi
+trap '[[ $CLEANUP -eq 1 && $KEEP_TEMPS -eq 0 ]] && rm -rf "$WORKDIR"; [[ $KEEP_TEMPS -eq 1 ]] && echo "halsc: intermediates in $WORKDIR" >&2' EXIT
+cd "$WORKDIR"
+
+# Run a compiler pass, capturing output to <name>.rpt
+run() {
+    local name="$1"; shift
+    local rpt="$(echo "$name" | tr '[:upper:]' '[:lower:]').rpt"
+    log "[$name] Running..."
+    if ! "$@" > "$rpt" 2>&1; then
+        echo "halsc: $name failed compiling $SOURCE_NAME" >&2
+        cat "$rpt" >&2
+        exit 1
+    fi
+}
+
+log "Compiling $SOURCE_FILE..."
+
+run PASS1 "$PASS1" \
+    --parm="$PARM_STRING" \
+    --ddi=0,"$SOURCE_FILE" \
+    --ddo=2,listing2.txt \
+    --pdsi=4,"$TEMPLIB",E --pdsi=5,"$ERRORLIB" \
+    --pdsi=6,ACCESS --pdso=6,"$TEMPLIB",E \
+    --commono=COMMON0.out \
+    --raf=B,7200,1,halmat.bin --raf=B,1560,2,litfile.bin --raf=B,3360,6,vmem.bin
+
+run FLO "$FLO" \
+    --commoni=COMMON0.out --commono=COMMON1.out \
+    --raf=B,7200,1,halmat.bin --raf=B,1560,2,litfile.bin --raf=B,3360,6,vmem.bin
+
+run OPT "$OPT" \
+    --commoni=COMMON1.out --commono=COMMON2.out \
+    --raf=B,7200,1,halmat.bin --raf=B,1560,2,litfile.bin \
+    --raf=B,7200,4,optmat.bin --raf=B,3360,6,vmem.bin
+
+run AUXP "$AUXP" \
+    --commoni=COMMON2.out --commono=COMMON3.out \
+    --raf=B,7200,1,auxmat.bin --raf=B,1560,2,litfile.bin \
+    --raf=B,7200,4,optmat.bin --raf=B,3360,6,vmem.bin
+
+run PASS2 "$PASS2" \
+    "$CARDS_ARG" --ddo=4,deck.bin,E --pdsi=5,"$ERRORLIB" --ddo=7,extra.txt \
+    --commoni=COMMON3.out --commono=COMMON4.out \
+    --raf=B,7200,1,auxmat.bin --raf=B,1560,2,litfile.bin \
+    --raf=B,1600,3,objcode.bin --raf=B,7200,4,optmat.bin --raf=B,3360,6,vmem.bin
+
+# Copy outputs
+cp cards.bin "$OUTPUT"
+[[ -n "$LISTING_FILE" && -f listing2.txt ]] && cp listing2.txt "$LISTING_FILE"
+[[ -n "$PASS1_RPT"    && -f pass1.rpt    ]] && cp pass1.rpt "$PASS1_RPT"
+[[ -n "$PASS2_RPT"    && -f pass2.rpt    ]] && cp pass2.rpt "$PASS2_RPT"
+[[ -n "$HALMAT_FILE"  && -f halmat.bin   ]] && cp halmat.bin "$HALMAT_FILE"
+
+log "Output: $OUTPUT"
+echo "halsc: $SOURCE_NAME compiled successfully"
