@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Annotated
 
+os.environ["TYPER_USE_RICH"] = "0" # Disable fancy formatting
 import typer
 
 app = typer.Typer(

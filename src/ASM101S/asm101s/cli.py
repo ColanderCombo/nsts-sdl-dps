@@ -6,8 +6,10 @@ ASM101S - IBM AP-101S Assembler
 from pathlib import Path
 from typing import Annotated, Optional
 import sys
+import os
 import tempfile
 
+os.environ["TYPER_USE_RICH"] = "0" # Disable fancy formatting
 import typer
 
 from .assemble import Assemble, AssemblyError

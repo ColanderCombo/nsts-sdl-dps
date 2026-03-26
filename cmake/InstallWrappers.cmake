@@ -28,7 +28,8 @@ set(WRAPPER_LIBDIR "${CMAKE_BINARY_DIR}/lib")
 _configure_wrapper(asm101s.sh.in   asm101s)
 _configure_wrapper(lnk101.sh.in   lnk101)
 _configure_wrapper(gpc-batch.sh.in gpc-batch)
-_configure_wrapper(gpc-debug.sh.in gpc-debug)
+_configure_wrapper(gpc-dbg.sh.in   gpc-dbg)
+_configure_wrapper(gpc-gui.sh.in   gpc-gui)
 
 # Install-tree wrappers: reconfigure with install-prefix paths
 set(WRAPPER_BINDIR "${SDL_INSTALL_BINDIR}")
@@ -57,11 +58,13 @@ install(
 
 if(EXISTS "${SIM_DIR}/package.json")
     _configure_install_wrapper(gpc-batch.sh.in gpc-batch)
-    _configure_install_wrapper(gpc-debug.sh.in gpc-debug)
+    _configure_install_wrapper(gpc-dbg.sh.in   gpc-dbg)
+    _configure_install_wrapper(gpc-gui.sh.in   gpc-gui)
     install(
         PROGRAMS
             "${CMAKE_BINARY_DIR}/install-bin/gpc-batch"
-            "${CMAKE_BINARY_DIR}/install-bin/gpc-debug"
+            "${CMAKE_BINARY_DIR}/install-bin/gpc-dbg"
+            "${CMAKE_BINARY_DIR}/install-bin/gpc-gui"
         DESTINATION "${SDL_INSTALL_BINDIR}"
         COMPONENT wrappers
     )

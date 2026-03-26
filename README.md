@@ -19,7 +19,8 @@ repositories:
     - Original ASM101S assembler (modified version in src/ASM101S)
   - nsts-sim-gpc
     - gpc-batch: AP-101 batch emulator
-    - gpc-debug: AP-101 interactive debugger
+    - gpc-dbu: AP-101 debugger
+    - gpc-gui: AP-101 debugger gui
 
 Cloning
 -------
@@ -58,9 +59,9 @@ git checkout -- .
 Prerequisites
 -------------
 
-  - cmake >= 4.0
+  - cmake >= 3.31
   - python3 (3.13 used here)
-  - uv
+  - [uv](https://github.com/astral-sh/uv)
 
 Building
 --------

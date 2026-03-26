@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 4.0)
+cmake_minimum_required(VERSION 3.31)
 
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT OR NOT DEFINED CMAKE_INSTALL_PREFIX)
     set(CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_SOURCE_DIR}/inst" CACHE PATH "Installation prefix" FORCE)
@@ -135,6 +135,7 @@ file(GLOB_RECURSE GPC_SIM_SOURCES
 )
 list(APPEND GPC_SIM_SOURCES
     "${SIM_DIR}/esbuild/esbuild.batch.config.js"
+    "${SIM_DIR}/esbuild/esbuild.dbg.config.js"
     "${SIM_DIR}/electron-esbuild.config.yaml"
     "${SIM_DIR}/package.json"
 )
@@ -155,6 +156,7 @@ add_custom_command(
     COMMAND "${SIM_DIR}/node_modules/.bin/electron-esbuild" build
     COMMAND "${NODE_EXECUTABLE}" "${SIM_DIR}/esbuild/esbuild.batch.config.js"
     COMMAND "${NODE_EXECUTABLE}" "${SIM_DIR}/esbuild/esbuild.fcmdump.config.js"
+    COMMAND "${NODE_EXECUTABLE}" "${SIM_DIR}/esbuild/esbuild.dbg.config.js"
     COMMAND ${CMAKE_COMMAND} -E touch "${GPC_SIM_STAMP}"
     WORKING_DIRECTORY "${SIM_DIR}"
     DEPENDS "${GPC_NPM_STAMP}" ${GPC_SIM_SOURCES}
