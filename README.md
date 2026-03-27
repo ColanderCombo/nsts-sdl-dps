@@ -59,9 +59,18 @@ git checkout -- .
 Prerequisites
 -------------
 
-  - cmake >= 3.31
+  - cmake >= 3.28
   - python3 (3.13 used here)
   - [uv](https://github.com/astral-sh/uv)
+  - nodejs (v18.19.1 tested) & npm
+
+On a debian/unbuntu system you can install the required packages using:
+```
+sudo apt install git cmake python3-pip pipx nodejs npm
+pipx install uv
+pipx insurepath 
+# open a new shell to make sure 'uv' is findable
+```
 
 Building
 --------
