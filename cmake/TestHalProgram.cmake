@@ -5,7 +5,7 @@
 #   Input:      ${HAL_TEST_SRC_DIR}/<name>.in5                 (if exists → --infile5)
 #   Output:     ${CMAKE_CURRENT_BINARY_DIR}/<name>.actual.out6
 
-cmake_minimum_required(VERSION 3.31)
+cmake_minimum_required(VERSION 3.28)
 
 # hal_test(NAME <name> [MAX_STEPS <n>])
 #
