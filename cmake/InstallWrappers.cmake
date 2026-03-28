@@ -4,6 +4,23 @@ set(WRAPPER_ASM101S_DIR "${ASM101S_DIR}")
 set(WRAPPER_XCOM_I_DIR "${XCOM_I_DIR}")
 set(WRAPPER_PYTHON_CMD "${SDL_VENV_PYTHON}")
 
+# On Linux, Electron requires either unprivileged user namespaces or a
+# SUID chrome-sandbox.  When neither is available, pass --no-sandbox.
+set(ELECTRON_SANDBOX_FLAGS "")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    execute_process(
+        COMMAND sysctl -n kernel.unprivileged_userns_clone
+        OUTPUT_VARIABLE _userns_clone
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _userns_rc
+    )
+    if(_userns_rc EQUAL 0 AND _userns_clone STREQUAL "0")
+        set(ELECTRON_SANDBOX_FLAGS "--no-sandbox")
+        message(STATUS "Unprivileged user namespaces disabled — Electron wrappers will use --no-sandbox")
+    endif()
+endif()
+
 # _configure_wrapper(<template> <output-name>)
 #   Configures a .in template into build/bin/<output-name> and makes it executable.
 function(_configure_wrapper TEMPLATE OUTPUT_NAME)
