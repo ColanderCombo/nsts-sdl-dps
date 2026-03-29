@@ -1149,6 +1149,18 @@ class Linker:
                                  ldId=section.esdId)
                     module.addSection(ld)
 
+        # Pre-assign addresses for locally-defined sections found in the JSON
+        for module in self.modules:
+            if module.external:
+                continue
+            for esdId, section in module.sections.items():
+                if section.type != 'SD' or section.baseAddress is not None:
+                    continue
+                entry = csectTable.get(section.name)
+                if entry is not None and 'start' in entry:
+                    section.baseAddress = Addr.from_hw(entry['start'])
+                    log.info(f"Placed '{section.name}' @ {section.baseAddress} (from external-syms)")
+
         if added:
             self._rebuildSymbolTable()
             return True
@@ -1382,7 +1394,41 @@ class Linker:
             json.dump(data, f, indent=2)
         
         log.info(f"Wrote symbol table to {outputPath}")
-    
+
+    def saveExternalSyms(self, outputPath):
+        """Save csect address table for use with --external-syms.
+
+        Produces JSON mapping section names to halfword addresses::
+
+            { "CSECT_NAME": { "start": <hw>, "end": <hw> }, ... }
+
+        Includes all SD sections and LD (entry) labels.
+        """
+        data = {}
+
+        for module in self.modules:
+            for esdId, section in module.sections.items():
+                if section.baseAddress is None:
+                    continue
+                if section.type == 'SD':
+                    startHW = section.baseAddress.hw
+                    endHW = startHW + section.length.hw - 1
+                    data[section.name] = {
+                        "start": startHW,
+                        "end": max(startHW, endHW),
+                    }
+                elif section.type == 'LD':
+                    hw = section.baseAddress.hw
+                    data[section.name] = {
+                        "start": hw,
+                        "end": hw,
+                    }
+
+        with open(outputPath, 'w') as f:
+            json.dump(data, f, indent=2)
+
+        log.info(f"Wrote external syms ({len(data)} entries) to {outputPath}")
+
     def printSectionTable(self):
         # Collect all sections with assigned addresses
         allSections = []

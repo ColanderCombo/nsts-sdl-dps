@@ -63,6 +63,7 @@ function(_build_one_hal_program)
     set(_rpt "${HP_OUT_DIR}/${HP_NAME}.pass2.rpt")
     set(_fcm "${FCM_BUILD_DIR}/${HP_NAME}.fcm")
     set(_sym "${FCM_BUILD_DIR}/${HP_NAME}.sym.json")
+    set(_ext "${FCM_BUILD_DIR}/${HP_NAME}.ext.json")
     set(_lnk "${FCM_BUILD_DIR}/${HP_NAME}.lnk")
     set(_zcon "${CMAKE_BINARY_DIR}/runtime/ZCON")
     set(_run  "${CMAKE_BINARY_DIR}/runtime/RUN")
@@ -88,6 +89,7 @@ function(_build_one_hal_program)
             "${SDL_VENV_PYTHON}" -m lnk101
             -o "${_fcm}"
             --json-symbols "${_sym}"
+            --save-external-syms "${_ext}"
             --save-config "${_lnk}"
             -L "${_zcon}"
             -L "${_run}"

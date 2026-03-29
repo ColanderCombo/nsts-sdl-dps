@@ -22,6 +22,7 @@ class LinkerOpts:
     output:           Optional[str]    = None
     map:              Optional[str]    = None
     json_symbols:     Optional[str]    = None
+    save_external_syms: Optional[str] = None
     library_path:     list[str]        = field(default_factory=list)
     library:          list[str]        = field(default_factory=list)
     # link configuration
@@ -54,6 +55,7 @@ def link(
     output: Annotated[Optional[str], typer.Option("-o", "--output", help="Output FCM file name")] = None,
     map: Annotated[Optional[str], typer.Option("-M", "--map", help="Generate a link map/listing file")] = None,
     json_symbols: Annotated[Optional[str], typer.Option("--json-symbols", help="Output symbol table as JSON for simulator")] = None,
+    save_external_syms: Annotated[Optional[str], typer.Option("--save-external-syms", help="Save csect address table for single-module relocation")] = None,
 
     # Libraries
     library_path: Annotated[Optional[list[str]], typer.Option("-L", "--library-path", help="Add directory to library search path")] = None,
@@ -145,6 +147,7 @@ def link(
         output=output or (Path(input_files[0]).stem + '.fcm' if input_files else 'a.out.fcm'),
         map=map,
         json_symbols=json_symbols,
+        save_external_syms=save_external_syms,
         library_path=library_path or [],
         library=library or [],
         save_config=save_config,
@@ -199,6 +202,9 @@ def link(
 
     if opts.json_symbols:
         linker.saveJsonSymbols(opts.json_symbols)
+
+    if opts.save_external_syms:
+        linker.saveExternalSyms(opts.save_external_syms)
 
     if opts.print_map or opts.verbose:
         linker.printSectionTable()
