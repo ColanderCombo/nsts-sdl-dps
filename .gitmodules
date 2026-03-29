@@ -4,6 +4,7 @@
 [submodule "ext/sim"]
 	path = ext/sim
 	url = https://github.com/ColanderCombo/nsts-sim-gpc
+	branch = main
 [submodule "ext/halmat"]
 	path = ext/halmat
 	url = https://github.com/Zaneham/Halmat
