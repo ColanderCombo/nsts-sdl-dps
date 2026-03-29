@@ -1116,10 +1116,26 @@ class Linker:
         module.external = True
         added = False
 
+        ldToParent = {}
+        for csectName, csectEntry in csectTable.items():
+            if isinstance(csectEntry, dict) and 'contents' in csectEntry:
+                for ldName in csectEntry['contents']:
+                    ldToParent[ldName] = csectName
+
+        loadedCsects = set()
+
         for symName in list(self.undefinedSymbols):
             entry = csectTable.get(symName)
             if entry is None or 'start' not in entry:
+                parentName = ldToParent.get(symName)
+                if parentName and parentName not in loadedCsects:
+                    entry = csectTable[parentName]
+                    symName = parentName
+                else:
+                    continue
+            if symName in loadedCsects:
                 continue
+            loadedCsects.add(symName)
 
             startHW = entry['start']
             endHW = entry.get('end', startHW)
@@ -1131,7 +1147,6 @@ class Linker:
             added = True
             log.info(f"External sym '{symName}' @ {baseAddr}  len={lengthBytes}")
 
-            # Add LD entries for contents sub-symbols
             contents = entry.get('contents')
             if contents:
                 for ldName, ldVal in contents.items():
