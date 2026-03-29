@@ -4,3 +4,9 @@
 [submodule "ext/sim"]
 	path = ext/sim
 	url = https://github.com/ColanderCombo/nsts-sim-gpc
+[submodule "ext/halmat"]
+	path = ext/halmat
+	url = https://github.com/Zaneham/Halmat
+[submodule "ext/hals-lsp"]
+	path = ext/hals-lsp
+	url = https://github.com/Zaneham/hals-lsp

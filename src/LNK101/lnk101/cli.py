@@ -27,6 +27,7 @@ class LinkerOpts:
     # link configuration
     save_config:      Optional[str]    = None
     load_config:      Optional[str]    = None
+    external_syms:    Optional[str]    = None
     entry:            Optional[str]    = None
     base_address:     int              = 0
     generate_stacks:  int              = 0
@@ -61,6 +62,7 @@ def link(
     # Link configuration
     save_config: Annotated[Optional[str], typer.Option("--save-config", help="Save link configuration to .lnk file")] = None,
     load_config: Annotated[Optional[str], typer.Option("--load-config", help="Load link configuration from .lnk file")] = None,
+    external_syms: Annotated[Optional[str], typer.Option("--external-syms", help="JSON file with external symbol addresses for single-module relocation")] = None,
 
     # Linking options
     entry: Annotated[Optional[str], typer.Option("-e", "--entry", help="Set entry point symbol or address")] = None,
@@ -90,6 +92,23 @@ def link(
     if version:
         print(f"{prog_name} {prog_version}")
         raise typer.Exit()
+
+    # Expand @file arguments into file lists
+    expanded = []
+    for f in input_files:
+        if f.startswith('@'):
+            listfile = f[1:]
+            if not os.path.exists(listfile):
+                typer.echo(f"Error: Response file not found: {listfile}", err=True)
+                raise typer.Exit(1)
+            with open(listfile) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        expanded.append(line)
+        else:
+            expanded.append(f)
+    input_files = expanded
 
     if not input_files and not library:
         typer.echo("Error: No input files specified", err=True)
@@ -130,6 +149,7 @@ def link(
         library=library or [],
         save_config=save_config,
         load_config=load_config,
+        external_syms=external_syms,
         entry=entry,
         base_address=int(base_address, 0),
         generate_stacks=int(generate_stacks, 0),
@@ -148,6 +168,8 @@ def link(
 
     if opts.load_config and not os.path.exists(opts.load_config):
         error(f"Config file not found: {opts.load_config}")
+    if opts.external_syms and not os.path.exists(opts.external_syms):
+        error(f"External symbols file not found: {opts.external_syms}")
 
     linker = Linker(opts)
     linker.loadInputFiles()

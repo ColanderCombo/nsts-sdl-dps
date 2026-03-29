@@ -73,8 +73,8 @@ class Section:
     name: str
     esdId: int
     type: str = 'SD'
-    address: int = 0                             # LD: byte offset within owning SD
-    length: int = 0
+    address: 'AddrDisp' = field(default_factory=AddrDisp)  # LD: byte offset within owning SD
+    length: 'AddrDisp' = field(default_factory=AddrDisp)
     module: 'ObjectModule | None' = None
     baseAddress: 'Addr | None' = None            # assigned during linking
     data: bytearray = field(default_factory=bytearray)
@@ -111,7 +111,7 @@ class Relocation:
     relId: int            # R pointer — ESD ID of referenced symbol
     posId: int            # P pointer — ESD ID of containing section
     flags: int
-    address: int          # BYTE offset within P section
+    address: 'AddrDisp'   # BYTE offset within P section
     module: 'ObjectModule | None' = None
 
     # Derived from flags
@@ -139,6 +139,7 @@ class ObjectModule:
     entryPoint: tuple | None = None                        # (esdId, byteOffset)
     entryName: str | None = None
     stackSizes: dict = field(default_factory=dict)         # csectName -> halfword size
+    external: bool = False                                 # True = address-only, not in image
 
     def __post_init__(self):
         if not self.name:
@@ -215,16 +216,16 @@ class ObjectModule:
 
                     symType = sym.get("type", "")
                     name = sym.get("name", "").strip()
-                    addr = sym.get("address", 0)
-                    length = sym.get("length", 0)
+                    addr = AddrDisp(sym.get("address", 0))
+                    length = AddrDisp(sym.get("length", 0))
                     esdId = firstEsdId + i
 
                     if symType == "SD":
                         module.addSection(Section(name, esdId, 'SD', addr, length,
                                                   module, data=bytearray(length)))
                     elif symType == "LD":
-                        module.addSection(Section(name, esdId, 'LD', addr, 0,
-                                                  module, ldId=sym.get("ldid", 0)))
+                        module.addSection(Section(name, esdId, 'LD', addr,
+                                                  module=module, ldId=sym.get("ldid", 0)))
                     elif symType in ("ER", "WX"):
                         module.addExternal(External(name, esdId, symType == "WX", module))
 
@@ -252,7 +253,7 @@ class ObjectModule:
                     rec = lineData[16+j : 16+j+8]
                     if j > 0 and module.relocations and module.relocations[-1].continuation:
                         flags = rec[0]
-                        addr = bytearrayToInteger(rec[1:4])
+                        addr = AddrDisp(bytearrayToInteger(rec[1:4]))
                         log.debug(f"RLD card#{cardNum} @{16+j}: SHORT R={prevRelId} P={prevPosId} "
                                   f"flags=0x{flags:02X} addr=0x{addr:06X}")
                         module.relocations.append(
@@ -263,7 +264,7 @@ class ObjectModule:
                     relId = bytearrayToInteger(rec[:2])
                     posId = bytearrayToInteger(rec[2:4])
                     flags = rec[4]
-                    addr = bytearrayToInteger(rec[5:8])
+                    addr = AddrDisp(bytearrayToInteger(rec[5:8]))
                     log.debug(f"RLD card#{cardNum} @{16+j}: FULL R={relId} P={posId} "
                               f"flags=0x{flags:02X} addr=0x{addr:06X} (raw: {rec[:8].hex()})")
                     module.relocations.append(
@@ -276,9 +277,9 @@ class ObjectModule:
                     continue
                 esdId = line.get("esdid", 0)
                 if (addr := line.get("entryAddress")) is not None:
-                    module.entryPoint = (esdId, addr)
+                    module.entryPoint = (esdId, AddrDisp(addr))
                 elif esdId > 0 and line.get("idrType") == '2':
-                    module.entryPoint = (esdId, 0)
+                    module.entryPoint = (esdId, AddrDisp(0))
                 if (name := line.get("entryName")):
                     module.entryName = name.strip()
 
@@ -322,7 +323,7 @@ class Linker:
         self.generatedStacks = []
         self.image = None
         self.imageBase = Addr(args.base_address)
-        self.imageSize = 0
+        self.imageSize = AddrDisp(0)
         self.entryPoint = None
         self.errors = []
         self.warnings = []
@@ -585,18 +586,22 @@ class Linker:
         """Compute imageSize from the highest SD section end."""
         highestEnd = self.imageBase
         for module in self.modules:
+            if module.external:
+                continue
             for esdId, section in module.sections.items():
                 if section.type == 'SD' and section.baseAddress is not None:
                     end = section.baseAddress + section.length
                     if end > highestEnd:
                         highestEnd = end
-        self.imageSize = int(highestEnd - self.imageBase)
+        self.imageSize = highestEnd - self.imageBase  # AddrDisp
         return self.imageSize
 
     def _highestEndInRange(self, lo, hi):
         """Find the highest section end address within [lo, hi)."""
         best = lo
         for module in self.modules:
+            if module.external:
+                continue
             for esdId, section in module.sections.items():
                 if section.type == 'SD' and section.baseAddress is not None:
                     end = section.baseAddress + section.length
@@ -620,7 +625,7 @@ class Linker:
         allSections = []
         for module in self.modules:
             for esdId, section in module.sections.items():
-                if section.type == 'SD':
+                if section.type == 'SD' and section.baseAddress is None:
                     allSections.append(section)
 
         if self.args.compact:
@@ -697,7 +702,7 @@ class Linker:
                         'module': module.name,
                         'type': 'SD',
                         'address': section.baseAddress if includeAddresses else None,
-                        'length': section.length,
+                        'length': int(section.length),
                     })
                 elif section.type == 'LD':
                     owner = self._findLDOwner(section, module)
@@ -705,7 +710,7 @@ class Linker:
                         'name': section.name,
                         'module': module.name,
                         'type': 'LD',
-                        'ldOffset': section.address,
+                        'ldOffset': int(section.address),
                         'ldOwner': owner.name if owner else None,
                     })
 
@@ -715,7 +720,7 @@ class Linker:
                 lambda s: {'name': s.name, 'address': s.baseAddress}
                            if s.baseAddress is not None else None),
             '<generated-stacks>': ('generatedStacks',
-                lambda s: {'name': s.name, 'sizeBytes': s.length}
+                lambda s: {'name': s.name, 'sizeBytes': int(s.length)}
                            if s.type == 'SD' else None),
         }
         for module in self.modules:
@@ -796,6 +801,8 @@ class Linker:
         # Copy section text to output:
         #
         for module in self.modules:
+            if module.external:
+                continue
             for esdId, section in module.sections.items():
                 if section.type != 'SD' or section.baseAddress is None:
                     continue
@@ -990,10 +997,12 @@ class Linker:
 
     def _addSyntheticSection(self, module, name, length, baseAddress=None):
         """Add an SD section to a synthetic module. Returns the new Section."""
+        length = AddrDisp(length) if not isinstance(length, AddrDisp) else length
         nextEsdId = max((s.esdId for s in module.sections.values()), default=0) + 1
-        section = Section(name, nextEsdId, 'SD', 0, length, module,
+        section = Section(name, nextEsdId, 'SD', AddrDisp(0), length, module,
                           data=bytearray(length),
-                          baseAddress=Addr(baseAddress) if baseAddress is not None else None)
+                          baseAddress=baseAddress if isinstance(baseAddress, Addr) else
+                                      Addr(baseAddress) if baseAddress is not None else None)
         module.addSection(section)
         return section
 
@@ -1023,7 +1032,7 @@ class Linker:
             if sizeHW <= 0:
                 continue
 
-            sizeBytes = sizeHW * 2
+            sizeBytes = AddrDisp.from_hw(sizeHW)
             module = self._getOrCreateSyntheticModule("<generated-stacks>", "<stacks>")
             self._addSyntheticSection(module, symName, sizeBytes)
             added = True
@@ -1059,7 +1068,92 @@ class Linker:
 
         if added:
             self._rebuildSymbolTable()
-    
+
+    def loadExternalSyms(self, path):
+        """
+        Load a JSON containing csect locations and symbol offsets, 
+        which we can use to perform relocations without loading the
+        actual object modules.
+
+        The json should be a dictionary mapping CSECT names to a struct
+        describing the CSECT and its internal symbols:
+
+         "FCMTRCLG": {
+            "start": 117148,
+            "end": 117547,
+            "type": "NONHAL",
+            "contents": {
+                "FCMBEGTL": 0,
+                "FCMENDTL": 400
+            }
+        },
+
+        adddresses and offsets are in halfwords we accept both decimal and
+        hex numbers.
+
+        We don't it at the moment, but known CSECT types are:
+        
+            BCE             | IOP code
+            MSC             | IOP code
+            DATA
+            EXCLUSIVE
+            FUNCTION
+            HAL_LIBRARY_CODE
+            HAL_LIBRARY_DATA
+            HAL_LIBRARY_ZCON
+            NONHAL
+            PATCH
+            PDE
+            PROCEDURE
+            PROGRAM
+            STACK
+            ZCON
+        """
+        with open(path) as f:
+            csectTable = json.load(f)
+
+        module = self._getOrCreateSyntheticModule("<external-syms>", "<ext-syms>")
+        module.external = True
+        added = False
+
+        for symName in list(self.undefinedSymbols):
+            entry = csectTable.get(symName)
+            if entry is None or 'start' not in entry:
+                continue
+
+            startHW = entry['start']
+            endHW = entry.get('end', startHW)
+            baseAddr = Addr.from_hw(startHW)
+            lengthBytes = AddrDisp.from_hw(endHW - startHW + 1)
+
+            section = self._addSyntheticSection(
+                module, symName, lengthBytes, baseAddress=baseAddr)
+            added = True
+            log.info(f"External sym '{symName}' @ {baseAddr}  len={lengthBytes}")
+
+            # Add LD entries for contents sub-symbols
+            contents = entry.get('contents')
+            if contents:
+                for ldName, ldVal in contents.items():
+                    if isinstance(ldVal, dict):
+                        offsetHW = ldVal.get('offset', 0)
+                    else:
+                        offsetHW = ldVal
+                    offsetAddr = AddrDisp.from_hw(offsetHW)
+                    nextEsdId = max(
+                        (s.esdId for s in module.sections.values()), default=0) + 1
+                    ld = Section(ldName, nextEsdId, 'LD',
+                                 address=offsetAddr,
+                                 module=module,
+                                 baseAddress=baseAddr + offsetAddr,
+                                 ldId=section.esdId)
+                    module.addSection(ld)
+
+        if added:
+            self._rebuildSymbolTable()
+            return True
+        return False
+
     def link(self):
         
         # Process -D defined symbols first
@@ -1071,7 +1165,13 @@ class Linker:
         
         log.info("Resolving external references...")
         allResolved = self.resolveExternals(searchLibraries=bool(self.args.library_path))
-        
+
+        # Resolve remaining undefined symbols from external JSON csect table
+        if not allResolved and self.args.external_syms:
+            log.info("Loading external symbol table...")
+            if self.loadExternalSyms(self.args.external_syms):
+                allResolved = self.resolveExternals(searchLibraries=False)
+
         # Generate stack sections for undefined @xxx symbols.
         # Sizes come from SYM STACKEND data
         if self.undefinedSymbols:
@@ -1156,19 +1256,19 @@ class Linker:
         lines.append(f"{'Address':>8}  {'Length':>8}  {'Name':<16}  {'Module':<30}")
         lines.append("-" * 70)
         
-        totalLength = 0
+        totalLength = AddrDisp(0)
         for module in self.modules:
             for esdId, section in module.sections.items():
                 if section.type != 'SD' or section.baseAddress is None:
                     continue
                 baseHw = section.baseAddress.hw
-                lengthHw = Addr(section.length).hw
+                lengthHw = section.length.hw
                 lines.append(f"{baseHw:08X}  {lengthHw:8d}  {section.name:<16}  "
                            f"{Path(module.filename).name:<30}")
                 totalLength += section.length
         
         lines.append("-" * 70)
-        lines.append(f"Total: {totalLength} bytes ({Addr(totalLength).hw} halfwords)")
+        lines.append(f"Total: {totalLength} bytes ({totalLength.hw} halfwords)")
         lines.append("")
         
         # Symbol table
@@ -1180,8 +1280,7 @@ class Linker:
         for name in sorted(self.globalSymbols.keys()):
             section, module, addr = self.globalSymbols[name]
             if addr is not None:
-                hwAddr = Addr(addr).hw
-                symLine += f"{name:<10} {hwAddr:06X}   "
+                symLine += f"{name:<10} {addr.hw:06X}   "
                 col += 1
                 if col >= 4:
                     lines.append(symLine)
@@ -1236,7 +1335,7 @@ class Linker:
         # gen .sym.json, read by gpc simulator for debugging
         data = {
             "version": version,
-            "imageSize": Addr(self.imageSize).hw,  # halfwords
+            "imageSize": self.imageSize.hw,  # halfwords
             "entryPoint": self.entryPoint.hw,
             "sections": [],
             "symbols": [],
@@ -1256,7 +1355,7 @@ class Linker:
                     data["sections"].append({
                         "name": section.name,
                         "address": section.baseAddress.hw,
-                        "size": Addr(section.length).hw,
+                        "size": section.length.hw,
                         "module": modInfo["name"]
                     })
         
@@ -1304,14 +1403,14 @@ class Linker:
         print(f"{'Address':>10}  {'HW Addr':>8}  {'Size':>8}  {'HW Size':>7}  {'Type':<4}  {'Name':<12}  {'Module'}")
         print("-" * 90)
         
-        totalBytes = 0
+        totalBytes = AddrDisp(0)
         prevEnd = self.imageBase
         
         for section, module in allSections:
             baseAddr = section.baseAddress
             hwAddr = baseAddr.hw
             length = section.length
-            hwLength = Addr(length).hw
+            hwLength = length.hw
             stype = section.type
             name = section.name[:12] if section.name else "<unnamed>"
             modName = Path(module.filename).name if module.filename else module.name
@@ -1319,7 +1418,7 @@ class Linker:
             # Show gap if there's unused space between sections
             if baseAddr > prevEnd and stype == 'SD':
                 gap = baseAddr - prevEnd
-                print(f"{'':>10}  {'':>8}  {gap:>8}  {Addr(gap).hw:>7}  {'gap':<4}  {'<unused>':<12}  ")
+                print(f"{'':>10}  {'':>8}  {gap:>8}  {gap.hw:>7}  {'gap':<4}  {'<unused>':<12}  ")
             
             if stype == 'SD':
                 print(f"0x{baseAddr:08X}  {hwAddr:>8X}  {length:>8}  {hwLength:>7}  {stype:<4}  {name:<12}  {modName}")
@@ -1330,10 +1429,10 @@ class Linker:
                 print(f"0x{baseAddr:08X}  {hwAddr:>8X}  {'':>8}  {'':>7}  {stype:<4}  {name:<12}  {modName}")
         
         print("-" * 90)
-        print(f"{'Total:':<10}  {'':>8}  {totalBytes:>8}  {Addr(totalBytes).hw:>7}")
+        print(f"{'Total:':<10}  {'':>8}  {totalBytes:>8}  {totalBytes.hw:>7}")
         
         if self.entryPoint is not None:
-            print(f"\nEntry Point: 0x{self.entryPoint:06X} (halfword address)")
+            print(f"\nEntry Point: 0x{self.entryPoint.hw:06X} (halfword address)")
         
         print("=" * 90)
     
@@ -1341,7 +1440,7 @@ class Linker:
         print(f"\nLink Summary:")
         print(f"  Modules:     {len(self.modules)}")
         print(f"  Symbols:     {len(self.globalSymbols)}")
-        print(f"  Image size:  {self.imageSize} bytes ({Addr(self.imageSize).hw} halfwords)")
+        print(f"  Image size:  {self.imageSize} bytes ({self.imageSize.hw} halfwords)")
         
         if self.entryPoint is not None:
             print(f"  Entry point: 0x{self.entryPoint.hw:06X} (halfword address)")
