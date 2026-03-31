@@ -116,10 +116,8 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         b = image_b[offset : offset + length]
         checked += 1
 
-        if a == b:
-            print(f"  OK:   {padded} @ {addr.x} ({size.hw} halfwords)")
-        else:
-            diff_positions = []
+        diff_positions = []
+        if a != b:
             for hi in range(size.hw):
                 bo = hi * 2
                 hw_a = (a[bo] << 8) | a[bo + 1] if bo + 1 < len(a) else a[bo] << 8
@@ -129,6 +127,9 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
                         continue
                     diff_positions.append((addr + Addr(hi * 2), hw_a, hw_b))
 
+        if not diff_positions:
+            print(f"  OK:   {padded} @ {addr.x} ({size.hw} halfwords)")
+        else:
             print(
                 f"  FAIL: {padded} @ {addr.x} ({size.hw} halfwords)"
                 f" — {len(diff_positions)} halfwords differ"
