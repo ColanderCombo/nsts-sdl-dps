@@ -1,6 +1,4 @@
 
-** The initial import of this repository is still in progress **
-
 Toolchain & testing setup for HAL/S on the AP-101 computer
 ----------------------------------------------------------
 
