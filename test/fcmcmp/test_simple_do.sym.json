@@ -1,0 +1,580 @@
+{
+  "version": "0.1",
+  "imageSize": 65772,
+  "entryPoint": 65770,
+  "sections": [
+    {
+      "name": "#QCASPV",
+      "address": 320,
+      "size": 2,
+      "module": "#QCASPV"
+    },
+    {
+      "name": "#QCASV",
+      "address": 322,
+      "size": 2,
+      "module": "#QCASV"
+    },
+    {
+      "name": "#QCOUT",
+      "address": 324,
+      "size": 2,
+      "module": "#QCOUT"
+    },
+    {
+      "name": "#QHOUT",
+      "address": 326,
+      "size": 2,
+      "module": "#QHOUT"
+    },
+    {
+      "name": "#QIOINIT",
+      "address": 328,
+      "size": 2,
+      "module": "#QIOINIT"
+    },
+    {
+      "name": "#QOUTER1",
+      "address": 330,
+      "size": 2,
+      "module": "#QOUTER1"
+    },
+    {
+      "name": "#DTESTSI",
+      "address": 332,
+      "size": 13,
+      "module": "test_simple_do"
+    },
+    {
+      "name": "#ETESTSI",
+      "address": 346,
+      "size": 6,
+      "module": "test_simple_do"
+    },
+    {
+      "name": "#LCASPV",
+      "address": 352,
+      "size": 2,
+      "module": "CASPV"
+    },
+    {
+      "name": "#LIOINIT",
+      "address": 354,
+      "size": 131,
+      "module": "IOINIT"
+    },
+    {
+      "name": "@0TESTSI",
+      "address": 486,
+      "size": 40,
+      "module": "<generated-stacks>"
+    },
+    {
+      "name": "$0TESTSI",
+      "address": 65536,
+      "size": 35,
+      "module": "test_simple_do"
+    },
+    {
+      "name": "CASPV",
+      "address": 65572,
+      "size": 64,
+      "module": "CASPV"
+    },
+    {
+      "name": "CASV",
+      "address": 65636,
+      "size": 28,
+      "module": "CASV"
+    },
+    {
+      "name": "COUTP",
+      "address": 65664,
+      "size": 20,
+      "module": "COUTP"
+    },
+    {
+      "name": "IOINIT",
+      "address": 65684,
+      "size": 86,
+      "module": "IOINIT"
+    },
+    {
+      "name": "START",
+      "address": 65770,
+      "size": 2,
+      "module": "test_simple_do"
+    }
+  ],
+  "symbols": [
+    {
+      "name": "#QCASPV",
+      "address": 320,
+      "type": "section",
+      "section": null,
+      "module": "#QCASPV"
+    },
+    {
+      "name": "#QCASV",
+      "address": 322,
+      "type": "section",
+      "section": null,
+      "module": "#QCASV"
+    },
+    {
+      "name": "#QCOUT",
+      "address": 324,
+      "type": "section",
+      "section": null,
+      "module": "#QCOUT"
+    },
+    {
+      "name": "#QHOUT",
+      "address": 326,
+      "type": "section",
+      "section": null,
+      "module": "#QHOUT"
+    },
+    {
+      "name": "#QIOINIT",
+      "address": 328,
+      "type": "section",
+      "section": null,
+      "module": "#QIOINIT"
+    },
+    {
+      "name": "#QOUTER1",
+      "address": 330,
+      "type": "section",
+      "section": null,
+      "module": "#QOUTER1"
+    },
+    {
+      "name": "#DTESTSI",
+      "address": 332,
+      "type": "section",
+      "section": null,
+      "module": "test_simple_do"
+    },
+    {
+      "name": "#ETESTSI",
+      "address": 346,
+      "type": "section",
+      "section": null,
+      "module": "test_simple_do"
+    },
+    {
+      "name": "#LCASPV",
+      "address": 352,
+      "type": "section",
+      "section": null,
+      "module": "CASPV"
+    },
+    {
+      "name": "#LIOINIT",
+      "address": 354,
+      "type": "section",
+      "section": null,
+      "module": "IOINIT"
+    },
+    {
+      "name": "IOCODE",
+      "address": 354,
+      "type": "entry",
+      "section": "IOCODE",
+      "module": "IOINIT"
+    },
+    {
+      "name": "IOBUF",
+      "address": 356,
+      "type": "entry",
+      "section": "IOBUF",
+      "module": "IOINIT"
+    },
+    {
+      "name": "@0TESTSI",
+      "address": 486,
+      "type": "section",
+      "section": null,
+      "module": "<generated-stacks>"
+    },
+    {
+      "name": "$0TESTSI",
+      "address": 65536,
+      "type": "section",
+      "section": null,
+      "module": "test_simple_do"
+    },
+    {
+      "name": "CASPV",
+      "address": 65572,
+      "type": "section",
+      "section": null,
+      "module": "CASPV"
+    },
+    {
+      "name": "CASP",
+      "address": 65573,
+      "type": "entry",
+      "section": "CASP",
+      "module": "CASPV"
+    },
+    {
+      "name": "CASV",
+      "address": 65636,
+      "type": "section",
+      "section": null,
+      "module": "CASV"
+    },
+    {
+      "name": "CAS",
+      "address": 65637,
+      "type": "entry",
+      "section": "CAS",
+      "module": "CASV"
+    },
+    {
+      "name": "COUTP",
+      "address": 65664,
+      "type": "section",
+      "section": null,
+      "module": "COUTP"
+    },
+    {
+      "name": "COUT",
+      "address": 65671,
+      "type": "entry",
+      "section": "COUT",
+      "module": "COUTP"
+    },
+    {
+      "name": "IOINIT",
+      "address": 65684,
+      "type": "section",
+      "section": null,
+      "module": "IOINIT"
+    },
+    {
+      "name": "HOUT",
+      "address": 65693,
+      "type": "entry",
+      "section": "HOUT",
+      "module": "IOINIT"
+    },
+    {
+      "name": "OUTER1",
+      "address": 65703,
+      "type": "entry",
+      "section": "OUTER1",
+      "module": "IOINIT"
+    },
+    {
+      "name": "IOUT",
+      "address": 65706,
+      "type": "entry",
+      "section": "IOUT",
+      "module": "IOINIT"
+    },
+    {
+      "name": "EOUT",
+      "address": 65713,
+      "type": "entry",
+      "section": "EOUT",
+      "module": "IOINIT"
+    },
+    {
+      "name": "DOUT",
+      "address": 65720,
+      "type": "entry",
+      "section": "DOUT",
+      "module": "IOINIT"
+    },
+    {
+      "name": "BOUT",
+      "address": 65727,
+      "type": "entry",
+      "section": "BOUT",
+      "module": "IOINIT"
+    },
+    {
+      "name": "INTRAP",
+      "address": 65736,
+      "type": "entry",
+      "section": "INTRAP",
+      "module": "IOINIT"
+    },
+    {
+      "name": "SKIP",
+      "address": 65737,
+      "type": "entry",
+      "section": "SKIP",
+      "module": "IOINIT"
+    },
+    {
+      "name": "LINE",
+      "address": 65749,
+      "type": "entry",
+      "section": "LINE",
+      "module": "IOINIT"
+    },
+    {
+      "name": "COLUMN",
+      "address": 65754,
+      "type": "entry",
+      "section": "COLUMN",
+      "module": "IOINIT"
+    },
+    {
+      "name": "TAB",
+      "address": 65759,
+      "type": "entry",
+      "section": "TAB",
+      "module": "IOINIT"
+    },
+    {
+      "name": "PAGE",
+      "address": 65764,
+      "type": "entry",
+      "section": "PAGE",
+      "module": "IOINIT"
+    },
+    {
+      "name": "START",
+      "address": 65770,
+      "type": "section",
+      "section": null,
+      "module": "test_simple_do"
+    }
+  ],
+  "modules": [
+    {
+      "name": "test_simple_do",
+      "filename": "build/halmat_tests/test_simple_do.obj"
+    },
+    {
+      "name": "test_simple_do",
+      "filename": "build/halmat_tests/test_simple_do.obj"
+    },
+    {
+      "name": "#QIOINIT",
+      "filename": "build/runtime/ZCON/#QIOINIT.obj"
+    },
+    {
+      "name": "#QCOUT",
+      "filename": "build/runtime/ZCON/#QCOUT.obj"
+    },
+    {
+      "name": "#QHOUT",
+      "filename": "build/runtime/ZCON/#QHOUT.obj"
+    },
+    {
+      "name": "IOINIT",
+      "filename": "build/runtime/RUN/IOINIT.obj"
+    },
+    {
+      "name": "COUTP",
+      "filename": "build/runtime/RUN/COUTP.obj"
+    },
+    {
+      "name": "#QCASV",
+      "filename": "build/runtime/ZCON/#QCASV.obj"
+    },
+    {
+      "name": "#QOUTER1",
+      "filename": "build/runtime/ZCON/#QOUTER1.obj"
+    },
+    {
+      "name": "#QCASPV",
+      "filename": "build/runtime/ZCON/#QCASPV.obj"
+    },
+    {
+      "name": "CASV",
+      "filename": "build/runtime/RUN/CASV.obj"
+    },
+    {
+      "name": "CASPV",
+      "filename": "build/runtime/RUN/CASPV.obj"
+    },
+    {
+      "name": "<generated-stacks>",
+      "filename": "<generated-stacks>"
+    }
+  ],
+  "relocations": [
+    {
+      "address": 320,
+      "target": 65572,
+      "symbol": "CASPV"
+    },
+    {
+      "address": 322,
+      "target": 65636,
+      "symbol": "CASV"
+    },
+    {
+      "address": 324,
+      "target": 65671,
+      "symbol": "COUT"
+    },
+    {
+      "address": 326,
+      "target": 65693,
+      "symbol": "HOUT"
+    },
+    {
+      "address": 328,
+      "target": 65684,
+      "symbol": "IOINIT"
+    },
+    {
+      "address": 330,
+      "target": 65703,
+      "symbol": "OUTER1"
+    },
+    {
+      "address": 348,
+      "target": 67328,
+      "symbol": "START+616"
+    },
+    {
+      "address": 65537,
+      "target": 486,
+      "symbol": "@0TESTSI"
+    },
+    {
+      "address": 65539,
+      "target": 332,
+      "symbol": "#DTESTSI"
+    },
+    {
+      "address": 65556,
+      "target": 14664,
+      "symbol": "@0TESTSI+3762"
+    },
+    {
+      "address": 65559,
+      "target": 14660,
+      "symbol": "@0TESTSI+375E"
+    },
+    {
+      "address": 65562,
+      "target": 14662,
+      "symbol": "@0TESTSI+3760"
+    },
+    {
+      "address": 65565,
+      "target": 14660,
+      "symbol": "@0TESTSI+375E"
+    },
+    {
+      "address": 65568,
+      "target": 14662,
+      "symbol": "@0TESTSI+3760"
+    },
+    {
+      "address": 65578,
+      "target": 352,
+      "symbol": "#LCASPV"
+    },
+    {
+      "address": 65586,
+      "target": 352,
+      "symbol": "#LCASPV"
+    },
+    {
+      "address": 65595,
+      "target": 352,
+      "symbol": "#LCASPV"
+    },
+    {
+      "address": 65667,
+      "target": 356,
+      "symbol": "IOBUF"
+    },
+    {
+      "address": 65669,
+      "target": 14656,
+      "symbol": "@0TESTSI+375A"
+    },
+    {
+      "address": 65674,
+      "target": 356,
+      "symbol": "IOBUF"
+    },
+    {
+      "address": 65676,
+      "target": 14658,
+      "symbol": "@0TESTSI+375C"
+    },
+    {
+      "address": 65680,
+      "target": 354,
+      "symbol": "IOCODE"
+    },
+    {
+      "address": 65682,
+      "target": 14666,
+      "symbol": "@0TESTSI+3764"
+    },
+    {
+      "address": 65687,
+      "target": 356,
+      "symbol": "IOBUF"
+    },
+    {
+      "address": 65689,
+      "target": 354,
+      "symbol": "IOCODE"
+    },
+    {
+      "address": 65696,
+      "target": 356,
+      "symbol": "IOBUF"
+    },
+    {
+      "address": 65700,
+      "target": 354,
+      "symbol": "IOCODE"
+    },
+    {
+      "address": 65709,
+      "target": 356,
+      "symbol": "IOBUF"
+    },
+    {
+      "address": 65716,
+      "target": 356,
+      "symbol": "IOBUF"
+    },
+    {
+      "address": 65723,
+      "target": 356,
+      "symbol": "IOBUF"
+    },
+    {
+      "address": 65730,
+      "target": 358,
+      "symbol": "IOBUF+2"
+    },
+    {
+      "address": 65732,
+      "target": 356,
+      "symbol": "IOBUF"
+    },
+    {
+      "address": 65742,
+      "target": 356,
+      "symbol": "IOBUF"
+    },
+    {
+      "address": 65744,
+      "target": 354,
+      "symbol": "IOCODE"
+    },
+    {
+      "address": 65771,
+      "target": 65536,
+      "symbol": "$0TESTSI"
+    }
+  ]
+}

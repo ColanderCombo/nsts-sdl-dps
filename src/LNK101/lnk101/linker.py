@@ -327,6 +327,7 @@ class Linker:
         self.entryPoint = None
         self.errors = []
         self.warnings = []
+        self.appliedRelocations = []  # populated by applyRelocations()
     
     def loadInputFiles(self):
         """Load all input files and explicit libraries from args."""
@@ -524,8 +525,7 @@ class Linker:
             cat = section.zone
             log.info(f"  {section.name:8s} @ 0x{section.baseAddress:06X} "
                      f"({section.length} bytes){' [' + label + ']' if label else ''}")
-            log.debug(f"Section '{section.name}' ({cat}) @ 0x{section.baseAddress:06X}(byte)/"
-                  f"0x{section.baseAddress.hw:04X}(hw) "
+            log.debug(f"Section '{section.name}' ({cat}) @ {section.baseAddress.x} "
                   f"len=0x{section.length:X}(bytes) end=0x{currentAddr:06X}(byte)")
         return currentAddr
 
@@ -561,16 +561,15 @@ class Linker:
                 ldOffset = section.address - owner.address
                 section.baseAddress = owner.baseAddress + ldOffset
                 log.debug(f"Label '{section.name}' -> owner '{owner.name}' "
-                      f"addr=0x{section.baseAddress:06X}(byte)/0x{section.baseAddress.hw:04X}(hw) "
-                      f"(owner 0x{owner.baseAddress:06X} + offset 0x{ldOffset:X})")
+                      f"addr={section.baseAddress.x} "
+                      f"(owner {owner.baseAddress.x} + offset 0x{ldOffset:X})")
 
     def _updateGlobalSymbols(self):
         for name in self.globalSymbols:
             section, module, _ = self.globalSymbols[name]
             if section.baseAddress is not None:
                 self.globalSymbols[name] = (section, module, section.baseAddress)
-                log.debug(f"Global symbol '{name}' -> addr=0x{section.baseAddress:06X}(byte)/"
-                      f"0x{section.baseAddress.hw:04X}(hw)")
+                log.debug(f"Global symbol '{name}' -> addr={section.baseAddress.x}")
 
     @staticmethod
     def _classifySections(sections):
@@ -884,7 +883,7 @@ class Linker:
 
                 log.debug(f"RELOC {module.name}: "
                       f"offset=0x{imageOffset:06X}(byte) flags=0x{reloc.flags:02X} "
-                      f"target='{targetName}' addr=0x{targetAddr:06X}(byte)/0x{targetAddr.hw:05X}(hw)")
+                      f"target='{targetName}' addr={targetAddr.x}")
 
                 # Sector-register-only relocations (0x40=DSR, 0x20=BSR):
                 # Write ONLY sector bits into hw2; do NOT add address.
@@ -917,6 +916,25 @@ class Linker:
                     if hw2Off + 1 < len(self.image):
                         hw2 = self._imgPatchHW(hw2Off, 0xFFF0, sector & 0xF)
                         log.debug(f"  -> ZCON DSR fixup: ptrDSR={sector} -> 0x{hw2:04X}")
+
+                # Record the relocation: read back the final value from the
+                # image and decode to an absolute halfword address so we can
+                # resolve it to a specific symbol (not just the CSECT).
+                if flagType not in (0x40, 0x20):  # skip sector-only
+                    length = self._RELOC_LEN.get(reloc.flags,
+                                2 if reloc.flags in self._RELOC_LEN_2
+                                else reloc.length)
+                    finalVal = int.from_bytes(
+                        self.image[imageOffset:imageOffset + length], 'big')
+                    if length == 2:
+                        # Decode sector encoding: 0x8000|offset → sector*0x8000+offset
+                        if finalVal & 0x8000:
+                            resolvedHW = sector * 0x8000 + (finalVal & 0x7FFF)
+                        else:
+                            resolvedHW = finalVal
+                    else:
+                        resolvedHW = finalVal  # 4-byte ACON: raw halfword addr
+                    self.appliedRelocations.append((imageOffset.hw, resolvedHW))
 
         return relocErrors == 0
     
@@ -1307,7 +1325,7 @@ class Linker:
         for name in sorted(self.globalSymbols.keys()):
             section, module, addr = self.globalSymbols[name]
             if addr is not None:
-                symLine += f"{name:<10} {addr.hw:06X}   "
+                symLine += f"{name:<10} {addr.x}   "
                 col += 1
                 if col >= 4:
                     lines.append(symLine)
@@ -1329,7 +1347,7 @@ class Linker:
         
         # Entry point
         if self.entryPoint is not None:
-            lines.append(f"Entry Point: 0x{self.entryPoint.hw:06X} (halfword address)")
+            lines.append(f"Entry Point: {self.entryPoint.x}")
         
         lines.append("")
         
@@ -1404,10 +1422,42 @@ class Linker:
         
         # Sort symbols by address
         data["symbols"].sort(key=lambda x: x["address"])
-        
+
+        # Applied relocations: resolve each target hw address to the most
+        # specific symbol (LD label preferred over SD csect).
+        # Build sorted list of (hwAddr, name) for bisect lookup.
+        symAddrs = sorted(
+            (byteAddr.hw, name)
+            for name, (section, module, byteAddr) in self.globalSymbols.items()
+            if byteAddr is not None
+        )
+        symHWs = [a for a, _ in symAddrs]
+
+        import bisect
+        def _resolveSymbol(targetHW):
+            """Find the symbol whose address is closest to (and <=) targetHW.
+            Returns 'NAME' or 'NAME+offset' if there's a displacement."""
+            idx = bisect.bisect_right(symHWs, targetHW) - 1
+            if idx >= 0:
+                symAddr, symName = symAddrs[idx]
+                disp = targetHW - symAddr
+                if disp:
+                    return f"{symName}+{disp:X}"
+                return symName
+            return None
+
+        data["relocations"] = []
+        for hwAddr, targetHW in sorted(self.appliedRelocations):
+            sym = _resolveSymbol(targetHW)
+            data["relocations"].append({
+                "address": hwAddr,
+                "target": targetHW,
+                "symbol": sym
+            })
+
         with open(outputPath, 'w') as f:
             json.dump(data, f, indent=2)
-        
+
         log.info(f"Wrote symbol table to {outputPath}")
 
     def saveExternalSyms(self, outputPath):
@@ -1493,7 +1543,7 @@ class Linker:
         print(f"{'Total:':<10}  {'':>8}  {totalBytes:>8}  {totalBytes.hw:>7}")
         
         if self.entryPoint is not None:
-            print(f"\nEntry Point: 0x{self.entryPoint.hw:06X} (halfword address)")
+            print(f"\nEntry Point: {self.entryPoint.x}")
         
         print("=" * 90)
     
@@ -1504,7 +1554,7 @@ class Linker:
         print(f"  Image size:  {self.imageSize} bytes ({self.imageSize.hw} halfwords)")
         
         if self.entryPoint is not None:
-            print(f"  Entry point: 0x{self.entryPoint.hw:06X} (halfword address)")
+            print(f"  Entry point: {self.entryPoint.x}")
         
         if self.undefinedSymbols:
             print(f"  Undefined:   {len(self.undefinedSymbols)}")

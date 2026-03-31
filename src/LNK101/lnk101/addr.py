@@ -106,6 +106,11 @@ class Addr:
         return self._b
     def __bool__(self):
         return self._b != 0
+    @property
+    def x(self):
+        """5-digit uppercase hex halfword string, e.g. '100EA'."""
+        return f"{self._b >> 1:05X}"
+
     def __repr__(self):
         return f"Addr(0x{self._b:06X}/hw:{self._b >> 1:05X})"
     def __format__(self, spec):
