@@ -356,44 +356,44 @@
       "filename": "build/halmat_tests/test_simple_do.obj"
     },
     {
-      "name": "#QIOINIT",
-      "filename": "build/runtime/ZCON/#QIOINIT.obj"
-    },
-    {
       "name": "#QCOUT",
       "filename": "build/runtime/ZCON/#QCOUT.obj"
+    },
+    {
+      "name": "#QIOINIT",
+      "filename": "build/runtime/ZCON/#QIOINIT.obj"
     },
     {
       "name": "#QHOUT",
       "filename": "build/runtime/ZCON/#QHOUT.obj"
     },
     {
-      "name": "IOINIT",
-      "filename": "build/runtime/RUN/IOINIT.obj"
-    },
-    {
       "name": "COUTP",
       "filename": "build/runtime/RUN/COUTP.obj"
+    },
+    {
+      "name": "IOINIT",
+      "filename": "build/runtime/RUN/IOINIT.obj"
     },
     {
       "name": "#QCASV",
       "filename": "build/runtime/ZCON/#QCASV.obj"
     },
     {
-      "name": "#QOUTER1",
-      "filename": "build/runtime/ZCON/#QOUTER1.obj"
-    },
-    {
       "name": "#QCASPV",
       "filename": "build/runtime/ZCON/#QCASPV.obj"
     },
     {
-      "name": "CASV",
-      "filename": "build/runtime/RUN/CASV.obj"
+      "name": "#QOUTER1",
+      "filename": "build/runtime/ZCON/#QOUTER1.obj"
     },
     {
       "name": "CASPV",
       "filename": "build/runtime/RUN/CASPV.obj"
+    },
+    {
+      "name": "CASV",
+      "filename": "build/runtime/RUN/CASV.obj"
     },
     {
       "name": "<generated-stacks>",
@@ -433,8 +433,8 @@
     },
     {
       "address": 348,
-      "target": 67328,
-      "symbol": "START+616"
+      "target": 65536,
+      "symbol": "$0TESTSI"
     },
     {
       "address": 65537,

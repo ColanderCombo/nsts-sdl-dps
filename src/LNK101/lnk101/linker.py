@@ -938,9 +938,15 @@ class Linker:
 
         return relocErrors == 0
     
-    # Relocation length by flag value (ACON=4, YCON/ZCON=2)
-    _RELOC_LEN = {0x10: 4, 0x90: 4}
-    _RELOC_LEN_2 = frozenset([0x00, 0x04, 0x50, 0x80, 0xA0, 0xC0, 0xD0])
+    # PFS Relocation length by flag value.
+    # PFS compiler flag byte = (type << 4) | (LL << 2) | direction | continuation
+    # Type 0 = YCON -> 2-byte halfword address
+    # Type 1 = ZCON -> 2-byte halfword (w/optional separate fixup card, if required)
+    # Type 2 = BSR-only sector fixup
+    # Type 4 = DSR-only sector fixup
+    # Type 5 = ZCON data addresss
+    _RELOC_LEN = {0x1C: 4, 0x9C: 4}
+    _RELOC_LEN_2 = frozenset([0x00, 0x04, 0x10, 0x50, 0x80, 0x90, 0xA0, 0xC0, 0xD0])
 
     def _applyRelocationValue(self, imageOffset, targetAddr, reloc):
         """Apply a standard (non-sector-only) relocation to the image.
