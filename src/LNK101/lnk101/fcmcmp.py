@@ -86,7 +86,8 @@ def load_sections(sym_json_path, modules=None, include_all=False):
     return sections
 
 
-def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld):
+def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
+            equiv=None):
     failures = 0
     checked = 0
 
@@ -124,6 +125,8 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld):
                 hw_a = (a[bo] << 8) | a[bo + 1] if bo + 1 < len(a) else a[bo] << 8
                 hw_b = (b[bo] << 8) | b[bo + 1] if bo + 1 < len(b) else b[bo] << 8
                 if hw_a != hw_b:
+                    if equiv and hw_a in equiv and hw_b in equiv:
+                        continue
                     diff_positions.append((addr + Addr(hi * 2), hw_a, hw_b))
 
             print(
@@ -188,9 +191,24 @@ def main(
             exists=True,
         ),
     ] = None,
+    equiv: Annotated[
+        str,
+        typer.Option(
+            "--equiv",
+            help="Comma-separated hex halfwords treated as equivalent "
+                 "(e.g. 0000,C6C6,C9FB). Pass '' or a single value to disable.",
+        ),
+    ] = "0000,C6C6,C9FB",
 ):
     """Compare two FCM images section-by-section."""
     modules = set(module) if module else None
+
+    # Parse equiv set
+    equiv_set = None
+    if equiv:
+        vals = [int(v, 16) for v in equiv.split(",") if v.strip()]
+        if len(vals) >= 2:
+            equiv_set = frozenset(vals)
 
     sections = load_sections(sym_json, modules=modules, include_all=all)
     addr_to_sym, addr_to_rld = load_annotations(sym_json, csect_table)
@@ -205,7 +223,8 @@ def main(
         )
 
     checked, failures = compare(
-        sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld
+        sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
+        equiv=equiv_set,
     )
 
     if failures:
