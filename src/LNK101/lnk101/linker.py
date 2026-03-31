@@ -904,8 +904,8 @@ class Linker:
                 else:
                     self._applyRelocationValue(imageOffset, targetAddr, reloc)
 
-                # ZCON code-address (0x04): patch BSR in hw2 if CB bit is set
-                if flagType == 0x04 and sector > 0:
+                # ZCON code-address (0x04, 0x10): patch BSR in hw2 if CB bit is set
+                if flagType in (0x04, 0x10) and sector > 0:
                     if hw2Off + 1 < len(self.image):
                         if self._imgReadHW(hw2Off) & 0x0200:  # CB bit
                             hw2 = self._imgPatchHW(hw2Off, 0xFF8F, (sector & 0x7) << 4)
