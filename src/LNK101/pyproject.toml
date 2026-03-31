@@ -13,3 +13,4 @@ dependencies = ["pyyaml", "typer>=0.9"]
 [project.scripts]
 lnk101 = "lnk101.cli:main"
 fcmcmp = "lnk101.fcmcmp:app"
+ibmobjdump = "lnk101.objdump:app"
