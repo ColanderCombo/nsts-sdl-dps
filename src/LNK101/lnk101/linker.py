@@ -12,7 +12,7 @@ import os
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from .readObject101S import readObject101S, bytearrayToAscii, bytearrayToInteger
 from .addr import Addr, AddrDisp
 from .linkconfig import LinkConfig
@@ -318,7 +318,7 @@ class Linker:
         self.args = args
         self.modules = [] 
         self.globalSymbols = OrderedDict()  # name -> (section, module, byteAddress)
-        self.undefinedSymbols = set()
+        self.undefinedSymbols = defaultdict(set)  # name -> set of (filename, csect_or_None)
         self.stackSizes = {}
         self.generatedStacks = []
         self.image = None
@@ -464,8 +464,20 @@ class Linker:
         for module in self.modules:
             for esdId, ext in module.externals.items():
                 if ext.name not in self.globalSymbols:
-                    self.undefinedSymbols.add(ext.name)
-    
+                    self._addUndefRef(ext.name, module, esdId)
+
+    def _addUndefRef(self, symName, module, esdId):
+        """Record that module references undefined symbol symName (ESD ID esdId).
+        Uses RLD entries to identify which CSECT(s) contain the reference."""
+        csects = {module.sections[r.posId].name.strip()
+                  for r in module.relocations
+                  if r.relId == esdId and r.posId in module.sections}
+        if csects:
+            for csect in csects:
+                self.undefinedSymbols[symName].add((module.filename, csect))
+        else:
+            self.undefinedSymbols[symName].add((module.filename, None))
+
     def resolveExternals(self, searchLibraries=True):
         """
         Resolve external references against the global symbol table.
@@ -506,7 +518,7 @@ class Linker:
                     ext.resolvedSection = section
                 else:
                     if not ext.weak:
-                        self.undefinedSymbols.add(ext.name)
+                        self._addUndefRef(ext.name, module, esdId)
         
         return len(self.undefinedSymbols) == 0
     
@@ -1234,7 +1246,9 @@ class Linker:
         
         if not allResolved:
             for sym in sorted(self.undefinedSymbols):
-                self.errors.append(f"Undefined symbol: {sym}")
+                self.errors.append(
+                    f"Undefined symbol: {sym}, referenced by "
+                    f"{self._formatUndefRefs(self.undefinedSymbols[sym])}")
             
             if not self.args.force:
                 return False
@@ -1292,6 +1306,25 @@ class Linker:
         
         log.info(f"Wrote {len(self.image)} bytes to {outputPath}")
     
+    @staticmethod
+    def _formatUndefRefs(refs, use_basename=False):
+        """Format undefined symbol references grouped by module.
+        refs is a set of (filename, csect_or_None) tuples."""
+        by_file = {}
+        for filename, csect in refs:
+            by_file.setdefault(filename, set())
+            if csect:
+                by_file[filename].add(csect)
+        parts = []
+        for filename in sorted(by_file):
+            name = Path(filename).name if use_basename else filename
+            csects = sorted(by_file[filename])
+            if csects:
+                parts.append(f"{name}({', '.join(csects)})")
+            else:
+                parts.append(name)
+        return ', '.join(parts)
+
     def saveListing(self, outputPath):
         """Generate a listing file showing the linked memory layout."""
         
@@ -1348,7 +1381,8 @@ class Linker:
             lines.append("UNDEFINED SYMBOLS")
             lines.append("-" * 70)
             for sym in sorted(self.undefinedSymbols):
-                lines.append(f"  {sym}")
+                lines.append(f"  {sym:<16}  referenced by: "
+                             f"{self._formatUndefRefs(self.undefinedSymbols[sym], use_basename=True)}")
             lines.append("")
         
         # Entry point
