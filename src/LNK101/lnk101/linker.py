@@ -348,7 +348,8 @@ class Linker:
         self.entryPoint = None
         self.errors = []
         self.warnings = []
-        self.appliedRelocations = []  # populated by applyRelocations()
+        self.appliedRelocations = []    # populated by applyRelocations()
+        self.unresolvedRelocations = [] # populated by applyRelocations()
     
     def loadInputFiles(self):
         """Load all input files and explicit libraries from args."""
@@ -897,17 +898,39 @@ class Linker:
                 
                 if not resolved and not self.args.force:
                     continue
-                
+
                 # Calculate the image offset for this relocation (in bytes)
                 # RLD address field contains byte offsets relative to P section
                 # All internal addresses are in bytes, so this is a direct calculation
                 imageOffset = posSection.baseAddress - self.imageBase + reloc.address
-                
+
                 if imageOffset < 0 or imageOffset >= len(self.image):
                     self.warnings.append(
                         f"{module.filename}: Relocation address out of bounds: 0x{imageOffset:06X}")
                     continue
-                
+
+                # Record unresolved relocations for analysis
+                if not resolved and reloc.relId in module.externals:
+                    ext = module.externals[reloc.relId]
+                    length = self._RELOC_LEN.get(reloc.flags,
+                                2 if reloc.flags in self._RELOC_LEN_2
+                                else reloc.length)
+                    existing = int.from_bytes(
+                        self.image[imageOffset:imageOffset + length], 'big')
+                    self.unresolvedRelocations.append({
+                        "symbol": ext.name,
+                        "imageOffset": int(imageOffset),
+                        "imageOffsetHW": imageOffset.hw if hasattr(imageOffset, 'hw') else int(imageOffset) // 2,
+                        "flags": reloc.flags,
+                        "length": length,
+                        "sign": reloc.sign,
+                        "direction": reloc.direction,
+                        "section": posSection.name.strip(),
+                        "sectionOffset": int(reloc.address),
+                        "module": Path(module.filename).name,
+                        "existing": existing,
+                    })
+
                 targetName = "???"
                 if reloc.relId in module.sections:
                     targetName = module.sections[reloc.relId].name
@@ -1515,6 +1538,10 @@ class Linker:
                 "target": targetHW,
                 "symbol": sym
             })
+
+        if self.unresolvedRelocations:
+            data["unresolvedRelocations"] = sorted(
+                self.unresolvedRelocations, key=lambda r: r["imageOffset"])
 
         with open(outputPath, 'w') as f:
             json.dump(data, f, indent=2)

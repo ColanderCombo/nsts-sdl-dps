@@ -49,6 +49,7 @@ _configure_wrapper(gpc-dbg.sh.in   gpc-dbg)
 _configure_wrapper(gpc-dump.sh.in  gpc-dump)
 _configure_wrapper(gpc-gui.sh.in   gpc-gui)
 _configure_wrapper(fcmcmp.sh.in    fcmcmp)
+_configure_wrapper(rldanalyze.sh.in rldanalyze)
 _configure_wrapper(ibmobjdump.sh.in ibmobjdump)
 
 # Install-tree wrappers: reconfigure with install-prefix paths

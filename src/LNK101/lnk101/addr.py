@@ -117,6 +117,58 @@ class Addr:
         return format(self._b, spec)
 
 
+#=============================================================================
+# AP-101 encoding helpers
+#=============================================================================
+
+def sector_decode(hw_value):
+    """Decode a 16-bit sector-encoded halfword to an absolute halfword address.
+    Sector 0: value as-is.  Sector 1+: bit 15 set, offset in bits 14-0."""
+    if hw_value & 0x8000:
+        return 0x8000 + (hw_value & 0x7FFF)
+    return hw_value
+
+
+def decode_zcon_hw1(hw1):
+    """Decode the second halfword of a ZCON entry.
+    Returns dict with XC, C, CB, BSR, DSR fields."""
+    return {
+        "XC":  (hw1 >> 9) & 1,
+        "C":   (hw1 >> 8) & 1,
+        "CB":  (hw1 >> 9) & 1,   # CB = XC in ZCON context
+        "BSR": (hw1 >> 4) & 0x7,
+        "DSR":  hw1 & 0xF,
+    }
+
+
+def format_zcon_fields(zcon):
+    """Format ZCON decoded fields for display."""
+    return (f"XC={zcon['XC']} C={zcon['C']} "
+            f"BSR={zcon['BSR']} DSR={zcon['DSR']}")
+
+
+# RLD flag type names (bits 6-4 of flag byte, sign bit masked)
+RLD_FLAG_TYPES = {
+    0x00: "YCON",
+    0x04: "ZCON/code",
+    0x10: "ZCON/addr",
+    0x1C: "ACON",
+    0x20: "BSR-only",
+    0x40: "DSR-only",
+    0x50: "ZCON/data",
+}
+
+
+def rld_flag_type_name(flags):
+    """Decode the RLD flag type field to a human-readable name."""
+    ft = flags & 0x7F
+    if ft in RLD_FLAG_TYPES:
+        return RLD_FLAG_TYPES[ft]
+    # Fall back to just the type bits
+    typ = (flags >> 4) & 0x07
+    return RLD_FLAG_TYPES.get(typ << 4, f"type={ft:02X}")
+
+
 class AddrDisp:
     #
     # A signed displacement (distance) in bytes between two addresses.

@@ -9,7 +9,7 @@ from typing import Annotated
 
 import typer
 
-from .addr import Addr, AddrDisp
+from .addr import Addr, AddrDisp, rld_flag_type_name
 from .readObject101S import readObject101S, bytearrayToAscii, bytearrayToInteger
 
 app = typer.Typer(
@@ -23,23 +23,9 @@ app = typer.Typer(
 _SYM_TYPES = ["SD", "LD", "ER", "PC", "CM", "XD/PR", "WX",
               "SD(Q)", "PC(Q)", "CM(Q)"]
 
-_RLD_TYPE_NAMES = {
-    0x00: "YCON",
-    0x04: "ZCON/code",
-    0x10: "ZCON/addr",
-    0x1C: "ACON",
-    0x20: "BSR-only",
-    0x40: "DSR-only",
-    0x50: "ZCON/data",
-}
-
 
 def _rld_type(flags):
-    ft = flags & 0x7F
-    typ = (flags >> 4) & 0x07
-    name = _RLD_TYPE_NAMES.get(ft)
-    if name is None:
-        name = f"type={ft:02X}"
+    name = rld_flag_type_name(flags)
     sign = "-" if flags & 0x80 else "+"
     return f"{name}({sign})"
 
