@@ -65,9 +65,6 @@ function(_build_one_hal_program)
     set(_sym "${FCM_BUILD_DIR}/${HP_NAME}.sym.json")
     set(_ext "${FCM_BUILD_DIR}/${HP_NAME}.ext.json")
     set(_lnk "${FCM_BUILD_DIR}/${HP_NAME}.lnk")
-    set(_zcon "${CMAKE_BINARY_DIR}/runtime/ZCON")
-    set(_run  "${CMAKE_BINARY_DIR}/runtime/RUN")
-
     # Compile
     add_custom_command(
         OUTPUT "${_obj}"
@@ -91,8 +88,6 @@ function(_build_one_hal_program)
             --json-symbols "${_sym}"
             --save-external-syms "${_ext}"
             --save-config "${_lnk}"
-            -L "${_zcon}"
-            -L "${_run}"
             -L "${HAL_COMPOOL_DIR}"
             ${LNK101_EXTRA_ARGS}
             "${_obj}"

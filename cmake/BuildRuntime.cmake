@@ -50,8 +50,8 @@ function(build_runtime_library)
     set(RUNTIME_STAMP_FILES "")
     
     # Output directories in build tree
-    set(RUN_BUILD_DIR "${CMAKE_BINARY_DIR}/runtime/RUN")
-    set(ZCON_BUILD_DIR "${CMAKE_BINARY_DIR}/runtime/ZCON")
+    set(RUN_BUILD_DIR "${CMAKE_BINARY_DIR}/lib/runtime/RUN")
+    set(ZCON_BUILD_DIR "${CMAKE_BINARY_DIR}/lib/runtime/ZCON")
     
     # Create output directories
     file(MAKE_DIRECTORY "${RUN_BUILD_DIR}")
@@ -96,8 +96,8 @@ function(build_runtime_library)
     # install(CODE) to handle files with # in their names
     install(CODE "
         file(GLOB RUN_OBJ_FILES \"${RUN_BUILD_DIR}/*.obj\")
-        file(INSTALL \${RUN_OBJ_FILES} DESTINATION \"\${CMAKE_INSTALL_PREFIX}/lib/RUN\")
+        file(INSTALL \${RUN_OBJ_FILES} DESTINATION \"\${CMAKE_INSTALL_PREFIX}/lib/runtime/RUN\")
         file(GLOB ZCON_OBJ_FILES \"${ZCON_BUILD_DIR}/*.obj\")
-        file(INSTALL \${ZCON_OBJ_FILES} DESTINATION \"\${CMAKE_INSTALL_PREFIX}/lib/ZCON\")
+        file(INSTALL \${ZCON_OBJ_FILES} DESTINATION \"\${CMAKE_INSTALL_PREFIX}/lib/runtime/ZCON\")
     " COMPONENT runtime)
 endfunction()

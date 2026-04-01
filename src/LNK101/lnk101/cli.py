@@ -34,6 +34,7 @@ class LinkerOpts:
     generate_stacks:  int              = 0
     define:           list[str]        = field(default_factory=list)
     compact:          bool             = False
+    no_default_libs:  bool             = False
     # error handling
     force:            bool             = False
     no_undefined:     bool             = False
@@ -60,6 +61,7 @@ def link(
     # Libraries
     library_path: Annotated[Optional[list[str]], typer.Option("-L", "--library-path", help="Add directory to library search path")] = None,
     library: Annotated[Optional[list[str]], typer.Option("-l", "--library", help="Search library NAME (NAME.obj in -L paths)")] = None,
+    no_default_libs: Annotated[bool, typer.Option("--no-default-libs", help="Don't search default library paths (RUN, ZCON)")] = False,
 
     # Link configuration
     save_config: Annotated[Optional[str], typer.Option("--save-config", help="Save link configuration to .lnk file")] = None,
@@ -89,7 +91,8 @@ def link(
     version: Annotated[bool, typer.Option("--version", help="Show version")] = False,
 ):
     import logging
-    from .linker import Linker, error, log as lnk_log, program as prog_name, version as prog_version
+    from .linker import Linker, error, log as lnk_log, program as prog_name, version as prog_version, \
+                        DEFAULT_LIB_PATHS, _find_top_dir
 
     if version:
         print(f"{prog_name} {prog_version}")
@@ -142,14 +145,28 @@ def link(
         handler = logging.getLogger().handlers[0]
         handler.setFormatter(InfoFilter())
 
+    # Build library search path: default libs first, then explicit -L paths
+    lib_paths = []
+    if not no_default_libs:
+        top = _find_top_dir()
+        if top:
+            lib_paths = [str(top / p) for p in DEFAULT_LIB_PATHS]
+    lib_paths += library_path or []
+
+    # Warn about missing library search paths
+    for lp in lib_paths:
+        if not os.path.isdir(lp):
+            lnk_log.warning(f"library search path not found: {lp}")
+
     opts = LinkerOpts(
         input_files=input_files,
         output=output or (Path(input_files[0]).stem + '.fcm' if input_files else 'a.out.fcm'),
         map=map,
         json_symbols=json_symbols,
         save_external_syms=save_external_syms,
-        library_path=library_path or [],
+        library_path=lib_paths,
         library=library or [],
+        no_default_libs=no_default_libs,
         save_config=save_config,
         load_config=load_config,
         external_syms=external_syms,

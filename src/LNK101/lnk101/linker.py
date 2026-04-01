@@ -19,6 +19,27 @@ from .linkconfig import LinkConfig
 
 
 #=============================================================================
+# Default library search paths (relative to top directory)
+#=============================================================================
+DEFAULT_LIB_PATHS = [
+    "lib/runtime/RUN",
+    "lib/runtime/ZCON",
+]
+
+def _find_top_dir():
+    """Find the installation/build top directory.
+    In a venv (build tree): sys.prefix is build/venv, top is build/venv/..
+    In a direct install:    sys.prefix is <prefix>, top is <prefix>
+    """
+    venv_parent = Path(sys.prefix).parent
+    if (venv_parent / "lib" / "runtime").is_dir():
+        return venv_parent
+    prefix = Path(sys.prefix)
+    if (prefix / "lib" / "runtime").is_dir():
+        return prefix
+    return None
+
+#=============================================================================
 # AP-101 Memory Layout Constants (all in bytes)
 #=============================================================================
 SECTOR_SIZE = Addr(0x10000)    # 32768 halfwords per sector
