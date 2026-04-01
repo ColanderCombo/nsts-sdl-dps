@@ -67,8 +67,11 @@ def parseModuleSymbol(oi, symbol, data):
     if typ2 == "XD":
         symdict["alignment"] = data[12]
     elif typ2 in ["ER", "LD", "WX"]:
-        if data[12] != 0x40:
-            oi["errors"].append("Warning: Stray byte in module symbol %s" % symbol)
+        if data[12] == 0x01:
+            symdict["remote"] = True      # CR11094: remote COMPOOL flag
+        elif data[12] != 0x40:
+            oi["errors"].append("Warning: Unexpected byte 0x%02X in flags field of %s %s" %
+                                (data[12], typ2, symbol))
     else:
         flags = data[12]
         if (flags & 0b00100000) != 0:
@@ -97,8 +100,9 @@ def parseModuleSymbol(oi, symbol, data):
     if typ2 in ["PC", "CM", "SD"]:
         symdict["length"] = bytearrayToInteger(size)
     elif typ2 == "LD":
-        if size[0] != 0x40:
-            oi["errors"].append("Warning: Stray byte in module symbol %s" % symbol)
+        if size[0] not in (0x40, 0x00):
+            oi["errors"].append("Warning: Unexpected byte 0x%02X in LD size field of %s" %
+                                (size[0], symbol))
         symdict["ldid"] = bytearrayToInteger(size[1:])
     elif typ2 in ["ER", "XD", "PR", "WX"]:
         if not isBytearrayBlank(size):
