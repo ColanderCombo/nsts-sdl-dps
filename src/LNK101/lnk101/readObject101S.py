@@ -108,26 +108,47 @@ def parseModuleSymbol(oi, symbol, data):
         if not isBytearrayBlank(size):
             oi["errors"].append("Warning: Stray data for module symbol %s" % symbol)
 
-# The input `offset` is the column number of the next symbol.  Updates 
+# The input `offset` is the column number of the next symbol.  Updates
 # `oi["symbols"]` (a list) in place, and returns the upated offset.
 datatypes = {
-    0x00: "C", 0x04: "X", 0x08: "B", 0x10: "F", 0x14: "H", 0x18: "E", 
+    0x00: "C", 0x04: "X", 0x08: "B", 0x10: "F", 0x14: "H", 0x18: "E",
     0x1C: "D", 0x20:"AQ", 0x24: "Y", 0x28: "S", 0x2C: "V", 0x30: "P",
-    0x34: "z", 0x38: "L", 
+    0x34: "z", 0x38: "L",
     0x84: "Z" }
+
+def _symHexContext(packedSymbols, offset, window=16):
+    """Return a hex dump of bytes around offset for diagnostic messages."""
+    start = max(0, offset - window)
+    end = min(len(packedSymbols), offset + window)
+    dump = ' '.join('%02X' % b for b in packedSymbols[start:end])
+    arrow = offset - start
+    return ("  bytes[0x%04X..0x%04X]: %s\n  %s^-- offset 0x%04X" %
+            (start, end - 1, dump, ' ' * (arrow * 3), offset))
+
 def parsePackedSymbol(packedSymbols, offset):
     symbol = { "packedOffset": offset }
-    
-    def getOutaHere():
-        if offset >= len(packedSymbols):
-            symbol["error"] = "Error: Bad offset %05X into SYM record" % offset
-            return True
-        return False
-    
-    if getOutaHere(): return None,symbol
+    startOffset = offset
+    total = len(packedSymbols)
+    name = ""  # filled in once we parse it
+
+    def overflow(field):
+        symbol["error"] = (
+            "Error: SYM overrun at offset 0x%04X (size=0x%04X) reading %s "
+            "for symbol '%s' (org=0x%02X, started at 0x%04X)\n%s" %
+            (offset, total, field, name, organization if 'organization' in dir() else 0,
+             startOffset, _symHexContext(packedSymbols, startOffset)))
+        return True
+
+    if offset >= total:
+        organization = 0
+        overflow("organization byte")
+        return None, symbol
     organization = packedSymbols[offset]
+    symbol["organization"] = organization
     offset += 1
-    if getOutaHere(): return None,symbol
+    if offset + 2 >= total:
+        overflow("CSECT offset (3 bytes)")
+        return None, symbol
     symbol["offsetInCSECT"] = bytearrayToInteger(packedSymbols[offset:offset+3])
     offset += 3
     multiplicity = False
@@ -156,52 +177,69 @@ def parsePackedSymbol(packedSymbols, offset):
         elif typ == 0b110:
             symbol["symbolType"] = "RELOCATABLE"
         else:
-            symbol["error"] = "Error: Unknown symbol type %02X" % typ
-            return None,symbol
+            symbol["error"] = (
+                "Error: Unknown symbol type 0x%X (org=0x%02X) at offset 0x%04X\n%s" %
+                (typ, organization, startOffset,
+                 _symHexContext(packedSymbols, startOffset)))
+            return None, symbol
     if cluster:
         symbol["cluster"] = True
     hasName = (organization & 0b00001000) == 0
     nameLength = 1 + (organization & 0b111)
-    name = ""
     if hasName:
-        if getOutaHere(): return None,symbol
+        if offset + nameLength > total:
+            overflow("name (%d bytes)" % nameLength)
+            return None, symbol
         name = bytearrayToAscii(packedSymbols[offset:offset+nameLength])
         symbol["name"] = name
         offset += nameLength
     if not dataItem:
-        return offset,symbol
-    if getOutaHere(): return None,symbol
+        return offset, symbol
+    if offset >= total:
+        overflow("datatype byte")
+        return None, symbol
     dataType = packedSymbols[offset]
     offset += 1
     if dataType in datatypes:
         symbol["dataType"] = datatypes[dataType]
     else:
-        #symbol["error"] = 'Warning: Unknown data type %02X for symbol "%s"' % \
-        #                    (dataType, name)
-        symbol["dataType"] = "%02X" % dataType
+        symbol["dataType"] = "0x%02X" % dataType
+        symbol.setdefault("warnings", []).append(
+            "Unknown datatype 0x%02X for '%s' at offset 0x%04X — "
+            "skipping length (may desync subsequent symbols)\n%s" %
+            (dataType, name, startOffset,
+             _symHexContext(packedSymbols, startOffset)))
     if symbol["dataType"] in ["C", "X", "B"]:
-        if getOutaHere(): return None,symbol
+        if offset + 1 >= total:
+            overflow("length (2 bytes, datatype %s)" % symbol["dataType"])
+            return None, symbol
         symbol["length"] = bytearrayToInteger(packedSymbols[offset:offset+2]) + 1
         offset += 2
     elif symbol["dataType"] == "Z":
         # HAL/S Z-type (0x84) has no length field - it's a 4-byte Z-CON address constant
         pass
     elif dataType in datatypes:
-        if getOutaHere(): return None,symbol
+        if offset >= total:
+            overflow("length (1 byte, datatype %s)" % symbol["dataType"])
+            return None, symbol
         symbol["length"] = packedSymbols[offset] + 1
         offset += 1
     else:
-        # Unknown datatype - skip length field (assume none)
+        # Unknown datatype — no length consumed (may cause desync)
         pass
     if multiplicity:
-        if getOutaHere(): return None,symbol
+        if offset + 2 >= total:
+            overflow("multiplicity (3 bytes)")
+            return None, symbol
         symbol["multiplicity"] = bytearrayToInteger(packedSymbols[offset:offset+3])
         offset += 3
     if scaling:
-        if getOutaHere(): return None,symbol
+        if offset + 1 >= total:
+            overflow("scale (2 bytes)")
+            return None, symbol
         symbol["scale"] = bytearrayToInteger(packedSymbols[offset:offset+2])
         offset += 2
-    return offset,symbol
+    return offset, symbol
 
 def readObject101S(filename):
     object = { -1: { "errors": [] }, "numLines": 0 }
@@ -337,18 +375,24 @@ def readObject101S(filename):
             oi["errors"].append("Error: Unrecognized line type")
             continue
     offset = 0
+    symIndex = 0
     while offset < len(packedSymbols):
-        if len(symbols) >= 9: ###DEBUG###
-            pass
+        prevOffset = offset
         offset, symbol = parsePackedSymbol(packedSymbols, offset)
-        if offset != None: # No error
-            symbols.append(symbol)
-        else:
-            oi["errors"].append("Error: Undetermined error in symbol table")
+        symbols.append(symbol)
+        # Propagate warnings
+        for w in symbol.get("warnings", []):
+            oi["errors"].append("Warning: SYM symbol #%d: %s" % (symIndex, w))
+        # Propagate errors
         if "error" in symbol:
-            oi["errors"].append(symbol["error"])
-        if offset == None:
+            oi["errors"].append("SYM symbol #%d: %s" % (symIndex, symbol["error"]))
+        if offset is None:
+            oi["errors"].append(
+                "Error: SYM parsing aborted at symbol #%d (offset 0x%04X of 0x%04X). "
+                "%d symbol(s) parsed successfully before failure." %
+                (symIndex, prevOffset, len(packedSymbols), symIndex))
             break
+        symIndex += 1
     return object, symbols
 
 if __name__ == "__main__":
