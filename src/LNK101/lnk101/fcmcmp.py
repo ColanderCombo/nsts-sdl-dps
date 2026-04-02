@@ -82,7 +82,28 @@ def load_sections(sym_json_path, modules=None, include_all=False):
         addr = Addr.from_hw(s["address"])
         size = AddrDisp.from_hw(s["size"])
         sections.append((s["name"], addr, size))
-    sections.sort(key=lambda t: t[1])
+    return sections
+
+
+# All known 2-character CSECT name prefixes.
+_CSECT_PREFIXES = (
+    # from USA-003089/p.106 sect.3.2 Object Code Naming Conventions:
+    {'#C', '#D', '#P', '#E', '#Z', '#R', '#X', '#Q', '#L'}
+    | {f'${c}' for c in '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'} # $0 PROGRAM $[1-9a-z] TASK
+    | {f'@{n}' for n in '0123456789'}
+    | {f'{a}{n}' for a in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' for n in '0123456789'} # Internal proc
+)
+
+
+def section_base_name(name):
+    return name[2:] if (len(name) >= 2 and name[:2] in _CSECT_PREFIXES) else name
+
+
+def sort_sections(sections, group_by_name=False):
+    if group_by_name:
+        sections.sort(key=lambda t: (section_base_name(t[0]), t[1]))
+    else:
+        sections.sort(key=lambda t: t[1])
     return sections
 
 
@@ -192,6 +213,13 @@ def main(
             exists=True,
         ),
     ] = None,
+    group_by_name: Annotated[
+        bool,
+        typer.Option(
+            "--group-sections-by-name",
+            help="Group sections by base program name instead of sorting by address",
+        ),
+    ] = False,
     equiv: Annotated[
         str,
         typer.Option(
@@ -212,6 +240,7 @@ def main(
             equiv_set = frozenset(vals)
 
     sections = load_sections(sym_json, modules=modules, include_all=all)
+    sort_sections(sections, group_by_name=group_by_name)
     addr_to_sym, addr_to_rld = load_annotations(sym_json, csect_table)
 
     image_a = fcm_a.read_bytes()
