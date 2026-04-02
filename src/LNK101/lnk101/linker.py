@@ -955,7 +955,7 @@ class Linker:
                         log.debug(f"  -> ZCON DSR sector-only: DSR={sector} -> 0x{hw2:04X}")
                 elif flagType == 0x20:
                     if hw2Off + 1 < len(self.image):
-                        hw2 = self._imgPatchHW(hw2Off, 0xFF8F, (sector & 0x7) << 4)
+                        hw2 = self._imgPatchHW(hw2Off, 0xFF0F, (sector & 0xF) << 4)
                         log.debug(f"  -> ZCON BSR sector-only: BSR={sector} -> 0x{hw2:04X}")
                 else:
                     self._applyRelocationValue(imageOffset, targetAddr, reloc)
@@ -964,7 +964,7 @@ class Linker:
                 if flagType in (0x04, 0x10) and sector > 0:
                     if hw2Off + 1 < len(self.image):
                         if self._imgReadHW(hw2Off) & 0x0200:  # CB bit
-                            hw2 = self._imgPatchHW(hw2Off, 0xFF8F, (sector & 0x7) << 4)
+                            hw2 = self._imgPatchHW(hw2Off, 0xFF0F, (sector & 0xF) << 4)
                             log.debug(f"  -> ZCON BSR fixup: ptrBSR={sector} -> 0x{hw2:04X}")
 
                 # ZCON data-address (0x50): patch DSR in hw2

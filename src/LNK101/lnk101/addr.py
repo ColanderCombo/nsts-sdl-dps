@@ -136,7 +136,7 @@ def decode_zcon_hw1(hw1):
         "XC":  (hw1 >> 9) & 1,
         "C":   (hw1 >> 8) & 1,
         "CB":  (hw1 >> 9) & 1,   # CB = XC in ZCON context
-        "BSR": (hw1 >> 4) & 0x7,
+        "BSR": (hw1 >> 4) & 0xF,
         "DSR":  hw1 & 0xF,
     }
 
