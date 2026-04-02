@@ -79,9 +79,15 @@ def dump_obj(filename, hex_dump=False):
                 data = line.get("data", ())
                 for off in range(0, size, 16):
                     chunk = data[off:min(off + 16, size)]
-                    hexstr = " ".join(f"{b:02X}" for b in chunk)
+                    # Dump as halfwords (pairs of bytes)
+                    hwords = []
+                    for h in range(0, len(chunk), 2):
+                        if h + 1 < len(chunk):
+                            hwords.append(f"{chunk[h]:02X}{chunk[h+1]:02X}")
+                        else:
+                            hwords.append(f"{chunk[h]:02X}")
                     hw_addr = Addr(line.get("relativeAddress", 0) + off)
-                    print(f"       {hw_addr.x}: {hexstr}")
+                    print(f"       {hw_addr.x}: {' '.join(hwords)}")
 
         elif typ == "RLD":
             size = line.get("size", 0)
