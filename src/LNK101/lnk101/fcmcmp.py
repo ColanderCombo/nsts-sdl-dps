@@ -51,7 +51,11 @@ def load_annotations(sym_json_path, csect_table_path=None):
         hw_addr = r["address"]
         target = Addr.from_hw(r["target"])
         sym = r.get("symbol", "")
-        addr_to_rld[hw_addr] = f"RLD {sym} -> {target.x}"
+        targetName = r.get("targetName", "")
+        flags = r.get("flags", 0)
+        label = f"{targetName} ({sym})" if targetName and sym and targetName != sym else (sym or targetName)
+        neg = " (negative disp.)" if flags & 0x80 else ""
+        addr_to_rld[hw_addr] = f"RLD {label} -> {target.x}{neg}"
 
     if csect_table_path:
         with open(csect_table_path) as f:

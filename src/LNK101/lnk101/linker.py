@@ -14,7 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from collections import OrderedDict, defaultdict
 from .readObject101S import readObject101S, bytearrayToAscii, bytearrayToInteger
-from .addr import Addr, AddrDisp
+from .addr import Addr, AddrDisp, AddressMap
+from .addrcon import AddrCon, ZCon, sector_decode
 from .linkconfig import LinkConfig
 
 
@@ -350,6 +351,7 @@ class Linker:
         self.warnings = []
         self.appliedRelocations = []    # populated by applyRelocations()
         self.unresolvedRelocations = [] # populated by applyRelocations()
+        self.csectTable = {}            # populated by loadExternalSyms()
     
     def loadInputFiles(self):
         """Load all input files and explicit libraries from args."""
@@ -371,22 +373,6 @@ class Linker:
                 if os.path.exists(candidate) and self.loadModule(candidate):
                     return True
         return False
-
-    def _imgReadHW(self, offset):
-        """Read a big-endian halfword from the image."""
-        return (self.image[offset] << 8) | self.image[offset + 1]
-
-    def _imgWriteHW(self, offset, value):
-        """Write a big-endian halfword to the image."""
-        self.image[offset] = (value >> 8) & 0xFF
-        self.image[offset + 1] = value & 0xFF
-
-    def _imgPatchHW(self, offset, mask, bits):
-        """Read-modify-write a halfword: clear mask bits, set new bits."""
-        hw = self._imgReadHW(offset)
-        hw = (hw & mask) | bits
-        self._imgWriteHW(offset, hw)
-        return hw
 
     def printErrors(self):
         for err in self.errors:
@@ -912,19 +898,17 @@ class Linker:
                 # Record unresolved relocations for analysis
                 if not resolved and reloc.relId in module.externals:
                     ext = module.externals[reloc.relId]
-                    length = self._RELOC_LEN.get(reloc.flags,
-                                2 if reloc.flags in self._RELOC_LEN_2
-                                else reloc.length)
+                    con = AddrCon(reloc.flags, reloc.length)
                     existing = int.from_bytes(
-                        self.image[imageOffset:imageOffset + length], 'big')
+                        self.image[imageOffset:imageOffset + con.length], 'big')
                     self.unresolvedRelocations.append({
                         "symbol": ext.name,
                         "imageOffset": int(imageOffset),
                         "imageOffsetHW": imageOffset.hw if hasattr(imageOffset, 'hw') else int(imageOffset) // 2,
                         "flags": reloc.flags,
-                        "length": length,
-                        "sign": reloc.sign,
-                        "direction": reloc.direction,
+                        "length": con.length,
+                        "sign": con.sign,
+                        "direction": con.direction,
                         "section": posSection.name.strip(),
                         "sectionOffset": int(reloc.address),
                         "module": Path(module.filename).name,
@@ -941,97 +925,50 @@ class Linker:
                       f"offset=0x{imageOffset:06X}(byte) flags=0x{reloc.flags:02X} "
                       f"target='{targetName}' addr={targetAddr.x}")
 
-                # Sector-register-only relocations (0x40=DSR, 0x20=BSR):
-                # Write ONLY sector bits into hw2; do NOT add address.
-                # Standard relocations: apply value then patch ZCON sector
-                # fixups for cross-sector addresses.
                 flagType = reloc.flags & 0x7F
-                hw2Off = imageOffset + 2
                 sector = targetAddr.sector
 
-                if flagType == 0x40:
-                    if hw2Off + 1 < len(self.image):
-                        hw2 = self._imgPatchHW(hw2Off, 0xFFF0, sector & 0xF)
-                        log.debug(f"  -> ZCON DSR sector-only: DSR={sector} -> 0x{hw2:04X}")
-                elif flagType == 0x20:
-                    if hw2Off + 1 < len(self.image):
-                        hw2 = self._imgPatchHW(hw2Off, 0xFF0F, (sector & 0xF) << 4)
-                        log.debug(f"  -> ZCON BSR sector-only: BSR={sector} -> 0x{hw2:04X}")
+                if flagType in (0x04, 0x10, 0x50, 0x20, 0x40):
+                    # ZCON relocation: read both halfwords, apply, write back
+                    if imageOffset + 3 < len(self.image):
+                        zcon = ZCon.from_image(self.image, imageOffset)
+                        zcon.apply(targetAddr, flagType)
+                        zcon.write_to_image(self.image, imageOffset)
+                        log.debug(f"  -> {zcon}")
                 else:
+                    # YCON / ACON: single-value relocation
                     self._applyRelocationValue(imageOffset, targetAddr, reloc)
 
-                # ZCON code-address (0x04, 0x10): patch BSR in hw2 if CB bit is set
-                if flagType in (0x04, 0x10) and sector > 0:
-                    if hw2Off + 1 < len(self.image):
-                        if self._imgReadHW(hw2Off) & 0x0200:  # CB bit
-                            hw2 = self._imgPatchHW(hw2Off, 0xFF0F, (sector & 0xF) << 4)
-                            log.debug(f"  -> ZCON BSR fixup: ptrBSR={sector} -> 0x{hw2:04X}")
-
-                # ZCON data-address (0x50): patch DSR in hw2
-                if flagType == 0x50 and sector > 0:
-                    if hw2Off + 1 < len(self.image):
-                        hw2 = self._imgPatchHW(hw2Off, 0xFFF0, sector & 0xF)
-                        log.debug(f"  -> ZCON DSR fixup: ptrDSR={sector} -> 0x{hw2:04X}")
-
-                # Record the relocation: read back the final value from the
-                # image and decode to an absolute halfword address so we can
-                # resolve it to a specific symbol (not just the CSECT).
+                # Record the applied relocation for diagnostics / JSON output.
                 if flagType not in (0x40, 0x20):  # skip sector-only
-                    length = self._RELOC_LEN.get(reloc.flags,
-                                2 if reloc.flags in self._RELOC_LEN_2
-                                else reloc.length)
+                    con = AddrCon(reloc.flags, reloc.length)
                     finalVal = int.from_bytes(
-                        self.image[imageOffset:imageOffset + length], 'big')
-                    if length == 2:
-                        # Decode sector encoding: 0x8000|offset → sector*0x8000+offset
-                        if finalVal & 0x8000:
-                            resolvedHW = sector * 0x8000 + (finalVal & 0x7FFF)
-                        else:
-                            resolvedHW = finalVal
-                    else:
-                        resolvedHW = finalVal  # 4-byte ACON: raw halfword addr
-                    self.appliedRelocations.append((imageOffset.hw, resolvedHW))
+                        self.image[imageOffset:imageOffset + con.length], 'big')
+                    resolvedHW = sector_decode(finalVal, sector) if con.length == 2 else finalVal
+                    self.appliedRelocations.append({
+                        "address": imageOffset.hw,
+                        "target": resolvedHW,
+                        "targetName": targetName,
+                        "flags": reloc.flags,
+                    })
 
         return relocErrors == 0
     
-    # PFS Relocation length by flag value.
-    # PFS compiler flag byte = (type << 4) | (LL << 2) | direction | continuation
-    # Type 0 = YCON -> 2-byte halfword address
-    # Type 1 = ZCON -> 2-byte halfword (w/optional separate fixup card, if required)
-    # Type 2 = BSR-only sector fixup
-    # Type 4 = DSR-only sector fixup
-    # Type 5 = ZCON data addresss
-    _RELOC_LEN = {0x1C: 4, 0x9C: 4}
-    _RELOC_LEN_2 = frozenset([0x00, 0x04, 0x10, 0x50, 0x80, 0x90, 0xA0, 0xC0, 0xD0])
-
     def _applyRelocationValue(self, imageOffset, targetAddr, reloc):
         """Apply a standard (non-sector-only) relocation to the image.
-        targetAddr is an Addr. Caller handles 0x40/0x20 sector-only types.
-
-        AP-101 16-bit sector encoding: halfword addresses in sector 1+
-        are encoded as 0x8000 | (hw & 0x7FFF); CPU uses BSR/DSR at runtime.
-        """
-        length = self._RELOC_LEN.get(reloc.flags,
-                    2 if reloc.flags in self._RELOC_LEN_2
-                    else reloc.length)
-
-        # 2-byte relocations use sector-encoded halfword; 4-byte use raw halfword
-        value = targetAddr.sector_encode() if length == 2 else targetAddr.hw
-        if length == 2 and targetAddr.sector > 0:
-            log.debug(f"  -> sector encode: 0x{value:04X}")
+        targetAddr is an Addr. Caller handles 0x40/0x20 sector-only types."""
+        con = AddrCon(reloc.flags, reloc.length)
 
         existing = int.from_bytes(
-            self.image[imageOffset:imageOffset + length], 'big')
+            self.image[imageOffset:imageOffset + con.length], 'big')
 
-        relocValue = -value if reloc.sign else value
-        newValue = (existing + relocValue) if reloc.direction == 0 else (existing - relocValue)
-        newValue &= (1 << (length * 8)) - 1
+        newValue = con.apply(existing, targetAddr)
 
-        log.debug(f"  -> existing=0x{existing:0{length*2}X} "
-                  f"{'+'if reloc.direction==0 else '-'} 0x{relocValue:04X} "
-                  f"= 0x{newValue:0{length*2}X}")
+        log.debug(f"  -> {con}  existing=0x{existing:0{con.length*2}X} "
+                  f"-> 0x{newValue:0{con.length*2}X}")
 
-        self.image[imageOffset:imageOffset + length] = newValue.to_bytes(length, 'big')
+        self.image[imageOffset:imageOffset + con.length] = \
+            newValue.to_bytes(con.length, 'big')
     
     def determineEntryPoint(self):
         if self.args.entry:
@@ -1191,6 +1128,7 @@ class Linker:
         """
         with open(path) as f:
             csectTable = json.load(f)
+        self.csectTable = csectTable
 
         module = self._getOrCreateSyntheticModule("<external-syms>", "<ext-syms>")
         module.external = True
@@ -1507,36 +1445,25 @@ class Linker:
         # Sort symbols by address
         data["symbols"].sort(key=lambda x: x["address"])
 
-        # Applied relocations: resolve each target hw address to the most
-        # specific symbol (LD label preferred over SD csect).
-        # Build sorted list of (hwAddr, name) for bisect lookup.
-        symAddrs = sorted(
-            (byteAddr.hw, name)
-            for name, (section, module, byteAddr) in self.globalSymbols.items()
-            if byteAddr is not None
-        )
-        symHWs = [a for a, _ in symAddrs]
-
-        import bisect
-        def _resolveSymbol(targetHW):
-            """Find the symbol whose address is closest to (and <=) targetHW.
-            Returns 'NAME' or 'NAME+offset' if there's a displacement."""
-            idx = bisect.bisect_right(symHWs, targetHW) - 1
-            if idx >= 0:
-                symAddr, symName = symAddrs[idx]
-                disp = targetHW - symAddr
-                if disp:
-                    return f"{symName}+{disp:X}"
-                return symName
-            return None
+        # Build address map for resolving relocation targets to symbols.
+        addrMap = AddressMap()
+        addrMap.add_global_symbols(self.globalSymbols)
+        addrMap.add_csect_table(self.csectTable)
 
         data["relocations"] = []
-        for hwAddr, targetHW in sorted(self.appliedRelocations):
-            sym = _resolveSymbol(targetHW)
+        for rec in sorted(self.appliedRelocations, key=lambda r: r["address"]):
+            # For positive relocations, resolve the target value to a symbol.
+            # For negative (sign bit set), the value is a displacement, not an address.
+            if rec["flags"] & 0x80:
+                sym = rec["targetName"]
+            else:
+                sym = addrMap.format(rec["target"]) or rec["targetName"]
             data["relocations"].append({
-                "address": hwAddr,
-                "target": targetHW,
-                "symbol": sym
+                "address": rec["address"],
+                "target": rec["target"],
+                "targetName": rec["targetName"],
+                "flags": rec["flags"],
+                "symbol": sym,
             })
 
         if self.unresolvedRelocations:

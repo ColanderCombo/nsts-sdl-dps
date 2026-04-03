@@ -9,7 +9,8 @@ from typing import Annotated
 
 import typer
 
-from .addr import Addr, AddrDisp, rld_flag_type_name
+from .addr import Addr, AddrDisp
+from .addrcon import rld_flag_type_name
 from .readObject101S import readObject101S, bytearrayToAscii, bytearrayToInteger
 
 app = typer.Typer(
@@ -30,7 +31,44 @@ def _rld_type(flags):
     return f"{name}({sign})"
 
 
-def dump_obj(filename, hex_dump=False):
+def _print_sym_table(symbols):
+    """Print the decoded SYM symbol table."""
+    print(f"{'=' * 60}")
+    print(f"SYM table: {len(symbols)} symbols")
+    print(f"{'=' * 60}")
+    for sym in symbols:
+        stype = sym.get("symbolType", "?")
+        name = sym.get("name", "")
+        offset = sym.get("offsetInCSECT", 0)
+
+        parts = [f"  {stype:12s}"]
+        if name:
+            parts.append(f"{name:8s}")
+        else:
+            parts.append(f"{'':8s}")
+        parts.append(f"offset={offset:04X}")
+
+        if stype == "DATA":
+            dt = sym.get("dataType", "?")
+            parts.append(f"type={dt}")
+            if "length" in sym:
+                parts.append(f"len={sym['length']}")
+            if "multiplicity" in sym:
+                parts.append(f"mult={sym['multiplicity']}")
+            if "scale" in sym:
+                parts.append(f"scale={sym['scale']}")
+        if sym.get("cluster"):
+            parts.append("CLUSTER")
+        print("  ".join(parts))
+
+        if "error" in sym:
+            print(f"    *** {sym['error']}")
+        for w in sym.get("warnings", []):
+            print(f"    *** {w}")
+    print(f"{'=' * 60}")
+
+
+def dump_obj(filename, hex_dump=False, show_sym=False):
     obj, symbols = readObject101S(str(filename))
 
     if obj[-1]["errors"]:
@@ -38,10 +76,16 @@ def dump_obj(filename, hex_dump=False):
             print(f"  {err}")
 
     esd_names = {}  # esdId -> name
+    sym_table_printed = False
 
     for cardNum in range(obj["numLines"]):
         line = obj[cardNum]
         typ = line["type"]
+
+        # Print SYM table after the last SYM card
+        if show_sym and not sym_table_printed and typ != "SYM" and symbols:
+            _print_sym_table(symbols)
+            sym_table_printed = True
 
         if typ == "HDR":
             text = line.get("text", "").rstrip()
@@ -67,6 +111,28 @@ def dump_obj(filename, hex_dump=False):
                     parts.append(f"len={length.hw} hw")
                 if "ldid" in sym:
                     parts.append(f"ldid={sym['ldid']}")
+                # Flags
+                flags = []
+                if sym.get("remote"):
+                    flags.append("REMOTE")
+                if sym.get("RMODE24"):
+                    flags.append("RMODE24")
+                elif sym.get("RMODE31ANY"):
+                    flags.append("RMODE31")
+                elif sym.get("RMODE64"):
+                    flags.append("RMODE64")
+                if sym.get("AMODE24"):
+                    flags.append("AMODE24")
+                elif sym.get("AMODE31"):
+                    flags.append("AMODE31")
+                elif sym.get("AMODEANY"):
+                    flags.append("AMODEANY")
+                elif sym.get("AMODE64"):
+                    flags.append("AMODE64")
+                if sym.get("RSECT"):
+                    flags.append("RSECT")
+                if flags:
+                    parts.append(",".join(flags))
                 print("  ".join(parts))
 
         elif typ == "TXT":
@@ -118,7 +184,7 @@ def dump_obj(filename, hex_dump=False):
 
         elif typ == "SYM":
             size = line.get("size", 0)
-            print(f"SYM  {size} bytes of packed symbol data")
+            print(f"SYM  {size} bytes")
 
         elif typ == "END":
             entry = line.get("entryAddress")
@@ -127,11 +193,20 @@ def dump_obj(filename, hex_dump=False):
             parts = ["END"]
             if entry is not None:
                 parts.append(f"entry={Addr(entry).x}")
+            entryName = line.get("entryName", "").strip()
+            if entryName:
+                parts.append(f"entryName={entryName}")
             if esdId is not None:
                 name = esd_names.get(esdId, f"#{esdId}")
                 parts.append(f"esdid={esdId}({name})")
             if length is not None:
                 parts.append(f"len={length}")
+            translator = line.get("translator", "").strip()
+            processor = line.get("processor", "").strip()
+            if translator:
+                parts.append(f"translator={translator}")
+            if processor:
+                parts.append(f"processor={processor}")
             print("  ".join(parts))
 
         else:
@@ -147,6 +222,8 @@ def main(
         exists=True)],
     hex_dump: Annotated[bool, typer.Option("--hex", "-x",
         help="Include hex dump of TXT record data")] = False,
+    show_sym: Annotated[bool, typer.Option("--show-sym-table", "-s",
+        help="Show decoded SYM symbol table")] = False,
 ):
     """Dump IBM AP-101 object files."""
     for i, obj_file in enumerate(obj_files):
@@ -154,7 +231,7 @@ def main(
             if i > 0:
                 print()
             print(f"=== {obj_file} ===")
-        dump_obj(obj_file, hex_dump=hex_dump)
+        dump_obj(obj_file, hex_dump=hex_dump, show_sym=show_sym)
 
 
 if __name__ == "__main__":

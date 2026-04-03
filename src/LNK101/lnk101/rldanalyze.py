@@ -10,14 +10,8 @@ from typing import Annotated, Optional
 
 import typer
 
-from .addr import (
-  Addr,
-  AddrDisp,
-  sector_decode,
-  decode_zcon_hw1,
-  format_zcon_fields,
-  rld_flag_type_name,
-)
+from .addr import Addr, AddrDisp, AddressMap
+from .addrcon import AddrCon, ZCon, rld_flag_type_name
 
 app = typer.Typer(
   help="Follow undefined RLDs",
@@ -29,17 +23,15 @@ app = typer.Typer(
 
 
 def analyze_rld(rld, our_value, baseline_value):
-  length = rld["length"]
-  sign = rld["sign"]
-  direction = rld["direction"]
-  existing = rld["existing"]  # unrelocated value from TXT
+  con = AddrCon(rld["flags"], rld["length"])
+  existing = rld["existing"]
 
   result = {
     "symbol": rld["symbol"],
     "imageOffset": rld["imageOffset"],
     "flags": rld["flags"],
-    "flagType": rld_flag_type_name(rld["flags"]),
-    "length": length,
+    "flagType": con.kind,
+    "length": con.length,
     "section": rld["section"],
     "sectionOffset": rld["sectionOffset"],
     "module": rld["module"],
@@ -47,20 +39,10 @@ def analyze_rld(rld, our_value, baseline_value):
     "ourValue": our_value,
     "baselineValue": baseline_value,
   }
-  mask = (1 << (length * 8)) - 1
 
-  if direction == 0:
-    reloc_value = (baseline_value - existing) & mask
-  else:  # direction=1
-    reloc_value = (existing - baseline_value) & mask
-
-  if sign:
-    target_raw = (-reloc_value) & mask
-  else:
-    target_raw = reloc_value
-
-  result["targetRaw"] = target_raw
-  result["targetHW"] = sector_decode(target_raw) if length == 2 else target_raw
+  # Reverse-engineer the target from the baseline value
+  result["targetHW"] = con.reverse(existing, baseline_value)
+  result["targetRaw"] = (baseline_value - existing) & con.mask
 
   return result
 
@@ -95,15 +77,15 @@ def find_gaps(regions, max_addr=None):
   return gaps
 
 
-def lookup_region(regions, hw_addr):
+def _lookup_region_type(regions, hw_addr):
+  """Return the type string of the region containing hw_addr, or None."""
   import bisect
-
   starts = [r[0] for r in regions]
   idx = bisect.bisect_right(starts, hw_addr) - 1
   if idx >= 0:
     start, end, name, typ = regions[idx]
-    if start <= hw_addr <= end:
-      return (name, typ, hw_addr - start)
+    if hw_addr <= end:
+      return typ
   return None
 
 
@@ -114,50 +96,39 @@ def lookup_gap(gaps, hw_addr):
   return None
 
 
-def read_baseline_hw(baseline_image, hw_addr):
+def read_hw(image: bytes, hw_addr: int) -> int | None:
+  """Read a halfword from a memory image at a halfword address."""
   off = Addr.from_hw(hw_addr).bytes
-  if off + 1 < len(baseline_image):
-    return (baseline_image[off] << 8) | baseline_image[off + 1]
+  if off + 1 < len(image):
+    return (image[off] << 8) | image[off + 1]
   return None
 
 
-def follow_zcon(baseline_image, zcon_hw_addr, regions, gaps):
-  hw0 = read_baseline_hw(baseline_image, zcon_hw_addr)
-  hw1 = read_baseline_hw(baseline_image, zcon_hw_addr + 1)
-  if hw0 is None or hw1 is None:
+def follow_zcon(image: bytes, zcon_hw_addr: int, addr_map: AddressMap, gaps: list):
+  """Read a ZCON from the image and resolve where it points."""
+  byte_off = Addr.from_hw(zcon_hw_addr).bytes
+  if byte_off + 3 >= len(image):
     return None
+  zcon = ZCon.from_image(image, byte_off)
 
-  result = {
-    "zconAddr": zcon_hw_addr,
-    "hw0": hw0,
-    "hw1": hw1,
-    **decode_zcon_hw1(hw1),
+  label = addr_map.format(zcon.target_hw)
+  if not label:
+    gap = lookup_gap(gaps, zcon.target_hw)
+    if gap:
+      gs, ge = Addr.from_hw(gap[0]), Addr.from_hw(gap[1])
+      label = f"UNALLOCATED (gap {gs.x}–{ge.x})"
+
+  return {
+    "zcon": zcon,
+    "targetRegion": label or "UNKNOWN",
   }
 
-  target_hw = sector_decode(hw0)
-  result["targetHW"] = target_hw
 
-  region = lookup_region(regions, target_hw) if regions else None
-  gap = lookup_gap(gaps, target_hw) if gaps else None
-  if region:
-    name, typ, off = region
-    result["targetRegion"] = f"{name}+{off:X}" if off else name
-    result["targetType"] = typ
-  elif gap:
-    gs, ge = Addr.from_hw(gap[0]), Addr.from_hw(gap[1])
-    result["targetRegion"] = f"UNALLOCATED (gap {gs.x}–{ge.x})"
-    result["targetType"] = "GAP"
-  else:
-    result["targetRegion"] = "UNKNOWN"
-    result["targetType"] = "?"
-
-  return result
-
-
-def scan_gap_data(baseline_image, gap_start, gap_end, equiv_set):
+def scan_gap_data(image: bytes, gap_start: int, gap_end: int, equiv_set: frozenset):
+  """Scan a gap for non-trivial halfwords. Returns [(hw_addr, value), ...]."""
   hits = []
   for hw in range(gap_start, gap_end + 1):
-    val = read_baseline_hw(baseline_image, hw)
+    val = read_hw(image, hw)
     if val is None:
       break
     if val not in equiv_set:
@@ -194,43 +165,28 @@ def main(
   our_image = our_fcm.read_bytes()
   baseline_image = baseline_fcm.read_bytes()
 
-  # Load csect table if provided
+  # Build address map from sym_data and optional csect table
+  addr_map = AddressMap()
+  addr_map.add_sym_json(sym_data)
+
   regions = []
   gaps = []
+  csect_data = {}
   if csect_table:
     with open(csect_table) as f:
-      regions = build_memory_map(json.load(f))
+      csect_data = json.load(f)
+    addr_map.add_csect_table(csect_data)
+    regions = build_memory_map(csect_data)
     gaps = find_gaps(regions)
 
   section_map = {}  # name -> hw address
   for s in sym_data.get("sections", []):
     section_map[s["name"]] = s["address"]
 
-  sym_addrs = sorted((s["address"], s["name"]) for s in sym_data.get("symbols", []))
-  sym_hws = [a for a, _ in sym_addrs]
-
-  import bisect
-
-  def resolve_hw(hw):
-    idx = bisect.bisect_right(sym_hws, hw) - 1
-    if idx >= 0:
-      addr, name = sym_addrs[idx]
-      disp = hw - addr
-      if disp == 0:
-        return name
-      if disp < 0x1000:
-        return f"{name}+{disp:X}"
-    return None
-
   def resolve_hw_any(hw):
-    sym = resolve_hw(hw)
-    if sym:
-      return sym
-    region = lookup_region(regions, hw) if regions else None
-    if region:
-      name, typ, off = region
-      label = f"{name}+{off:X}" if off else name
-      return f"{label} ({typ})" if typ else label
+    label = addr_map.format(hw)
+    if label:
+      return label
     gap = lookup_gap(gaps, hw) if gaps else None
     if gap:
       gs, ge = Addr.from_hw(gap[0]), Addr.from_hw(gap[1])
@@ -263,9 +219,9 @@ def main(
     # For ZCONs, follow the pointer in the baseline
     ft = rld["flags"] & 0x70
     if ft in (0x10, 0x50) or (ft == 0x00 and regions):
-      region = lookup_region(regions, target_hw) if regions else None
-      if region and "ZCON" in (region[1] or ""):
-        zcon_info = follow_zcon(baseline_image, target_hw, regions, gaps)
+      region = _lookup_region_type(regions, target_hw)
+      if region and "ZCON" in region:
+        zcon_info = follow_zcon(baseline_image, target_hw, addr_map, gaps)
         if zcon_info:
           analysis["zcon"] = zcon_info
 
@@ -356,12 +312,10 @@ def main(
         print(f"      -> {annotation}")
 
       # Print ZCON follow info
-      zcon = r.get("zcon")
-      if zcon:
-        zcon_addr = Addr.from_hw(zcon["zconAddr"])
-        target = Addr.from_hw(zcon["targetHW"])
-        print(f"      -> ZCON @ {zcon_addr.x}: [{zcon['hw0']:04X}, {zcon['hw1']:04X}]  {format_zcon_fields(zcon)}")
-        print(f"         code target: {target.x}  " f"-> {zcon['targetRegion']}")
+      zi = r.get("zcon")
+      if zi:
+        z = zi["zcon"]
+        print(f"      -> {z}  -> {zi['targetRegion']}")
 
       target_addrs.add(r["targetHW"])
 
@@ -389,16 +343,12 @@ def main(
 
     # If this address is a ZCON, show where it points
     if regions:
-      region = lookup_region(regions, hw)
-      if region and "ZCON" in (region[1] or ""):
-        zcon_info = follow_zcon(baseline_image, hw, regions, gaps)
-        if zcon_info:
-          target = Addr.from_hw(zcon_info["targetHW"])
-          print(
-            f"         ZCON [{zcon_info['hw0']:04X},{zcon_info['hw1']:04X}] "
-            f"{format_zcon_fields(zcon_info)} "
-            f"-> {target.x}  "
-            f"{zcon_info['targetRegion']}")
+      region = _lookup_region_type(regions, hw)
+      if region and "ZCON" in region:
+        zi = follow_zcon(baseline_image, hw, addr_map, gaps)
+        if zi:
+          z = zi["zcon"]
+          print(f"         {z}  -> {zi['targetRegion']}")
 
   if json_out:
     with open(json_out, "w") as f:
