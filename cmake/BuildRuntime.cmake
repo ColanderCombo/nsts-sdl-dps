@@ -30,12 +30,11 @@ function(assemble_file ASM_FILE OUTPUT_DIR INSTALL_DIR STAMP_VAR)
         COMMAND ${CMAKE_COMMAND} -E make_directory "${OUTPUT_DIR}"
         COMMAND ${CMAKE_COMMAND} -E env PYTHONUTF8=1
                 "${SDL_VENV_PYTHON}" -m asm101s
-                --object=${ASM_NAME}.obj
+                "--object=${OUTPUT_DIR}/${ASM_NAME}.obj"
                 "--library=${RUNMAC_DIR}"
                 --tolerable=4
                 "${ASM_FILE}"
         COMMAND ${CMAKE_COMMAND} -E touch "${STAMP_FILE}"
-        WORKING_DIRECTORY "${OUTPUT_DIR}"
         DEPENDS "${ASM_FILE}"
         COMMENT "[ASM101S] Assembling ${ASM_BASENAME}..."
         VERBATIM
@@ -52,10 +51,6 @@ function(build_runtime_library)
     # Output directories in build tree
     set(RUN_BUILD_DIR "${CMAKE_BINARY_DIR}/lib/runtime/RUN")
     set(ZCON_BUILD_DIR "${CMAKE_BINARY_DIR}/lib/runtime/ZCON")
-    
-    # Create output directories
-    file(MAKE_DIRECTORY "${RUN_BUILD_DIR}")
-    file(MAKE_DIRECTORY "${ZCON_BUILD_DIR}")
     
     #-------------------------------------------------------------------------
     # RUNASM - HAL/S Runtime

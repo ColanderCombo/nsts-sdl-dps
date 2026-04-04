@@ -16,20 +16,19 @@ if(DEFINED DEBUG)
 else()
     set(LNK101_EXTRA_ARGS "")
 endif()
-file(MAKE_DIRECTORY "${FCM_BUILD_DIR}")
-file(MAKE_DIRECTORY "${HAL_TEMPLIB_DIR}")
-file(MAKE_DIRECTORY "${HAL_COMPOOL_DIR}")
+# Note: build output directories are created at build time via
+# "cmake -E make_directory" in custom commands, not here, so that
+# make clean && make works correctly.
 
 # Build template-generating HAL/S programs into the shared TEMPLIB.
 # These must be compiled before programs that use D INCLUDE TEMPLATE.
 function(build_hal_templates SRC_DIR OUT_DIR TARGET_NAME PARM)
     set(_sources ${ARGN})
 
-    file(MAKE_DIRECTORY "${OUT_DIR}")
-
     add_custom_target(${TARGET_NAME})
     add_dependencies(${TARGET_NAME} halsfc)
 
+    set(_prev_target "")
     foreach(_name IN LISTS _sources)
         set(_hal "${SRC_DIR}/${_name}.hal")
         set(_obj "${OUT_DIR}/${_name}.obj")
@@ -38,6 +37,7 @@ function(build_hal_templates SRC_DIR OUT_DIR TARGET_NAME PARM)
 
         add_custom_command(
             OUTPUT "${_stamp}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${OUT_DIR}" "${HAL_TEMPLIB_DIR}" "${HAL_COMPOOL_DIR}"
             COMMAND "${HALSC_WRAPPER}"
                 "--parm=${PARM}"
                 "--templib=${HAL_TEMPLIB_DIR}"
@@ -46,12 +46,16 @@ function(build_hal_templates SRC_DIR OUT_DIR TARGET_NAME PARM)
             COMMAND ${CMAKE_COMMAND} -E copy "${_obj}" "${HAL_COMPOOL_DIR}/"
             COMMAND ${CMAKE_COMMAND} -E touch "${_stamp}"
             DEPENDS "${_hal}"
-            WORKING_DIRECTORY "${OUT_DIR}"
             COMMENT "Building template ${_name}"
         )
         add_custom_target(${_target} DEPENDS "${_stamp}")
         add_dependencies(${_target} halsfc)
+        # Chain templates: each may depend on templates compiled before it
+        if(_prev_target)
+            add_dependencies(${_target} ${_prev_target})
+        endif()
         add_dependencies(${TARGET_NAME} ${_target})
+        set(_prev_target "${_target}")
     endforeach()
 endfunction()
 
@@ -60,6 +64,8 @@ function(_build_one_hal_program)
     cmake_parse_arguments(HP "" "NAME;HAL;OUT_DIR;PARM;TARGET" "" ${ARGN})
 
     set(_obj "${HP_OUT_DIR}/${HP_NAME}.obj")
+    set(_halmat "${HP_OUT_DIR}/${HP_NAME}.halmat.bin")
+    set(_litfile "${HP_OUT_DIR}/${HP_NAME}.litfile.bin")
     set(_rpt "${HP_OUT_DIR}/${HP_NAME}.pass2.rpt")
     set(_fcm "${FCM_BUILD_DIR}/${HP_NAME}.fcm")
     set(_sym "${FCM_BUILD_DIR}/${HP_NAME}.sym.json")
@@ -68,20 +74,23 @@ function(_build_one_hal_program)
     # Compile
     add_custom_command(
         OUTPUT "${_obj}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${HP_OUT_DIR}" "${HAL_TEMPLIB_DIR}"
         COMMAND "${HALSC_WRAPPER}"
             "--parm=${HP_PARM}"
             "--templib=${HAL_TEMPLIB_DIR}"
             "--pass2-rpt=${_rpt}"
+            "--halmat=${_halmat}"
+            "--litfile=${_litfile}"
             -o "${_obj}"
             "${HP_HAL}"
         DEPENDS "${HP_HAL}"
-        WORKING_DIRECTORY "${HP_OUT_DIR}"
         COMMENT "Compiling ${HP_NAME}.hal"
     )
 
     # Link
     add_custom_command(
         OUTPUT "${_fcm}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${FCM_BUILD_DIR}"
         COMMAND ${CMAKE_COMMAND} -E env PYTHONUTF8=1
             "${SDL_VENV_PYTHON}" -m lnk101
             -o "${_fcm}"
@@ -92,7 +101,6 @@ function(_build_one_hal_program)
             ${LNK101_EXTRA_ARGS}
             "${_obj}"
         DEPENDS "${_obj}"
-        WORKING_DIRECTORY "${FCM_BUILD_DIR}"
         COMMENT "Linking ${HP_NAME}"
     )
 
@@ -110,8 +118,6 @@ function(build_hal_programs SRC_DIR OUT_DIR TARGET_NAME PARM)
         message(WARNING "HAL/S source directory not found: ${SRC_DIR}")
         return()
     endif()
-
-    file(MAKE_DIRECTORY "${OUT_DIR}")
 
     file(GLOB _hal_files "${SRC_DIR}/*.hal")
     list(SORT _hal_files COMPARE NATURAL)

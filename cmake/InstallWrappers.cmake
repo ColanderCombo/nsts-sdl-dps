@@ -40,6 +40,14 @@ set(WRAPPER_BINDIR "${CMAKE_BINARY_DIR}/halsfc")
 set(WRAPPER_LIBDIR "${CMAKE_BINARY_DIR}/lib")
 _configure_wrapper(halsc.in        halsc)
 
+# Symlink HALSFC support files into build/lib/ so halsc can find them
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+foreach(_support ERRORLIB ACCESS)
+    if(EXISTS "${HALSFC_SRC_DIR}/${_support}" AND NOT EXISTS "${CMAKE_BINARY_DIR}/lib/${_support}")
+        file(CREATE_LINK "${HALSFC_SRC_DIR}/${_support}" "${CMAKE_BINARY_DIR}/lib/${_support}" SYMBOLIC)
+    endif()
+endforeach()
+
 set(WRAPPER_BINDIR "${CMAKE_BINARY_DIR}/bin")
 set(WRAPPER_LIBDIR "${CMAKE_BINARY_DIR}/lib")
 _configure_wrapper(asm101s.sh.in   asm101s)

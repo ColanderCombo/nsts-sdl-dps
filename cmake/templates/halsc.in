@@ -78,12 +78,14 @@ if [[ "$TARGET" == "BFS" ]]; then
     OPT="${HALSFC_BINDIR}/HALSFC-OPTB"
     PASS2="${HALSFC_BINDIR}/HALSFC-PASS2B"
     TEMPLIB_NAME="TEMPLIBB"
+    INCLIB_NAME="INCLIBB"
     CARDS_ARG="--pdso=3,cards.bin,E"
 else
     PASS1="${HALSFC_BINDIR}/HALSFC-PASS1"
     OPT="${HALSFC_BINDIR}/HALSFC-OPT"
     PASS2="${HALSFC_BINDIR}/HALSFC-PASS2"
     TEMPLIB_NAME="TEMPLIB"
+    INCLIB_NAME="INCLIB"
     CARDS_ARG="--ddo=3,cards.bin,E"
 fi
 FLO="${HALSFC_BINDIR}/HALSFC-FLO"
@@ -94,6 +96,9 @@ for exe in "$PASS1" "$FLO" "$OPT" "$AUXP" "$PASS2"; do
 done
 
 [[ -z "$TEMPLIB" ]] && TEMPLIB="${HALSFC_LIBDIR}/${TEMPLIB_NAME}"
+INCLIB="${HALSFC_LIBDIR}/${INCLIB_NAME}"
+TEMPINC="${HALSFC_LIBDIR}/&&TEMPINC"
+mkdir -p "$INCLIB" "$TEMPINC"
 
 # Working directory
 if [[ -z "$WORKDIR" ]]; then
@@ -124,6 +129,8 @@ run PASS1 "$PASS1" \
     --ddo=2,listing2.txt \
     --pdsi=4,"$TEMPLIB",E --pdsi=5,"$ERRORLIB" \
     --pdsi=6,ACCESS --pdso=6,"$TEMPLIB",E \
+    --pdsi=8,"$INCLIB",E --pdso=8,"$TEMPINC",E \
+    --pdsi=9,"$TEMPINC",E \
     --commono=COMMON0.out \
     --raf=B,7200,1,halmat.bin --raf=B,1560,2,litfile.bin --raf=B,3360,6,vmem.bin
 

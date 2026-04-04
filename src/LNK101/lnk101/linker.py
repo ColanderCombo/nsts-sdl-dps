@@ -1434,11 +1434,18 @@ class Linker:
             section, module, byteAddr = self.globalSymbols[name]
             if byteAddr is not None:
                 symType = "entry" if section.type == 'LD' else "section"
+                # For LDs, resolve the parent SD name via ldId
+                parentName = None
+                if section.type == 'LD' and section.ldId is not None:
+                    parent = module.sections.get(section.ldId)
+                    if parent:
+                        parentName = parent.name
+
                 data["symbols"].append({
                     "name": name,
                     "address": byteAddr.hw,
                     "type": symType,
-                    "section": section.name if section.type == 'LD' else None,
+                    "section": parentName,
                     "module": Path(module.filename).stem if module.filename else module.name
                 })
         

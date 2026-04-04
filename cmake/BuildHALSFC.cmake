@@ -76,8 +76,6 @@ function(build_halsfc_pass PASS_NAME SRC_FOLDER IDENTIFIER CONDITIONS OUTPUT_NAM
 
     set(XCOM_STAMP "${PASS_BUILD_DIR}/.xcom-stamp")
 
-    file(MAKE_DIRECTORY "${PASS_BUILD_DIR}")
-
     file(GLOB XPL_SOURCES "${PASS_SRC_DIR}/*.xpl")
 
     set(XCOM_CMD "${Python3_EXECUTABLE}" "${XCOM_I_SCRIPT}")
@@ -87,6 +85,7 @@ function(build_halsfc_pass PASS_NAME SRC_FOLDER IDENTIFIER CONDITIONS OUTPUT_NAM
     add_custom_command(
         OUTPUT "${XCOM_STAMP}"
         BYPRODUCTS "${PASS_BUILD_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${PASS_BUILD_DIR}"
         COMMAND ${CMAKE_COMMAND} -E env PYTHONUTF8=1
                 ${XCOM_CMD}
                 --identifier=${IDENTIFIER}
