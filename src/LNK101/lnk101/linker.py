@@ -1211,8 +1211,10 @@ class Linker:
         log.info("Resolving external references...")
         allResolved = self.resolveExternals(searchLibraries=bool(self.args.library_path))
 
-        # Resolve remaining undefined symbols from external JSON csect table
-        if not allResolved and self.args.external_syms:
+        # Load external symbol table — needed both for resolving remaining
+        # undefined symbols AND for placing loaded sections (including library
+        # modules) at their correct addresses in the memory map.
+        if self.args.external_syms:
             log.info("Loading external symbol table...")
             if self.loadExternalSyms(self.args.external_syms):
                 allResolved = self.resolveExternals(searchLibraries=False)
