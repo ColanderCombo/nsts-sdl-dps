@@ -7,6 +7,17 @@ import sys
 from pathlib import Path
 
 
+def _source_hash():
+    """MD5 of all .py files in the lnk101 package — fingerprints the
+    actually-running code regardless of git state or install method."""
+    pkg_dir = Path(__file__).parent
+    h = hashlib.md5()
+    for py in sorted(pkg_dir.glob("*.py")):
+        h.update(py.name.encode())
+        h.update(py.read_bytes())
+    return h.hexdigest()
+
+
 def get_git_info():
     src_dir = Path(__file__).parent
     try:
@@ -24,9 +35,9 @@ def get_git_info():
         ).decode().strip()
         if dirty:
             commit += " (dirty)"
-        return {"commit": commit, "date": date}
+        return {"commit": commit, "date": date, "source_hash": _source_hash()}
     except (subprocess.CalledProcessError, FileNotFoundError):
-        return {"commit": "unknown", "date": "unknown"}
+        return {"commit": "unknown", "date": "unknown", "source_hash": _source_hash()}
 
 
 def version_string():
@@ -35,7 +46,8 @@ def version_string():
     short = commit[:7] if commit != "unknown" else "unknown"
     date = info["date"].split()[0] if info["date"] != "unknown" else "unknown"
     dirty = " (dirty)" if "(dirty)" in info.get("commit", "") else ""
-    return f"{short}({date}){dirty}"
+    src = info["source_hash"][:8]
+    return f"{short}({date}){dirty} src:{src}"
 
 
 def md5_file(path):
@@ -70,8 +82,9 @@ class ReproTracker:
     def print_summary(self, file=sys.stderr):
         git = self.git_info
         print(f"\n{self.tool_name} {self.tool_version}", file=file)
-        print(f"  git commit: {git['commit']}", file=file)
-        print(f"  git date:   {git['date']}", file=file)
+        print(f"  git commit:  {git['commit']}", file=file)
+        print(f"  git date:    {git['date']}", file=file)
+        print(f"  source hash: {git['source_hash']}", file=file)
         if self.files:
             print("  md5sums:", file=file)
             for path, info in sorted(self.files.items()):
@@ -98,8 +111,18 @@ class ReproTracker:
 
         issues = []
 
-        # Git version
+        # Source hash (definitive — based on actual running code)
         saved_git = saved.get("git", {})
+        saved_src = saved_git.get("source_hash")
+        current_src = self.git_info.get("source_hash")
+        if saved_src and current_src and saved_src != current_src:
+            issues.append(
+                f"SOURCE CODE DIFFERS (lnk101 package):\n"
+                f"    saved:   {saved_src}\n"
+                f"    current: {current_src}"
+            )
+
+        # Git commit (informational — may not reflect running code)
         if saved_git.get("commit") != self.git_info.get("commit"):
             issues.append(
                 f"git commit differs:\n"
