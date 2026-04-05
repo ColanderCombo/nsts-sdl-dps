@@ -1,3 +1,4 @@
+../../src/LNK101/lnk101/addrcon.py
 """AP-101 address constant types: YCON, ZCON, ACON.
 
 AddrCon  — single-value relocation (YCON/ACON/ZCON hw0)
@@ -81,8 +82,9 @@ class AddrCon:
 
     def encode(self, target: Addr) -> int:
         """Encode a target address to the value written by this relocation.
-        ZCONs use sector-encoded halfwords; YCONs/ACONs use raw halfwords."""
-        if self.length == 2 and self.is_zcon:
+        All 16-bit relocations use sector-encoded halfwords (bit 15 set
+        if address is in sector 1+).  32-bit relocations use raw values."""
+        if self.length == 2:
             return target.sector_encode()
         return target.hw
 
