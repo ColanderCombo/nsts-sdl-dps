@@ -1,4 +1,3 @@
-../../src/LNK101/lnk101/addrcon.py
 """AP-101 address constant types: YCON, ZCON, ACON.
 
 AddrCon  — single-value relocation (YCON/ACON/ZCON hw0)
