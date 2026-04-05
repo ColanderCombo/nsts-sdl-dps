@@ -12,6 +12,14 @@ import typer
 
 from .addr import Addr, AddrDisp, AddressMap
 from .addrcon import AddrCon, ZCon, rld_flag_type_name
+from .repro import ReproTracker, version_string
+
+
+def _version_callback(value: bool):
+    if value:
+        print(f"rldanalyze {version_string()}")
+        raise typer.Exit()
+
 
 app = typer.Typer(
   help="Follow undefined RLDs",
@@ -147,7 +155,21 @@ def main(
   scan_gaps: Annotated[bool, typer.Option("--scan-gaps")] = False,
   equiv: Annotated[str, typer.Option("--equiv")] = "0000,C6C6,C9FB",
   json_out: Annotated[Optional[Path], typer.Option("--json", "-j")] = None,
+  repro: Annotated[bool, typer.Option("--repro/--no-repro",
+      help="Print repro info (git version, file MD5s) and save .repro.json")] = True,
+  check_repro: Annotated[Optional[Path], typer.Option("--check-repro",
+      help="Compare current run against a saved .repro.json",
+      exists=True)] = None,
+  version: Annotated[bool, typer.Option("--version", help="Show version",
+      callback=_version_callback, is_eager=True)] = False,
 ):
+
+  tracker = ReproTracker("rldanalyze")
+  tracker.track(sym_json, role="sym_json")
+  tracker.track(our_fcm, role="our_fcm")
+  tracker.track(baseline_fcm, role="baseline_fcm")
+  if csect_table:
+    tracker.track(csect_table, role="csect_table")
 
   equiv_set = frozenset()
   if equiv:
@@ -350,16 +372,29 @@ def main(
           z = zi["zcon"]
           print(f"         {z}  -> {zi['targetRegion']}")
 
+  analysis_data = {
+    "results": results,
+    "summary": {
+      hex(addr): { "csects": sorted(syms),
+                   "annotation": resolve_hw_any(addr),
+      } for addr, syms in all_targets.items()
+    },
+  }
+
   if json_out:
+    data = {**analysis_data, "repro": tracker.to_dict()}
     with open(json_out, "w") as f:
-      json.dump({"results": results,
-                 "summary": { 
-                   hex(addr): { "csects": sorted(syms),
-                                "annotation": resolve_hw_any(addr),
-                   } for addr, syms in all_targets.items()
-                  },
-                 }, f, indent=2,)
+      json.dump(data, f, indent=2)
+      f.write("\n")
     print(f"\nsaved to: {json_out}")
+
+  if repro:
+    tracker.print_summary()
+    repro_path = sym_json.parent / (sym_json.stem.split('.')[0] + '.rldanalyze.repro.json')
+    tracker.save(repro_path, extra=analysis_data)
+
+  if check_repro:
+    tracker.print_check(check_repro)
 
 
 if __name__ == "__main__":

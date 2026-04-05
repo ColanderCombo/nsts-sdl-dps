@@ -5,7 +5,9 @@
 #
 
 program = "LNK101"
-version = "0.1"
+
+from .repro import version_string as _version_string
+version = _version_string()
 
 import sys
 import os

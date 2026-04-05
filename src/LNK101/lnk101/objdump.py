@@ -5,13 +5,20 @@
 
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Optional
 
 import typer
 
 from .addr import Addr, AddrDisp
+from .repro import ReproTracker, version_string
 from .addrcon import rld_flag_type_name
 from .readObject101S import readObject101S, bytearrayToAscii, bytearrayToInteger
+
+def _version_callback(value: bool):
+    if value:
+        print(f"ibmobjdump {version_string()}")
+        raise typer.Exit()
+
 
 app = typer.Typer(
     help="Dump IBM AP-101S object files (.obj) in human-readable form.",
@@ -216,6 +223,58 @@ def dump_obj(filename, hex_dump=False, show_sym=False):
             print(f"  *** {err}")
 
 
+def extract_txt(filename, out_dir):
+    """Extract TXT data for each CSECT to separate .bin files in out_dir."""
+    obj, _symbols = readObject101S(str(filename))
+
+    # Collect ESD names and section lengths
+    esd_names = {}
+    esd_lengths = {}
+    for cardNum in range(obj["numLines"]):
+        line = obj[cardNum]
+        if line["type"] == "ESD":
+            firstEsdId = line.get("esdid", 1)
+            for i, symKey in enumerate(["symbol1", "symbol2", "symbol3"]):
+                sym = line.get(symKey)
+                if sym is None:
+                    continue
+                esdId = firstEsdId + i
+                esd_names[esdId] = sym.get("name", "").strip()
+                if "length" in sym and sym.get("type") in ("SD", "PC"):
+                    esd_lengths[esdId] = sym["length"]
+
+    # Accumulate TXT data per CSECT
+    sections = {}  # esdId -> bytearray
+    for cardNum in range(obj["numLines"]):
+        line = obj[cardNum]
+        if line["type"] != "TXT":
+            continue
+        esdId = line.get("esdid", 1)
+        relAddr = line.get("relativeAddress", 0)
+        size = line.get("size", 0)
+        data = line.get("data", ())
+        if size == 0:
+            continue
+
+        if esdId not in sections:
+            length = esd_lengths.get(esdId, 0)
+            sections[esdId] = bytearray(max(length, relAddr + size))
+        buf = sections[esdId]
+        # Extend if needed (TXT cards may arrive out of order)
+        if relAddr + size > len(buf):
+            buf.extend(b'\x00' * (relAddr + size - len(buf)))
+        buf[relAddr:relAddr + size] = data[:size]
+
+    # Write files
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for esdId in sorted(sections):
+        name = esd_names.get(esdId, f"ESD{esdId}")
+        out_path = out_dir / f"{name}.bin"
+        out_path.write_bytes(sections[esdId])
+        print(f"  {name:8s}  {len(sections[esdId])} bytes -> {out_path}")
+
+
 @app.command()
 def main(
     obj_files: Annotated[list[Path], typer.Argument(help="Object file(s) to dump",
@@ -224,14 +283,36 @@ def main(
         help="Include hex dump of TXT record data")] = False,
     show_sym: Annotated[bool, typer.Option("--show-sym-table", "-s",
         help="Show decoded SYM symbol table")] = False,
+    extract: Annotated[Optional[Path], typer.Option("--extract-txt",
+        help="Extract each CSECT's TXT data to a .bin file in this directory"
+    )] = None,
+    repro: Annotated[bool, typer.Option("--repro/--no-repro",
+        help="Print repro info (git version, file MD5s)")] = True,
+    check_repro: Annotated[Optional[Path], typer.Option("--check-repro",
+        help="Compare current run against a saved .repro.json",
+        exists=True)] = None,
+    version: Annotated[bool, typer.Option("--version", help="Show version",
+        callback=_version_callback, is_eager=True)] = False,
 ):
     """Dump IBM AP-101 object files."""
+    tracker = ReproTracker("ibmobjdump")
+    for obj_file in obj_files:
+        tracker.track(obj_file, role="input")
+
     for i, obj_file in enumerate(obj_files):
         if len(obj_files) > 1:
             if i > 0:
                 print()
             print(f"=== {obj_file} ===")
-        dump_obj(obj_file, hex_dump=hex_dump, show_sym=show_sym)
+        if extract is not None:
+            extract_txt(obj_file, extract)
+        else:
+            dump_obj(obj_file, hex_dump=hex_dump, show_sym=show_sym)
+
+    if repro:
+        tracker.print_summary()
+    if check_repro:
+        tracker.print_check(check_repro)
 
 
 if __name__ == "__main__":

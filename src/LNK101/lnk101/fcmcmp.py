@@ -5,12 +5,20 @@
 
 import json
 import sys
+from collections import OrderedDict
 from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
 
 from .addr import Addr, AddrDisp
+from .repro import ReproTracker, version_string
+
+def _version_callback(value: bool):
+    if value:
+        print(f"fcmcmp {version_string()}")
+        raise typer.Exit()
+
 
 app = typer.Typer(
     help="Compare two FCM images section-by-section using a symbol table.",
@@ -184,13 +192,132 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
     return checked, failures
 
 
+def collect_diffs(sections, image_a, image_b, equiv=None):
+    """Return all halfword differences across all sections (no elision).
+
+    Returns a list of dicts with keys: section, address, hw_a, hw_b.
+    Addresses are 5-char hex, values are 4-char hex (uppercase).
+    """
+    diffs = []
+    for name, addr, size in sections:
+        offset = addr.bytes
+        length = size.bytes
+        if offset + length > len(image_a) or offset + length > len(image_b):
+            continue
+        a = image_a[offset : offset + length]
+        b = image_b[offset : offset + length]
+        if a == b:
+            continue
+        for hi in range(size.hw):
+            bo = hi * 2
+            hw_a = (a[bo] << 8) | a[bo + 1] if bo + 1 < len(a) else a[bo] << 8
+            hw_b = (b[bo] << 8) | b[bo + 1] if bo + 1 < len(b) else b[bo] << 8
+            if hw_a != hw_b:
+                if equiv and hw_a in equiv and hw_b in equiv:
+                    continue
+                diff_addr = addr + Addr(hi * 2)
+                diffs.append({
+                    "section": name,
+                    "address": f"{diff_addr.hw:05X}",
+                    "hw_a": f"{hw_a:04X}",
+                    "hw_b": f"{hw_b:04X}",
+                })
+    return diffs
+
+
+def compare_with_diff_json(diff_data, image, max_hw_diffs, addr_to_sym,
+                           addr_to_rld):
+    """Compare an FCM image against reference values from a diff JSON.
+
+    For each recorded diff, reads the halfword at that address from *image*
+    and checks whether it now matches the reference value (hw_b).
+
+    Returns (total_known, total_fixed, total_remaining).
+    """
+    entries = diff_data["diffs"]
+
+    # Group by section, preserving order of first appearance
+    by_section = OrderedDict()
+    for d in entries:
+        by_section.setdefault(d["section"], []).append(d)
+
+    total_known = len(entries)
+    total_fixed = 0
+    total_remaining = 0
+
+    name_width = max((len(name) for name in by_section), default=0)
+
+    for section_name, section_diffs in by_section.items():
+        fixed = 0
+        remaining = []
+
+        for d in section_diffs:
+            hw_addr = int(d["address"], 16)
+            byte_offset = hw_addr * 2
+
+            if byte_offset + 1 < len(image):
+                our_val = (image[byte_offset] << 8) | image[byte_offset + 1]
+            elif byte_offset < len(image):
+                our_val = image[byte_offset] << 8
+            else:
+                our_val = None
+
+            ref_val = int(d["hw_b"], 16)
+
+            if our_val == ref_val:
+                fixed += 1
+            else:
+                remaining.append((d["address"], our_val, ref_val, d["hw_a"]))
+
+        padded = section_name.ljust(name_width)
+        total_fixed += fixed
+        total_remaining += len(remaining)
+
+        if not remaining:
+            print(
+                f"  OK:   {padded}"
+                f" — all {len(section_diffs)} known diffs now match reference"
+            )
+        else:
+            print(
+                f"  DIFF: {padded}"
+                f" — {len(remaining)}/{len(section_diffs)} diffs remain"
+                f" ({fixed} fixed)"
+            )
+            pad = " " * 8 + " " * name_width
+            shown = min(len(remaining), max_hw_diffs)
+            for addr_str, our_val, ref_val, orig_val in remaining[:shown]:
+                notes = []
+                hw = int(addr_str, 16)
+                sym = addr_to_sym.get(hw)
+                if sym:
+                    notes.append(sym)
+                rld = addr_to_rld.get(hw)
+                if rld:
+                    notes.append(rld)
+                annotation = f"  ; {', '.join(notes)}" if notes else ""
+                our_str = f"{our_val:04X}" if our_val is not None else "????"
+                print(
+                    f"{pad} @ {addr_str}"
+                    f" {our_str} vs ref {ref_val:04X}"
+                    f" (was {orig_val}){annotation}"
+                )
+            leftover = len(remaining) - shown
+            if leftover > 0:
+                print(f"{pad}   ... and {leftover} more")
+
+    return total_known, total_fixed, total_remaining
+
+
 @app.command()
 def main(
     sym_json: Annotated[
         Path, typer.Argument(help="Symbol table JSON from linker", exists=True)
     ],
     fcm_a: Annotated[Path, typer.Argument(help="First FCM image", exists=True)],
-    fcm_b: Annotated[Path, typer.Argument(help="Second FCM image", exists=True)],
+    fcm_b: Annotated[
+        Optional[Path], typer.Argument(help="Second FCM image")
+    ] = None,
     module: Annotated[
         Optional[list[str]],
         typer.Option(
@@ -232,9 +359,69 @@ def main(
                  "(e.g. 0000,C6C6,C9FB). Pass '' or a single value to disable.",
         ),
     ] = "0000,C6C6,C9FB",
+    diff_json: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--diff-json",
+            help="Compare FCM_A against reference values from a diff JSON "
+                 "(replaces FCM_B).",
+            exists=True,
+        ),
+    ] = None,
+    dump_diffs: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--dump-diffs",
+            help="Dump all halfword diffs (no elision) to a JSON file.",
+        ),
+    ] = None,
+    repro: Annotated[
+        bool,
+        typer.Option(
+            "--repro/--no-repro",
+            help="Print repro info (git version, file MD5s) and save .repro.json",
+        ),
+    ] = True,
+    check_repro: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--check-repro",
+            help="Compare current run against a saved .repro.json",
+            exists=True,
+        ),
+    ] = None,
+    version: Annotated[
+        bool, typer.Option("--version", help="Show version",
+                           callback=_version_callback, is_eager=True)
+    ] = False,
 ):
     """Compare two FCM images section-by-section."""
+
+    if diff_json and fcm_b:
+        print("Error: --diff-json and FCM_B are mutually exclusive.", file=sys.stderr)
+        raise typer.Exit(2)
+    if not diff_json and not fcm_b:
+        print("Error: provide either FCM_B or --diff-json.", file=sys.stderr)
+        raise typer.Exit(2)
+    if fcm_b and not fcm_b.exists():
+        print(f"Error: {fcm_b} does not exist.", file=sys.stderr)
+        raise typer.Exit(2)
+    if dump_diffs and diff_json:
+        print("Error: --dump-diffs requires FCM_B, not --diff-json.",
+              file=sys.stderr)
+        raise typer.Exit(2)
+
     modules = set(module) if module else None
+
+    tracker = ReproTracker("fcmcmp")
+    tracker.track(sym_json, role="sym_json")
+    tracker.track(fcm_a, role="fcm_a")
+    if fcm_b:
+        tracker.track(fcm_b, role="fcm_b")
+    if csect_table:
+        tracker.track(csect_table, role="csect_table")
+    if diff_json:
+        tracker.track(diff_json, role="diff_json")
 
     # Parse equiv set
     equiv_set = None
@@ -243,9 +430,39 @@ def main(
         if len(vals) >= 2:
             equiv_set = frozenset(vals)
 
+    addr_to_sym, addr_to_rld = load_annotations(sym_json, csect_table)
+
+    # --diff-json mode: compare FCM_A against recorded reference values
+    if diff_json:
+        with open(diff_json) as f:
+            diff_data = json.load(f)
+
+        image_a = fcm_a.read_bytes()
+        total_known, total_fixed, total_remaining = compare_with_diff_json(
+            diff_data, image_a, max_hw_diffs, addr_to_sym, addr_to_rld,
+        )
+
+        if repro:
+            tracker.print_summary()
+            repro_path = Path(fcm_a.stem + '.fcmcmp.repro.json')
+            tracker.save(repro_path, extra={"diffs": diff_data.get("diffs", [])})
+        if check_repro:
+            tracker.print_check(check_repro)
+
+        print()
+        if total_remaining == 0:
+            print(f"All {total_known} known diffs now match reference")
+        else:
+            print(
+                f"{total_fixed}/{total_known} known diffs fixed,"
+                f" {total_remaining} remaining"
+            )
+            raise typer.Exit(1)
+        return
+
+    # Normal two-image comparison
     sections = load_sections(sym_json, modules=modules, include_all=all)
     sort_sections(sections, group_by_name=group_by_name)
-    addr_to_sym, addr_to_rld = load_annotations(sym_json, csect_table)
 
     image_a = fcm_a.read_bytes()
     image_b = fcm_b.read_bytes()
@@ -260,6 +477,27 @@ def main(
         sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         equiv=equiv_set,
     )
+
+    # Collect all diffs (no elision) when dumping or when repro needs them
+    all_diffs = None
+    if dump_diffs or repro:
+        all_diffs = collect_diffs(sections, image_a, image_b, equiv=equiv_set)
+
+    if dump_diffs:
+        data = {"diffs": all_diffs, "repro": tracker.to_dict()}
+        with open(dump_diffs, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        print(f"\nDumped {len(all_diffs)} diffs to {dump_diffs}")
+
+    if repro:
+        tracker.print_summary()
+        repro_path = Path(fcm_a.stem + '.fcmcmp.repro.json')
+        extra = {"diffs": all_diffs} if all_diffs is not None else {}
+        tracker.save(repro_path, extra=extra)
+
+    if check_repro:
+        tracker.print_check(check_repro)
 
     if failures:
         print(f"\nFAIL: {failures}/{checked} section(s) differ")

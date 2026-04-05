@@ -1,4 +1,5 @@
 
+import json
 import sys
 import os
 from dataclasses import dataclass, field
@@ -7,6 +8,8 @@ from typing import Optional, Annotated
 
 os.environ["TYPER_USE_RICH"] = "0" # Disable fancy formatting
 import typer
+
+from .repro import ReproTracker, version_string
 
 app = typer.Typer(
     help="AP-101 Link Editor",
@@ -89,14 +92,26 @@ def link(
     print_map: Annotated[bool, typer.Option("--print-map", help="Print link map to stdout")] = False,
 
     version: Annotated[bool, typer.Option("--version", help="Show version")] = False,
+
+    # Reproducibility
+    repro: Annotated[bool, typer.Option("--repro/--no-repro",
+        help="Print repro info (git version, file MD5s) and save .repro.json")] = True,
+    check_repro: Annotated[Optional[Path], typer.Option("--check-repro",
+        help="Compare current run against a saved .repro.json", exists=True)] = None,
 ):
     import logging
     from .linker import Linker, error, log as lnk_log, program as prog_name, version as prog_version, \
                         DEFAULT_LIB_PATHS, _find_top_dir
 
     if version:
-        print(f"{prog_name} {prog_version}")
+        print(f"{prog_name} {version_string()}")
         raise typer.Exit()
+
+    # --repro implies verbose
+    if repro:
+        verbose = True
+
+    tracker = ReproTracker("lnk101", prog_version)
 
     # Expand @file arguments into file lists
     expanded = []
@@ -217,15 +232,49 @@ def link(
     elif opts.verbose:
         linker.saveListing(opts.output + '.LIST')
 
+    # Track all files the linker actually used
+    for f in input_files:
+        if os.path.exists(f):
+            tracker.track(f, role="input")
+    if opts.external_syms and os.path.exists(opts.external_syms):
+        tracker.track(opts.external_syms, role="external_syms")
+    if opts.load_config and os.path.exists(opts.load_config):
+        tracker.track(opts.load_config, role="load_config")
+    for module in linker.modules:
+        fn = module.filename
+        if fn and os.path.exists(fn) and fn not in input_files:
+            tracker.track(fn, role="library")
+
+    # Embed repro data in JSON outputs (always, regardless of --repro flag)
+    repro_dict = tracker.to_dict()
+
+    json_symbols_data = None
     if opts.json_symbols:
         linker.saveJsonSymbols(opts.json_symbols)
+        _embed_repro(opts.json_symbols, repro_dict)
+        with open(opts.json_symbols) as f:
+            json_symbols_data = json.load(f)
 
     if opts.save_external_syms:
         linker.saveExternalSyms(opts.save_external_syms)
+        _embed_repro(opts.save_external_syms, repro_dict)
 
     if opts.print_map or opts.verbose:
         linker.printSectionTable()
         linker.printSummary()
+
+    # Repro file: repro metadata + embedded json_symbols data
+    if repro:
+        tracker.print_summary()
+        repro_path = Path(opts.output).parent / (Path(opts.output).stem + '.lnk101.repro.json')
+        extra = {}
+        if json_symbols_data:
+            extra.update({k: v for k, v in json_symbols_data.items()
+                          if k != "repro"})
+        tracker.save(repro_path, extra=extra)
+
+    if check_repro:
+        tracker.print_check(check_repro)
 
     if success:
         print(f"\nLinked {len(linker.modules)} module(s) -> {opts.output} "
@@ -233,6 +282,16 @@ def link(
     else:
         print(f"\nLinked with errors -> {opts.output}", file=sys.stderr)
         raise typer.Exit(1)
+
+
+def _embed_repro(json_path, repro_dict):
+    """Add a 'repro' key to an existing JSON file."""
+    with open(json_path) as f:
+        data = json.load(f)
+    data["repro"] = repro_dict
+    with open(json_path, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
 
 
 def main():

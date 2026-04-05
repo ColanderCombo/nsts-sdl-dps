@@ -116,6 +116,78 @@ def test_missing_file_no_traceback():
     assert "does not exist" in r.stderr
 
 
+def test_dump_diffs_writes_json(tmp_path):
+    out = tmp_path / "diffs.json"
+    r = run_fcmcmp("--dump-diffs", str(out), SYM_JSON, FCM, FCM_UNRELOCATED)
+    assert r.returncode == 1
+    assert out.exists()
+    import json
+    data = json.loads(out.read_text())
+    assert "diffs" in data
+    assert len(data["diffs"]) == 41
+    d = data["diffs"][0]
+    assert set(d.keys()) == {"section", "address", "hw_a", "hw_b"}
+
+
+def test_dump_diffs_no_elision(tmp_path):
+    """--dump-diffs captures all diffs regardless of --max-hw-diffs."""
+    out = tmp_path / "diffs.json"
+    r = run_fcmcmp("--max-hw-diffs", "1", "--dump-diffs", str(out),
+                    SYM_JSON, FCM, FCM_UNRELOCATED)
+    assert r.returncode == 1
+    import json
+    data = json.loads(out.read_text())
+    assert len(data["diffs"]) == 41
+
+
+def test_diff_json_all_match():
+    """--diff-json with the reference image should report all matching."""
+    import json, tempfile
+    # Dump diffs, then verify reference image matches them all
+    with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
+        tmp = f.name
+    try:
+        run_fcmcmp("--dump-diffs", tmp, SYM_JSON, FCM, FCM_UNRELOCATED)
+        r = run_fcmcmp("--diff-json", tmp, SYM_JSON, FCM_UNRELOCATED)
+        assert r.returncode == 0
+        assert "All 41 known diffs now match reference" in r.stdout
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
+def test_diff_json_none_match():
+    """--diff-json with the original image should show all remaining."""
+    import json, tempfile
+    with tempfile.NamedTemporaryFile(suffix=".json", mode="w", delete=False) as f:
+        tmp = f.name
+    try:
+        run_fcmcmp("--dump-diffs", tmp, SYM_JSON, FCM, FCM_UNRELOCATED)
+        r = run_fcmcmp("--diff-json", tmp, SYM_JSON, FCM)
+        assert r.returncode == 1
+        assert "0/41 known diffs fixed" in r.stdout
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
+def test_diff_json_and_fcm_b_exclusive():
+    """Passing both FCM_B and --diff-json is an error."""
+    r = run_fcmcmp("--diff-json", str(SYM_JSON), SYM_JSON, FCM, FCM)
+    assert r.returncode == 2
+
+
+def test_extract_fcmcmp_diffs():
+    """Test the extraction script against the issue_13 log."""
+    from lnk101.extract_fcmcmp_diffs import extract_diffs
+    log = (TESTDIR.parent.parent / "testCases" / "issue_13" / "log.txt")
+    if not log.exists():
+        import pytest
+        pytest.skip("testCases/issue_13/log.txt not present")
+    diffs = extract_diffs(log.read_text())
+    assert len(diffs) == 119
+    assert diffs[0]["section"] == "#ZVXMMID"
+    assert diffs[0]["address"] == "00140"
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
