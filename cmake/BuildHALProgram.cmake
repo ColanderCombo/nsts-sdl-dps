@@ -93,6 +93,7 @@ function(_build_one_hal_program)
         COMMAND ${CMAKE_COMMAND} -E make_directory "${FCM_BUILD_DIR}"
         COMMAND ${CMAKE_COMMAND} -E env PYTHONUTF8=1
             "${SDL_VENV_PYTHON}" -m lnk101
+            --no-repro
             -o "${_fcm}"
             --json-symbols "${_sym}"
             --save-external-syms "${_ext}"
@@ -124,7 +125,7 @@ function(build_hal_programs SRC_DIR OUT_DIR TARGET_NAME PARM)
     list(LENGTH _hal_files _count)
     message(STATUS "Found ${_count} HAL/S programs for ${TARGET_NAME}")
 
-    add_custom_target(${TARGET_NAME} ALL)
+    add_custom_target(${TARGET_NAME})
 
     foreach(_hal IN LISTS _hal_files)
         get_filename_component(_name "${_hal}" NAME_WE)

@@ -28,6 +28,7 @@ foreach(_prog bench02 bench08)
     set_tests_properties("external-syms.${_prog}" PROPERTIES
         LABELS "linker"
         TIMEOUT 30
+        FIXTURES_REQUIRED "ENV_READY"
     )
 endforeach()
 

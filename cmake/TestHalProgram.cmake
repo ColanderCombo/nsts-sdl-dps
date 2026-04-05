@@ -47,6 +47,7 @@ function(hal_test)
             LABELS "${_labels}"
             TIMEOUT 120
             FIXTURES_SETUP "${HT_NAME}_OUTPUT"
+            FIXTURES_REQUIRED "ENV_READY"
         )
 
         add_test(NAME "${HT_NAME}.compare"
@@ -63,6 +64,7 @@ function(hal_test)
         set_tests_properties("${HT_NAME}" PROPERTIES
             LABELS "${_labels}"
             TIMEOUT 120
+            FIXTURES_REQUIRED "ENV_READY"
         )
     endif()
 endfunction()

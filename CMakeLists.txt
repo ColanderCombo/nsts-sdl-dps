@@ -76,7 +76,7 @@ build_halsfc_pass(OPTB   "OPT.PROCS"   "BFC-17.0  " "B;V" "OPTB")
 build_halsfc_pass(PASS2B "PASS2.PROCS" "BFC-17.0  " "B;V" "PASS2B")
 build_halsfc_pass(PASS3B "PASS3.PROCS" "BFC-17.0  " "B;V" "PASS3B")
 
-add_custom_target(halsfc ALL COMMENT "HAL/S-FC compiler")
+add_custom_target(halsfc COMMENT "HAL/S-FC compiler")
 add_dependencies(halsfc
     HALSFC-PASS1 HALSFC-FLO HALSFC-OPT HALSFC-AUXP
     HALSFC-PASS2 HALSFC-PASS3 HALSFC-PASS4
@@ -166,6 +166,18 @@ add_custom_command(
 add_custom_target(gpc-sim ALL DEPENDS "${GPC_SIM_STAMP}")
 
 #-----------------------------------------------------------------------------
+# Build targets:
+#   make              just the venv + lnk101/asm101s tools (fast)
+#   make world        everything (halsfc, runtime, programs, simulator)
+#   make check        build all test deps + run ctest
+#   make halsfc       just the compiler
+#   make runtime      just the runtime library
+#   make gpc-sim      just the simulator
+#-----------------------------------------------------------------------------
+add_custom_target(world COMMENT "Build everything")
+add_dependencies(world halsfc runtime proghal bench gpc-sim)
+
+#-----------------------------------------------------------------------------
 # Clean target — remove build artifacts but preserve venv and CMake state
 #-----------------------------------------------------------------------------
 # Make 'make clean' remove our build artifact directories.
@@ -198,4 +210,52 @@ set(HAL_TEST_BASELINE_DIR "${CMAKE_SOURCE_DIR}/test/baselines")
 
 include(TestHalProgram)
 enable_testing()
+list(APPEND CMAKE_CTEST_ARGUMENTS "--output-on-failure" "--stop-on-failure")
+
+# Environment sanity check — runs first, fails fast if tools aren't built
+add_test(NAME env-check
+    COMMAND "${SDL_VENV_PYTHON}" -c "
+import sys, os
+errors = []
+for name, path in [
+    ('halsc',     '${CMAKE_BINARY_DIR}/bin/halsc'),
+    ('gpc-batch', '${CMAKE_BINARY_DIR}/bin/gpc-batch'),
+]:
+    if not os.path.exists(path):
+        errors.append(f'{name} not found at {path}')
+    elif not os.access(path, os.X_OK):
+        errors.append(f'{name} not executable: {path}')
+# Check a sample FCM to verify proghal was built
+fcm_dir = '${CMAKE_BINARY_DIR}/fcm'
+if not os.path.isdir(fcm_dir) or not any(f.endswith('.fcm') for f in os.listdir(fcm_dir)):
+    errors.append(f'No .fcm files in {fcm_dir} — run: make world')
+if errors:
+    print('Environment check failed:', file=sys.stderr)
+    for e in errors:
+        print(f'  {e}', file=sys.stderr)
+    print('\\nRun \"make world\" to build all test dependencies.', file=sys.stderr)
+    sys.exit(1)
+print('Environment OK')
+")
+set_tests_properties(env-check PROPERTIES
+    LABELS "setup"
+    FIXTURES_SETUP ENV_READY
+)
+
 add_subdirectory(test)
+
+# `make test-run` builds all test dependencies then runs ctest (stop on first failure)
+add_custom_target(test-run
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --stop-on-failure
+    DEPENDS halsfc runtime proghal bench gpc-sim
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+    COMMENT "Building test dependencies and running tests"
+)
+
+# `make test-continue` same as test-run but runs all tests even if some fail
+add_custom_target(test-continue
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+    DEPENDS halsfc runtime proghal bench gpc-sim
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+    COMMENT "Building test dependencies and running all tests"
+)

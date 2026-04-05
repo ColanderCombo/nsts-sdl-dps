@@ -19,6 +19,7 @@
 #   --pass1-rpt=FILE Save PASS1 report
 #   --pass2-rpt=FILE Save PASS2 report
 #   --halmat=FILE    Save HALMAT output
+#   --litfile=FILE   Save literal table
 #   --workdir=DIR    Working directory for intermediate files
 
 HALSFC_BINDIR="@WRAPPER_BINDIR@"
@@ -27,7 +28,7 @@ HALSFC_LIBDIR="@WRAPPER_LIBDIR@"
 # Defaults
 OUTPUT="" VERBOSE=0 KEEP_TEMPS=0 PARM_STRING="" TARGET="PASS"
 TEMPLIB="" ERRORLIB="${HALSFC_LIBDIR}/ERRORLIB"
-LISTING_FILE="" PASS1_RPT="" PASS2_RPT="" HALMAT_FILE="" WORKDIR=""
+LISTING_FILE="" PASS1_RPT="" PASS2_RPT="" HALMAT_FILE="" LITFILE="" WORKDIR=""
 SOURCE_FILE=""
 
 die() { echo "halsc: $*" >&2; exit 1; }
@@ -50,6 +51,7 @@ while [[ $# -gt 0 ]]; do
         --pass1-rpt=*)  PASS1_RPT="${1#--pass1-rpt=}"; shift ;;
         --pass2-rpt=*)  PASS2_RPT="${1#--pass2-rpt=}"; shift ;;
         --halmat=*)     HALMAT_FILE="${1#--halmat=}"; shift ;;
+        --litfile=*)    LITFILE="${1#--litfile=}"; shift ;;
         --workdir=*)    WORKDIR="${1#--workdir=}"; shift ;;
         -h|--help)      sed -n '3,/^[^#]/{ s/^# \?//p }' "$0"; exit 0 ;;
         -*)             die "unknown option: $1" ;;
@@ -71,6 +73,7 @@ OUTPUT="$(abs "${OUTPUT:-${SOURCE_NAME}.obj}")"
 [[ -n "$PASS1_RPT" ]]    && PASS1_RPT="$(abs "$PASS1_RPT")"
 [[ -n "$PASS2_RPT" ]]    && PASS2_RPT="$(abs "$PASS2_RPT")"
 [[ -n "$HALMAT_FILE" ]]  && HALMAT_FILE="$(abs "$HALMAT_FILE")"
+[[ -n "$LITFILE" ]]      && LITFILE="$(abs "$LITFILE")"
 
 # Compiler executables
 if [[ "$TARGET" == "BFS" ]]; then
@@ -160,6 +163,7 @@ cp cards.bin "$OUTPUT"
 [[ -n "$PASS1_RPT"    && -f pass1.rpt    ]] && cp pass1.rpt "$PASS1_RPT"
 [[ -n "$PASS2_RPT"    && -f pass2.rpt    ]] && cp pass2.rpt "$PASS2_RPT"
 [[ -n "$HALMAT_FILE"  && -f halmat.bin   ]] && cp halmat.bin "$HALMAT_FILE"
+[[ -n "$LITFILE"      && -f litfile.bin  ]] && cp litfile.bin "$LITFILE"
 
 log "Output: $OUTPUT"
 echo "halsc: $SOURCE_NAME compiled successfully"

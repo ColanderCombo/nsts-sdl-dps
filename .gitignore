@@ -4,3 +4,4 @@ inst
 docs
 *.pyc
 .DS_Store
+testCases
