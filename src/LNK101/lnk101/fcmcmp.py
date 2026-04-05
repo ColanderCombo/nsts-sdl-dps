@@ -111,6 +111,59 @@ def section_base_name(name):
     return name[2:] if (len(name) >= 2 and name[:2] in _CSECT_PREFIXES) else name
 
 
+def _read_hw(buf, byte_off):
+    return (buf[byte_off] << 8) | buf[byte_off + 1]
+
+
+def detect_shift(a, b, first_diff_hw):
+    """Check whether a block of diffs looks like inserted/deleted halfwords.
+
+    Compares halfwords from *first_diff_hw* to end-of-section, trying
+    small shifts of ``a`` relative to ``b``.
+
+    Returns the best shift (int) or ``None``.
+    shift > 0 means the first image has extra halfwords (insertion);
+    shift < 0 means the first image is missing halfwords (deletion).
+    """
+    scan_start = first_diff_hw  # halfword index within section
+    scan_hw = min(len(a), len(b)) // 2 - scan_start
+    if scan_hw < 6:
+        return None
+
+    a_hw = len(a) // 2
+    b_hw = len(b) // 2
+
+    def count_matches(shift):
+        matches = 0
+        compared = 0
+        for hi in range(scan_start, b_hw):
+            si = hi + shift
+            if 0 <= si < a_hw:
+                if _read_hw(a, si * 2) == _read_hw(b, hi * 2):
+                    matches += 1
+                compared += 1
+        return matches, compared
+
+    no_shift, _ = count_matches(0)
+
+    best_shift = 0
+    best_matches = no_shift
+    for s in range(-8, 9):
+        if s == 0:
+            continue
+        m, c = count_matches(s)
+        if c > 0 and m > best_matches:
+            best_matches = m
+            best_shift = s
+
+    if best_shift == 0:
+        return None
+    improvement = best_matches - no_shift
+    if improvement < scan_hw * 0.2 or best_matches < scan_hw * 0.3:
+        return None
+    return best_shift
+
+
 def sort_sections(sections, group_by_name=False):
     if group_by_name:
         sections.sort(key=lambda t: (section_base_name(t[0]), t[1]))
@@ -119,8 +172,29 @@ def sort_sections(sections, group_by_name=False):
     return sections
 
 
+def _print_diffs(diff_positions, max_hw_diffs, pad, addr_to_sym, addr_to_rld):
+    """Print individual halfword diffs with annotations."""
+    shown = min(len(diff_positions), max_hw_diffs)
+    for diff_addr, hw_a, hw_b in diff_positions[:shown]:
+        notes = []
+        sym = addr_to_sym.get(diff_addr.hw)
+        if sym:
+            notes.append(sym)
+        rld = addr_to_rld.get(diff_addr.hw)
+        if rld:
+            notes.append(rld)
+        annotation = f"  ; {', '.join(notes)}" if notes else ""
+        print(
+            f"{pad} @ {diff_addr.x}"
+            f" {hw_a:04X} vs {hw_b:04X}{annotation}"
+        )
+    remaining = len(diff_positions) - shown
+    if remaining > 0:
+        print(f"{pad}   ... and {remaining} more")
+
+
 def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
-            equiv=None):
+            equiv=None, diff_if_shifted=True):
     failures = 0
     checked = 0
 
@@ -168,24 +242,62 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
                 f" — {len(diff_positions)} halfwords differ"
             )
 
-            shown = min(len(diff_positions), max_hw_diffs)
             pad = " " * 8 + " " * name_width
-            for diff_addr, hw_a, hw_b in diff_positions[:shown]:
-                notes = []
-                sym = addr_to_sym.get(diff_addr.hw)
-                if sym:
-                    notes.append(sym)
-                rld = addr_to_rld.get(diff_addr.hw)
-                if rld:
-                    notes.append(rld)
-                annotation = f"  ; {', '.join(notes)}" if notes else ""
-                print(
-                    f"{pad} @ {diff_addr.x}"
-                    f" {hw_a:04X} vs {hw_b:04X}{annotation}"
-                )
-            remaining = len(diff_positions) - shown
-            if remaining > 0:
-                print(f"{pad}   ... and {remaining} more")
+            _print_diffs(diff_positions, max_hw_diffs, pad, addr_to_sym,
+                         addr_to_rld)
+
+            # Check for shifted code (inserted/deleted halfwords)
+            if diff_if_shifted:
+                first_diff_hw = (diff_positions[0][0] - addr).hw
+                shift = detect_shift(a, b, first_diff_hw)
+                if shift:
+                    shift_addr = diff_positions[0][0]
+                    if shift > 0:
+                        desc = (f"{shift} halfword(s) inserted in first image"
+                                f" near {shift_addr.x}")
+                        # Show the inserted halfwords
+                        inserted = []
+                        for i in range(shift):
+                            hi = first_diff_hw + i
+                            if hi * 2 + 1 < len(a):
+                                inserted.append(f"{_read_hw(a, hi * 2):04X}")
+                        print(f"{pad}   ** shift {shift:+d}: {desc}")
+                        print(f"{pad}      inserted: {' '.join(inserted)}")
+                    else:
+                        desc = (f"{-shift} halfword(s) deleted from first image"
+                                f" near {shift_addr.x}")
+                        # Show the deleted halfwords (present in b but not a)
+                        deleted = []
+                        for i in range(-shift):
+                            hi = first_diff_hw + i
+                            if hi * 2 + 1 < len(b):
+                                deleted.append(f"{_read_hw(b, hi * 2):04X}")
+                        print(f"{pad}   ** shift {shift:+d}: {desc}")
+                        print(f"{pad}      deleted: {' '.join(deleted)}")
+
+                    # Re-compare with shift applied, show remaining diffs
+                    shifted_diffs = []
+                    a_hw = len(a) // 2
+                    b_hw = len(b) // 2
+                    for hi in range(first_diff_hw, b_hw):
+                        si = hi + shift
+                        if 0 <= si < a_hw:
+                            va = _read_hw(a, si * 2)
+                            vb = _read_hw(b, hi * 2)
+                            if va != vb:
+                                if equiv and va in equiv and vb in equiv:
+                                    continue
+                                shifted_diffs.append(
+                                    (addr + Addr(hi * 2), va, vb))
+                    if shifted_diffs:
+                        print(f"{pad}      after shift,"
+                              f" {len(shifted_diffs)} halfwords"
+                              f" still differ:")
+                        _print_diffs(shifted_diffs, max_hw_diffs,
+                                     pad + "      ", addr_to_sym,
+                                     addr_to_rld)
+                    else:
+                        print(f"{pad}      after shift, all halfwords match")
 
             failures += 1
 
@@ -375,6 +487,13 @@ def main(
             help="Dump all halfword diffs (no elision) to a JSON file.",
         ),
     ] = None,
+    diff_if_shifted: Annotated[
+        bool,
+        typer.Option(
+            "--diff-if-shifted/--no-diff-if-shifted",
+            help="When a shift is detected, re-compare with shift applied.",
+        ),
+    ] = True,
     repro: Annotated[
         bool,
         typer.Option(
@@ -475,7 +594,7 @@ def main(
 
     checked, failures = compare(
         sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
-        equiv=equiv_set,
+        equiv=equiv_set, diff_if_shifted=diff_if_shifted,
     )
 
     # Collect all diffs (no elision) when dumping or when repro needs them
