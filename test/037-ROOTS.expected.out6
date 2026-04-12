@@ -1,36 +1,43 @@
 
+Enter A, B, C (0,0,0 to quit):
+Real roots of      1.0000000E+00     X**2 +     -5.0000000E+00     X +      6.0000000E+00     are:      3.0000000E+00
+ 2.0000000E+00
+Check:      0.0                0.0          
 
-Enter A, B, C (0,0,0 to quit): 
-Real roots of  1.000000E+00 X**2 + -5.000000E+00 X +  6.000000E+00 are:  3.000000E+00  2.000000E+00 
-Check:  0.0           0.0          
+Enter A, B, C (0,0,0 to quit):
+Real roots of      1.0000000E+00     X**2 +     -6.0000000E+00     X +      9.0000000E+00     are:      3.0000000E+00
+ 3.0000000E+00
+Check:      0.0                0.0          
 
-Enter A, B, C (0,0,0 to quit): 
-Real roots of  1.000000E+00 X**2 + -6.000000E+00 X +  9.000000E+00 are:  3.000000E+00  3.000000E+00 
-Check:  0.0           0.0          
+Enter A, B, C (0,0,0 to quit):
+Complex roots of      1.0000000E+00     X**2 +      2.0000000E+00     X +      5.0000000E+00     are:     -1.0000000E+00     +/-
+ 2.0000000E+00     i
+Check:      0.0               +/-      0.0               i
 
-Enter A, B, C (0,0,0 to quit): 
-Complex roots of  1.000000E+00 X**2 +  2.000000E+00 X +  5.000000E+00 are: -1.000000E+00 +/-  2.000000E+00 i 
-Check:  0.0          +/-  0.0          i 
+Enter A, B, C (0,0,0 to quit):
+Real roots of      3.0000000E+00     X**2 +      4.0000000E+00     X +     -1.0000000E+01     are:      1.2769833E+00
+-2.6103172E+00
+Check:     -9.5367432E-06     -1.5258789E-05
 
-Enter A, B, C (0,0,0 to quit): 
-Real roots of  3.000000E+00 X**2 +  4.000000E+00 X + -1.000000E+01 are:  1.276984E+00 -2.610317E+00 
-Check:  1.776357E-15  1.776357E-15 
+Enter A, B, C (0,0,0 to quit):
+Real roots of      1.0000000E+00     X**2 +      0.0               X +     -4.0000000E+00     are:      2.0000000E+00
+-2.0000000E+00
+Check:      0.0                0.0          
 
-Enter A, B, C (0,0,0 to quit): 
-Real roots of  1.000000E+00 X**2 +  0.0          X + -4.000000E+00 are:  2.000000E+00 -2.000000E+00 
-Check:  0.0           0.0          
+Enter A, B, C (0,0,0 to quit):
+Real roots of     -2.0000000E+00     X**2 +      8.0000000E+00     X +     -6.0000000E+00     are:      1.0000000E+00
+ 3.0000000E+00
+Check:      0.0                0.0          
 
-Enter A, B, C (0,0,0 to quit): 
-Real roots of -2.000000E+00 X**2 +  8.000000E+00 X + -6.000000E+00 are:  1.000000E+00  3.000000E+00 
-Check:  0.0           0.0          
+Enter A, B, C (0,0,0 to quit):
+Complex roots of      2.0000000E+00     X**2 +      3.0000000E+00     X +      5.0000000E+00     are:     -7.5000000E-01     +/-
+ 1.3919411E+00     i
+Check:      1.9073486E-06     +/-      0.0               i
 
-Enter A, B, C (0,0,0 to quit): 
-Complex roots of  2.000000E+00 X**2 +  3.000000E+00 X +  5.000000E+00 are: -7.500000E-01 +/-  1.391941E+00 i 
-Check:  0.0          +/-  0.0          i 
+Enter A, B, C (0,0,0 to quit):
+Real roots of      2.0000000E+00     X**2 +     -1.0000000E+01     X +      0.0               are:      5.0000000E+00
+ 0.0          
+Check:      0.0                0.0          
 
-Enter A, B, C (0,0,0 to quit): 
-Real roots of  2.000000E+00 X**2 + -1.000000E+01 X +  0.0          are:  5.000000E+00  0.0          
-Check:  0.0           0.0          
-
-Enter A, B, C (0,0,0 to quit): 
-Quitting ... 
+Enter A, B, C (0,0,0 to quit):
+Quitting ...

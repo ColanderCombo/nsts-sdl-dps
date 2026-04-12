@@ -1,0 +1,283 @@
+C/ Comprehensive I/O control test program.
+C/ Exercises WRITE positioning and data output per HAL/S Language
+C/ Specification (USA003088, Rev 32.0/17.0), Section 10.1.
+C/
+C/ Each section prints a ruler then one or more WRITE statements.
+C/ Comments annotate the expected compiler output (runtime calls)
+C/ and the expected device behavior per the spec.
+C/
+C/ Runtime call reference (from RUNASM/IOINIT.asm):
+C/   IOINIT  CNTRAP  iocode = mode (0=READ 1=READALL 2=WRITE 3=PRINT)
+C/                   IOBUF[0] = channel number
+C/   SKIP    CNTRAP  iocode 8, IOBUF[0] = relative line count (>=0)
+C/   LINE    CNTRAP  iocode 4, IOBUF[0] = absolute line number
+C/   COLUMN  CNTRAP  iocode 5, IOBUF[0] = absolute column number
+C/   TAB     CNTRAP  iocode 6, IOBUF[0] = relative column delta
+C/   PAGE    CNTRAP  iocode 7, IOBUF[0] = relative page count
+C/   COUT    OUTRAP  iocode 13
+C/   HOUT    OUTRAP  iocode 10  (halfword integer)
+C/   IOUT    OUTRAP  iocode 9   (fullword integer)
+C/   EOUT    OUTRAP  iocode 11  (SP scalar)
+C/   DOUT    OUTRAP  iocode 12  (DP scalar)
+C/   BOUT    OUTRAP  iocode 8   (bit string)
+C/   MMWSNP  OUTRAP  matrix/vector write helper (calls SKIP+COLUMN
+C/                   per row internally)
+
+  IO_CONTROL: PROGRAM;
+    DECLARE I1 INTEGER INITIAL(42);
+    DECLARE I2 INTEGER INITIAL(-7);
+    DECLARE S1 SCALAR INITIAL(3.14);
+    DECLARE S2 SCALAR INITIAL(-0.001);
+    DECLARE C1 CHARACTER(10) INITIAL('HELLO');
+    DECLARE C2 CHARACTER(10) INITIAL('WORLD');
+    DECLARE V3 VECTOR(3) INITIAL(1.0, 2.0, 3.0);
+    DECLARE M23 MATRIX(2,3)
+        INITIAL(10, 20, 30, 40, 50, 60);
+    DECLARE M33 MATRIX(3,3)
+        INITIAL(1, 2, 3, 4, 5, 6, 7, 8, 9);
+
+C ===========================================================
+C  SECTION 1: Basic WRITE — default positioning
+C
+C  Spec 10.1.2 rule 5: "the device mechanism is automatically
+C  moved to the leftmost column position and advanced to the
+C  next line prior to transmitting the first <expression>."
+C
+C  Each WRITE compiles to: IOINIT(mode=3,ch=6) then one
+C  output call (COUT / HOUT / EOUT / COUT).
+C  IOINIT triggers CNTRAP; HalUCP applies default positioning
+C  (down 1 line, col 1) before the first field.
+C
+C  Expected output:
+C    ==> SECTION 1: Basic WRITE <==     (line N)
+C    12345678901234567890123456789012     (line N+1, ruler)
+C    One string                          (line N+2, col 1)
+C             42                         (line N+3, HOUT 11-char field)
+C     3.1400000E+00                      (line N+4, EOUT 14-char field)
+C    HELLO                               (line N+5, COUT bare text)
+C ===========================================================
+    WRITE(6) '=== SECTION 1: Basic WRITE ===';
+    WRITE(6) '12345678901234567890123456789012';
+    WRITE(6) 'One string';
+    WRITE(6) I1;
+    WRITE(6) S1;
+    WRITE(6) C1;
+
+C ===========================================================
+C  SECTION 2: Multiple fields — inter-field separator
+C
+C  Spec 10.1.2 rule 9: "the device mechanism is moved to the
+C  right by an implementation-dependent number of columns
+C  between the transmissions of two consecutive elements."
+C  Our default: 5 blanks (--halucp-format-num-blanks).
+C
+C  Compiles to: IOINIT then multiple output calls in sequence.
+C  No SKIP/TAB/COLUMN between fields — separator is implicit.
+C
+C  Expected output (with 5-blank separator):
+C    A     B     C
+C             42               -7
+C     3.1400000E+00     -1.0000000E-03
+C    Label:              42      3.14...     HELLO
+C ===========================================================
+    WRITE(6) '=== SECTION 2: Multiple fields ===';
+    WRITE(6) '12345678901234567890123456789012';
+    WRITE(6) 'A', 'B', 'C';
+    WRITE(6) I1, I2;
+    WRITE(6) S1, S2;
+    WRITE(6) 'Label:', I1, S1, C1;
+
+C ===========================================================
+C  SECTION 3: Empty WRITE — just line advancement
+C
+C  Spec 10.1.2 rule 5: "If no expressions are supplied in the
+C  WRITE statement, the device merely performs its initial
+C  positioning."
+C
+C  Compiles to: IOINIT only, no output calls.
+C  Effect: advance one line (or first-write: position at line 1).
+C  "before" and "after" should be separated by one blank line.
+C ===========================================================
+    WRITE(6) '=== SECTION 3: Empty WRITE ===';
+    WRITE(6) 'before';
+    WRITE(6);
+    WRITE(6) 'after';
+
+C ===========================================================
+C  SECTION 4: SKIP at start of WRITE
+C
+C  Spec 10.1.3 rule 4: "SKIP(K) specifies line movement
+C  relative to the current line ... The value of K may be zero,
+C  in which case SKIP can suppress a default line advancement."
+C
+C  Spec 10.1.2 rule 5: "A SKIP ... before the first
+C  <expression> overrides the automatic line advancement."
+C
+C  SKIP(0): compiles to IOINIT, XR R5,R5, SKIP, COUT.
+C    IOINIT sets deferred = {down:1, col:1}.
+C    SKIP(0) overrides vertical: down = 0.
+C    Horizontal default (col 1) is NOT overridden by SKIP.
+C    On a real device: stay on current line, go to col 1.
+C    On a stream: stay on current line, can't go back to col 1
+C    if current col > 1, so text appends at current position.
+C    Expected: "line A" and "same line as A" on SAME line,
+C    jammed together (stream limitation).
+C
+C  SKIP(3): compiles to IOINIT, LFXI R5,3, SKIP, COUT.
+C    SKIP(3) overrides vertical: down = 3.
+C    Expected: 3 blank lines between "line B" and text.
+C ===========================================================
+    WRITE(6) '=== SECTION 4: SKIP ===';
+    WRITE(6) '12345678901234567890123456789012';
+    WRITE(6) 'line A';
+    WRITE(6) SKIP(0), 'same line as A';
+    WRITE(6) 'line B';
+    WRITE(6) SKIP(3), 'three below B';
+
+C ===========================================================
+C  SECTION 5: TAB — relative column positioning
+C
+C  Spec 10.1.3 rule 2: "TAB(K) specifies relative movement
+C  of the device mechanism across the current line by K
+C  character positions (columns)."
+C
+C  Spec 10.1.2 rule 5: "A TAB ... before the first
+C  <expression> overrides the automatic column positioning."
+C  (does NOT inhibit the default line advancement)
+C
+C  Spec 10.1.2 rule 9: "If a TAB ... separates two
+C  consecutive <expression>s then this overrides the automatic
+C  movement between transmission."
+C
+C  TAB(10) at start: compiles to IOINIT, LFXI R5,10, TAB, COUT.
+C    IOINIT deferred = {down:1, col:1}.
+C    TAB(10) overrides horizontal: col = 1 + 10 = 11.
+C    Expected: text starts at column 11.
+C
+C  TAB(5) between: compiles to COUT('A'), LFXI R5,5, TAB, COUT.
+C    TAB(5) emitted mid-WRITE (deferred already flushed).
+C    Moves cursor 5 columns right from end of 'A' (col 2).
+C    Suppresses the standard 5-blank separator before 'B'.
+C    Expected: 'A' at col 1, 'B...' at col 7.
+C ===========================================================
+    WRITE(6) '=== SECTION 5: TAB ===';
+    WRITE(6) '12345678901234567890123456789012';
+    WRITE(6) TAB(10), 'at col 11';
+    WRITE(6) 'A', TAB(5), 'B after TAB 5';
+
+C ===========================================================
+C  SECTION 6: COLUMN — absolute column positioning
+C
+C  Spec 10.1.3 rule 3: "COLUMN(K) specifies absolute movement
+C  of the device mechanism to column K of the current line."
+C
+C  COLUMN(20) at start: IOINIT, LFXI R5,20, COLUMN, COUT.
+C    Overrides horizontal default: col = 20.
+C    Expected: text starts at column 20.
+C
+C  COLUMN(20) between: COUT('A'), LFXI R5,20, COLUMN, COUT.
+C    Suppresses standard separator; jumps to col 20.
+C    Expected: 'A' at col 1, 'B...' at col 20.
+C
+C  Multiple COLUMNs: COLUMN(1) COUT COLUMN(10) COUT COLUMN(20) COUT.
+C    Each COLUMN suppresses the preceding separator and
+C    positions at the specified absolute column.
+C    Expected: 'A' at col 1, 'B' at col 10, 'C' at col 20.
+C ===========================================================
+    WRITE(6) '=== SECTION 6: COLUMN ===';
+    WRITE(6) '12345678901234567890123456789012';
+    WRITE(6) COLUMN(20), 'at col 20';
+    WRITE(6) 'A', COLUMN(20), 'B at col 20';
+    WRITE(6) COLUMN(1),'A',COLUMN(10),'B',
+             COLUMN(20), 'C';
+
+C ===========================================================
+C  SECTION 7: SKIP between fields
+C
+C  Spec 10.1.3: "SKIP ... do not of themselves inhibit the
+C  default horizontal movement to column 1. Neither does their
+C  appearance between two expressions in a WRITE statement
+C  affect the standard data field separation."
+C
+C  Compiles to: IOINIT, COUT('A'), LFXI R5,1, SKIP, COUT('B').
+C  SKIP(1) between fields: emits newline, resets col to 1.
+C  Standard separator is NOT suppressed — 5 blanks still
+C  precede 'B' on the new line.
+C  Expected: 'A' on line N, then '     B on next line' on N+1.
+C ===========================================================
+    WRITE(6) '=== SECTION 7: SKIP between ===';
+    WRITE(6) '12345678901234567890123456789012';
+    WRITE(6) 'A', SKIP(1), 'B on next line';
+
+C ===========================================================
+C  SECTION 8: Vectors
+C
+C  Spec 10.1.2 rule 4: "each element thereof is transmitted
+C  sequentially in its natural sequence."
+C
+C  Compiles to: IOINIT, COUT('V3 ='), then MMWSNP with
+C  rows=1, cols=3. MMWSNP's inner loop per row calls:
+C    SKIP(1), COLUMN(1), then EOUT for each element.
+C  So the vector elements appear on a NEW line (from SKIP(1))
+C  at column 1 (from COLUMN(1)), separated by standard blanks.
+C  Expected: 'V3 =' on line N, elements on line N+1.
+C ===========================================================
+    WRITE(6) '=== SECTION 8: Vectors ===';
+    WRITE(6) '12345678901234567890123456789012';
+    WRITE(6) 'V3 =', V3;
+
+C ===========================================================
+C  SECTION 9: Matrices
+C
+C  Spec 10.1.2 rule 4 + MMWSNP runtime:
+C  Each row is output via MMWSNP's outer loop:
+C    SKIP(1), COLUMN(1), then EOUT x ncols.
+C  First row's SKIP(1) overrides IOINIT's default down-1
+C  (via the deferred positioning mechanism). Subsequent rows
+C  each get their own SKIP(1)+COLUMN(1).
+C
+C  For 'M23:', M23 (2x3 matrix):
+C    Line N:   M23:
+C    Line N+1: [row 0: 3 elements]
+C    Line N+2: [row 1: 3 elements]
+C
+C  For 'M33:', M33 (3x3 matrix):
+C    Line N:   M33:
+C    Line N+1: [row 0]
+C    Line N+2: [row 1]
+C    Line N+3: [row 2]
+C ===========================================================
+    WRITE(6) '=== SECTION 9: Matrices ===';
+    WRITE(6) '12345678901234567890123456789012';
+    WRITE(6) 'M23:', M23;
+    WRITE(6) 'M33:', M33;
+
+C ===========================================================
+C  SECTION 10: Combined controls
+C
+C  SKIP(0) + COLUMN(5):
+C    Compiles to: IOINIT, LR R5,R7(=0), SKIP, LFXI R5,5,
+C    COLUMN, COUT.
+C    IOINIT deferred = {down:1, col:1}.
+C    SKIP(0) overrides vertical: down = 0.
+C    COLUMN(5) overrides horizontal: col = 5.
+C    Flush: 0 newlines, advance to col 5.
+C    On a real device: stay on current line, go to col 5.
+C    On a stream: if current col > 5, can't go back (stream
+C    limitation — text appends at current position).
+C
+C  SKIP(2) + COLUMN(10):
+C    Compiles to: IOINIT, LFXI R5,2, SKIP, LFXI R5,10,
+C    COLUMN, COUT.
+C    SKIP(2) overrides vertical: down = 2.
+C    COLUMN(10) overrides horizontal: col = 10.
+C    Expected: 2 lines down, text at column 10.
+C ===========================================================
+    WRITE(6) '=== SECTION 10: Combined ===';
+    WRITE(6) '12345678901234567890123456789012';
+    WRITE(6) SKIP(0), COLUMN(5), 'no adv, col5';
+    WRITE(6) SKIP(2), COLUMN(10),
+             'skip 2, col 10';
+
+Y %SVCI(0);
+  CLOSE IO_CONTROL;

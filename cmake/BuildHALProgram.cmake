@@ -128,7 +128,7 @@ function(build_hal_programs SRC_DIR OUT_DIR TARGET_NAME PARM)
     add_custom_target(${TARGET_NAME})
 
     foreach(_hal IN LISTS _hal_files)
-        get_filename_component(_name "${_hal}" NAME_WE)
+        get_filename_component(_name "${_hal}" NAME_WLE)
 
         # Skip excluded programs
         list(FIND _BHP_EXCLUDE "${_name}" _excl_idx)

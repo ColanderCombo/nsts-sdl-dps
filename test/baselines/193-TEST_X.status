@@ -1,4 +1,4 @@
-exit=1
-lines=0
-reason=FATAL: Input exhausted on channel 5 (SCALAR): no more lines in /Users/don/Library/CloudStorage/OneDrive-Personal/proj/nsts/sw/code/dps/sdl/test/193-TEST_X.in5
+exit=0
+lines=2
+reason=
 input=yes

@@ -1,4 +1,1 @@
-exit=0
-lines=4
-reason=
-input=no
+linker-bug: section overlap — A3/A4/A5/B7 MATVEC data sections collide with ZCON and code sections

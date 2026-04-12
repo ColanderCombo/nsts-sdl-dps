@@ -1,22 +1,21 @@
-
-Input a cartesian 3-vector (0,0,0 to quit): 
-BEARING =  0.0          
-ELEVATION =  0.0          
-DISTANCE =  1.000000E+00 
-Input a cartesian 3-vector (0,0,0 to quit): 
-BEARING =  4.499998E+01 
-ELEVATION =  0.0          
-DISTANCE =  1.000000E+00 
-Input a cartesian 3-vector (0,0,0 to quit): 
-BEARING =  4.499998E+01 
-ELEVATION =  0.0          
-DISTANCE =  1.414213E+00 
-Input a cartesian 3-vector (0,0,0 to quit): 
-BEARING =  4.499998E+01 
-ELEVATION =  3.526439E+01 
-DISTANCE =  1.732051E+00 
-Input a cartesian 3-vector (0,0,0 to quit): 
-BEARING =  5.313008E+01 
-ELEVATION =  0.0          
-DISTANCE =  5.000000E+00 
-Input a cartesian 3-vector (0,0,0 to quit): 
+Input a cartesian 3-vector (0,0,0 to quit):
+BEARING =      0.0          
+ELEVATION =      0.0          
+DISTANCE =      1.0000000E+00
+Input a cartesian 3-vector (0,0,0 to quit):
+BEARING =      4.4999985E+01
+ELEVATION =      0.0          
+DISTANCE =      1.0000000E+00
+Input a cartesian 3-vector (0,0,0 to quit):
+BEARING =      4.4999985E+01
+ELEVATION =      0.0          
+DISTANCE =      1.4142132E+00
+Input a cartesian 3-vector (0,0,0 to quit):
+BEARING =      4.4999985E+01
+ELEVATION =      3.5264389E+01
+DISTANCE =      1.7320509E+00
+Input a cartesian 3-vector (0,0,0 to quit):
+BEARING =      5.3130081E+01
+ELEVATION =      0.0          
+DISTANCE =      5.0000000E+00
+Input a cartesian 3-vector (0,0,0 to quit):

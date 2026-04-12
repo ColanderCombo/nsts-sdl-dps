@@ -1,0 +1,144 @@
+C/ Comprehensive READ input test program.
+C/ Exercises READ field parsing per HAL/S Language Specification
+C/ (USA003088, Rev 32.0/17.0), Section 10.1.1 and Appendix E.
+C/
+C/ Input is read from channel 5 (provided via --infile5).
+C/ Output is written to channel 6 for baseline comparison.
+C/
+C/ Each section writes a header, reads values, then writes
+C/ the results so the output can be compared against a baseline.
+C/
+C/ Field separator rules (spec 10.1.1 rule 4):
+C/   Fields are "contiguous characters separated by commas,
+C/   semicolons, or blanks."
+C/
+C/ Note: null fields (rule 6) and semicolon termination (rule 5)
+C/ are spec features that require runtime-level field parsing.
+C/ The trap-based UCP architecture (HIN/IIN/EIN/CIN call INTRAP
+C/ once per variable and unconditionally store from IOBUF) cannot
+C/ implement "leave variable unchanged" at the UCP level.
+
+  IO_READ: PROGRAM;
+    DECLARE I1 INTEGER;
+    DECLARE I2 INTEGER;
+    DECLARE I3 INTEGER;
+    DECLARE S1 SCALAR;
+    DECLARE S2 SCALAR;
+    DECLARE C1 CHARACTER(20);
+
+C ===========================================================
+C  SECTION 1: Basic single-value READ
+C
+C  Each READ(5) advances to the next input line and reads
+C  one field.  Exercises HIN (iocode 10), EIN (iocode 11),
+C  and CIN (iocode 13).
+C
+C  Input lines (one value per line):
+C    42
+C    3.14
+C    'HELLO'
+C ===========================================================
+    WRITE(6) '=== SECTION 1: Basic READ ===';
+    READ(5) I1;
+    WRITE(6) 'I1=', I1;
+    READ(5) S1;
+    WRITE(6) 'S1=', S1;
+    READ(5) C1;
+    WRITE(6) 'C1=', C1;
+
+C ===========================================================
+C  SECTION 2: Space-separated fields on one line
+C
+C  Spec 10.1.1 rule 4: "fields of contiguous characters
+C  separated by commas, semicolons, or blanks."
+C
+C  A single READ(5) reads three integers from one input line
+C  where fields are separated by spaces.
+C
+C  Input line:
+C    10 20 30
+C ===========================================================
+    WRITE(6) '=== SECTION 2: Space-separated ===';
+    READ(5) I1, I2, I3;
+    WRITE(6) 'I1=', I1, 'I2=', I2, 'I3=', I3;
+
+C ===========================================================
+C  SECTION 3: Comma-separated fields on one line
+C
+C  Input line:
+C    100,200,300
+C ===========================================================
+    WRITE(6) '=== SECTION 3: Comma-separated ===';
+    READ(5) I1, I2, I3;
+    WRITE(6) 'I1=', I1, 'I2=', I2, 'I3=', I3;
+
+C ===========================================================
+C  SECTION 4: Mixed types in one READ
+C
+C  A single READ can fill variables of different types.
+C  The runtime calls INTRAP with the appropriate iocode
+C  for each variable (HIN for integer, EIN for scalar,
+C  CIN for character).
+C
+C  Input line:
+C    99, 2.718, 'MIXED'
+C ===========================================================
+    WRITE(6) '=== SECTION 4: Mixed types ===';
+    READ(5) I1, S1, C1;
+    WRITE(6) 'I1=', I1, 'S1=', S1, 'C1=', C1;
+
+C ===========================================================
+C  SECTION 5: Multi-line READ
+C
+C  Within one READ statement, when the current input line is
+C  exhausted the device advances to the next line.
+C
+C  Input lines (one value per line):
+C    1000
+C    2000
+C    3000
+C ===========================================================
+    WRITE(6) '=== SECTION 5: Multi-line ===';
+    READ(5) I1, I2, I3;
+    WRITE(6) 'I1=', I1, 'I2=', I2, 'I3=', I3;
+
+C ===========================================================
+C  SECTION 6: Negative numbers and scientific notation
+C
+C  Exercises negative integers and E-notation scalars.
+C
+C  Input line:
+C    -42 -1.5E+02
+C ===========================================================
+    WRITE(6) '=== SECTION 6: Negatives and E-notation ===';
+    READ(5) I1, S1;
+    WRITE(6) 'I1=', I1, 'S1=', S1;
+
+C ===========================================================
+C  SECTION 7: Comma-space mix and multiple scalars
+C
+C  Input line:
+C    1.0, 2.0, 3.0
+C ===========================================================
+    WRITE(6) '=== SECTION 7: Scalars comma-space ===';
+    READ(5) S1, S2;
+    WRITE(6) 'S1=', S1, 'S2=', S2;
+
+C ===========================================================
+C  SECTION 8: READ then WRITE interleaved
+C
+C  Verifies that READ on channel 5 does not disturb
+C  WRITE positioning on channel 6.
+C
+C  Input lines:
+C    'ALPHA'
+C    'BETA'
+C ===========================================================
+    WRITE(6) '=== SECTION 8: Interleaved ===';
+    READ(5) C1;
+    WRITE(6) 'first=', C1;
+    READ(5) C1;
+    WRITE(6) 'second=', C1;
+
+Y %SVCI(0);
+  CLOSE IO_READ;

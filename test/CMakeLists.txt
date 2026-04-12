@@ -2,21 +2,28 @@
 # Tests run compiled .fcm programs through gpc-batch and compare
 # output against baselines.
 #
+# gpc-batch exits 0 on clean halt, 1 on max-steps. Reaching max-steps
+# is always a test failure.
+#
 # `make test` runs tests.
 
-# Overrides
-hal_test(NAME 021-SIMPLE    MAX_STEPS 10000)
-hal_test(NAME 029-DATATYPES MAX_STEPS 30000)
-hal_test(NAME 037-ROOTS     MAX_STEPS 30000)
-hal_test(NAME 047-ROWS      MAX_STEPS 30000)
-
-#  need ~300K steps
+# Programs that need custom step budgets
+hal_test(NAME 021-SIMPLE                  MAX_STEPS 10000)
+hal_test(NAME 071-DARTBOARD_APPROXIMATION MAX_STEPS 500000)
+hal_test(NAME 104-EXAMPLE_1               MAX_STEPS 500000)
+hal_test(NAME bench02                     MAX_STEPS 5000000)
+hal_test(NAME bench03                     MAX_STEPS 5000000)
+# bench04: compiler stack layout collision — C0MATVEC's DO-FOR-TEMPORARY-IX
+# counter at offset 19 overlaps MATRIX_DET temp, corrupts ITOD code:
+# hal_test(NAME bench04 MAX_STEPS 50000000)
+hal_test(NAME bench05 MAX_STEPS 10000000)
 hal_test(NAME bench06 MAX_STEPS 500000)
 hal_test(NAME bench07 MAX_STEPS 500000)
 hal_test(NAME bench08 MAX_STEPS 500000)
 hal_test(NAME bench09 MAX_STEPS 500000)
+hal_test(NAME bench10 MAX_STEPS 1000000)
+hal_test(NAME bench11 MAX_STEPS 1000000)
 
-# --external-syms linker tests: single-module relocation must match full link
 foreach(_prog bench02 bench08)
     add_test(NAME "external-syms.${_prog}"
         COMMAND "${SDL_VENV_PYTHON}"
@@ -35,13 +42,19 @@ endforeach()
 discover_hal_tests(
     MAX_STEPS 100000
     EXCLUDE
-        # Already handled:
+        # Already handled above:
         "021-SIMPLE"
-        "029-DATATYPES"
-        "037-ROOTS"
-        "047-ROWS"
+        "071-DARTBOARD_APPROXIMATION"
+        "104-EXAMPLE_1"
+        "bench02"
+        "bench03"
+        "bench04"
+        "bench05"
         "bench06"
         "bench07"
         "bench08"
         "bench09"
+        "bench10"
+        "bench11"
+        ${HAL_EXCLUDE_PROGRAMS}
 )

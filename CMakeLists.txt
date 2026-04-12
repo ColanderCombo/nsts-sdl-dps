@@ -96,20 +96,35 @@ set(PROGHAL_SRC_DIR "${CMAKE_SOURCE_DIR}/test/halTests/progHal")
 set(BENCH_SRC_DIR "${CMAKE_SOURCE_DIR}/test/halTests/BENCH")
 set(HAL_SAMPLE_PARM "NOTABLES,LIST,CARDTYPE=YCZM")
 
+set(PROGHAL_COMPOOLS
+    176.0-SUPER_VECTOR  # (for 176-P / 176.1)
+    189-IMU_DATA        # (for 260-TEST5 / 260-TEST6)
+    213-GNC_POOL        # COMPOOL (unreferenced)
+    # 224-GNC_POOL        # EXTERNAL COMPOOL
+    269-PROCESS_CONTROL # (for 264-TQE)
+    264-TQE             # (for 264-INITIALIZE)
+)
+
 # Template-generating compools — must be built first so that programs
 # using "D INCLUDE TEMPLATE CPLxxx" can find them in the TEMPLIB.
 build_hal_templates("${PROGHAL_SRC_DIR}" "${CMAKE_BINARY_DIR}/progHal"
     "templates" "TEMPLATE,NOTABLES,LISTING2"
-    189-IMU_DATA
-    269-PROCESS_CONTROL
-    264-TQE
+    ${PROGHAL_COMPOOLS}
 )
 
+# Files that aren't standalone executable programs — skip the program build
+# (and downstream test registration) for these.
 set(HAL_EXCLUDE_PROGRAMS
-    167-ASSORTEDIO # requires NONHAL IO(1); we don't have right now.
-    176-P
-    224-GNC_POOL
+    167-ASSORTEDIO      # requires NONHAL IO; not implemented
+    176-P               # FILE statement not supported by HAL/S-FC runtime
+    176.1-READ_ACC      # external helper function for 176-P
+    194-TEST_X          # fragment PROGRAM (empty DO WHILE TRUE)
+    250-BITS            # fragment PROGRAM (empty DO WHILE ON with placeholder logic)
+    265-ENQUEUE         # fragment PROCEDURE — needs queue context to run
+    269-STALL           # fragment PROCEDURE — needs queue context to run
+    ${PROGHAL_COMPOOLS}
 )
+
 build_hal_programs("${PROGHAL_SRC_DIR}" "${CMAKE_BINARY_DIR}/progHal"
                    "proghal" "${HAL_SAMPLE_PARM}"
                    TEMPLATES_TARGET templates

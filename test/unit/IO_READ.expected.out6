@@ -1,0 +1,19 @@
+=== SECTION 1: Basic READ ===
+I1=              42
+S1=      3.1399994E+00
+C1=     HELLO
+=== SECTION 2: Space-separated ===
+I1=              10     I2=              20     I3=              30
+=== SECTION 3: Comma-separated ===
+I1=             100     I2=             200     I3=             300
+=== SECTION 4: Mixed types ===
+I1=              99     S1=      2.7179995E+00     C1=     MIXED
+=== SECTION 5: Multi-line ===
+I1=            1000     I2=            2000     I3=            3000
+=== SECTION 6: Negatives and E-notation ===
+I1=             -42     S1=     -1.5000000E+02
+=== SECTION 7: Scalars comma-space ===
+S1=      1.0000000E+00     S2=      2.0000000E+00
+=== SECTION 8: Interleaved ===
+first=     ALPHA
+second=     BETA

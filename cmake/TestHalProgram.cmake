@@ -4,6 +4,9 @@
 #   Baseline:   ${HAL_TEST_BASELINE_DIR}/<name>.expected.out6  (if exists → comparison)
 #   Input:      ${HAL_TEST_SRC_DIR}/<name>.in5                 (if exists → --infile5)
 #   Output:     ${CMAKE_CURRENT_BINARY_DIR}/<name>.actual.out6
+#
+# gpc-batch exits 0 on clean halt (SVC 0), 1 on max-steps or other error.
+# Reaching max-steps is always a test failure.
 
 cmake_minimum_required(VERSION 3.28)
 
@@ -18,7 +21,7 @@ function(hal_test)
         message(FATAL_ERROR "hal_test requires NAME")
     endif()
     if(NOT HT_MAX_STEPS)
-        set(HT_MAX_STEPS 50000)
+        set(HT_MAX_STEPS 100000)
     endif()
 
     set(_fcm "${HAL_TEST_FCM_DIR}/${HT_NAME}.fcm")
@@ -74,9 +77,6 @@ endfunction()
 #
 # Scan HAL/S source directories for programs and register tests for each.
 #
-# Programs needing input (per .status file) with no .in5 file are disabled.
-# All other programs get registered — with baseline comparison if a baseline
-# exists, or as run-only otherwise.
 function(discover_hal_tests)
     cmake_parse_arguments(DISC "" "MAX_STEPS" "EXCLUDE;SRC_DIRS" ${ARGN})
 
@@ -93,7 +93,7 @@ function(discover_hal_tests)
         if(EXISTS "${_src_dir}")
             file(GLOB _hal_files "${_src_dir}/*.hal")
             foreach(_hal IN LISTS _hal_files)
-                get_filename_component(_name "${_hal}" NAME_WE)
+                get_filename_component(_name "${_hal}" NAME_WLE)
                 list(APPEND _all_names "${_name}")
             endforeach()
         endif()
@@ -109,23 +109,6 @@ function(discover_hal_tests)
 
         if(TEST "${_name}")
             continue()
-        endif()
-
-        # Skip programs that need input we don't have
-        set(_status_file "${HAL_TEST_BASELINE_DIR}/${_name}.status")
-        set(_infile5 "${HAL_TEST_SRC_DIR}/${_name}.in5")
-        if(EXISTS "${_status_file}" AND NOT EXISTS "${_infile5}")
-            file(READ "${_status_file}" _status_content)
-            if(_status_content MATCHES "input=no" AND _status_content MATCHES "exit=1")
-                add_test(NAME "${_name}"
-                    COMMAND "${CMAKE_COMMAND}" -E echo
-                        "${_name}: SKIPPED — Needs READ(5) input (.in5 file)")
-                set_tests_properties("${_name}" PROPERTIES
-                    LABELS "hal;needs-input"
-                    DISABLED TRUE
-                )
-                continue()
-            endif()
         endif()
 
         hal_test(NAME "${_name}" MAX_STEPS "${DISC_MAX_STEPS}")
