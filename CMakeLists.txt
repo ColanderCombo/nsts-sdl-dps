@@ -94,6 +94,8 @@ add_dependencies(runtime asm101s)
 #-----------------------------------------------------------------------------
 set(PROGHAL_SRC_DIR "${CMAKE_SOURCE_DIR}/test/halTests/progHal")
 set(BENCH_SRC_DIR "${CMAKE_SOURCE_DIR}/test/halTests/BENCH")
+set(UNIT_SRC_DIR "${CMAKE_SOURCE_DIR}/test/unit")
+set(REGRESS_SRC_DIR "${CMAKE_SOURCE_DIR}/test/regress")
 set(HAL_SAMPLE_PARM "NOTABLES,LIST,CARDTYPE=YCZM")
 
 set(PROGHAL_COMPOOLS
@@ -131,6 +133,10 @@ build_hal_programs("${PROGHAL_SRC_DIR}" "${CMAKE_BINARY_DIR}/progHal"
                    EXCLUDE ${HAL_EXCLUDE_PROGRAMS})
 build_hal_programs("${BENCH_SRC_DIR}" "${CMAKE_BINARY_DIR}/bench"
                    "bench" "${HAL_SAMPLE_PARM}")
+build_hal_programs("${UNIT_SRC_DIR}" "${CMAKE_BINARY_DIR}/unit"
+                   "unit" "${HAL_SAMPLE_PARM}")
+build_hal_programs("${REGRESS_SRC_DIR}" "${CMAKE_BINARY_DIR}/regress"
+                   "regress" "${HAL_SAMPLE_PARM}")
 
 #-----------------------------------------------------------------------------
 # GPC simulator
@@ -190,7 +196,7 @@ add_custom_target(gpc-sim ALL DEPENDS "${GPC_SIM_STAMP}")
 #   make gpc-sim      just the simulator
 #-----------------------------------------------------------------------------
 add_custom_target(world COMMENT "Build everything")
-add_dependencies(world halsfc runtime proghal bench gpc-sim)
+add_dependencies(world halsfc runtime proghal bench unit regress gpc-sim)
 
 #-----------------------------------------------------------------------------
 # Clean target — remove build artifacts but preserve venv and CMake state
@@ -262,7 +268,7 @@ add_subdirectory(test)
 # `make test-run` builds all test dependencies then runs ctest (stop on first failure)
 add_custom_target(test-run
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure --stop-on-failure
-    DEPENDS halsfc runtime proghal bench gpc-sim
+    DEPENDS halsfc runtime proghal bench unit regress gpc-sim
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
     COMMENT "Building test dependencies and running tests"
 )
@@ -270,7 +276,7 @@ add_custom_target(test-run
 # `make test-continue` same as test-run but runs all tests even if some fail
 add_custom_target(test-continue
     COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-    DEPENDS halsfc runtime proghal bench gpc-sim
+    DEPENDS halsfc runtime proghal bench unit regress gpc-sim
     WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
     COMMENT "Building test dependencies and running all tests"
 )

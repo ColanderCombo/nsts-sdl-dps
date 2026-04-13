@@ -1,0 +1,57 @@
+C This is a program devised to reproduce issue #1285 in the virtualagc
+C github repo.
+
+ testVXSCLEAR: PROGRAM;
+
+ DECLARE INTEGER INITIAL(0), N1, N2;
+ DECLARE M INTEGER DOUBLE INITIAL(0);
+ DECLARE X SCALAR INITIAL(0.75), Y SCALAR;
+ DECLARE SCALAR, X1, X2, X3, X4;
+
+C Make sure the compiler doesn't know the values of the variables, and
+C so cannot optimize them out.
+ N1 = 1;
+ N2 = 1;
+ DO FOR TEMPORARY I = 1 TO 10;
+   TEMPORARY J INTEGER;
+   J = N1;
+   N1 = N1 + N2;
+   N2 = J;
+   WRITE(6) N1, N2;
+ END;
+
+C The critical statement whose object code we want to look at.
+ M = N1 + ABS(0.75(N2));
+ WRITE(6) 'A', M, '(should be 210.75 rounded to 211)';
+
+C Same calculation, but avoid using an inline literal for 0.75.
+ M = N1 + ABS(X(N2));
+ WRITE(6) 'B', M, '(should be 211)';
+
+C Something different that should give a similar result
+ M = N1 + ABS((0.3 + 0.35) (N2));
+ WRITE(6) 'C', M, '(should be 201.85 rounded to 202)';
+
+C Something different that should give a similar result
+ M = N1 + ABS((0.3 + X) (N2));
+ WRITE(6) 'D', M, '(should be 237.45 rounded to 237)';
+
+C Something different that should give a similar result
+ Y = 0.3 + X;
+ M = N1 + ABS(Y N2);
+ WRITE(6) 'E', Y, M, '(should be 1.05 and 237.45 rounded to 237)';
+
+C I think I was making it too complex.
+ WRITE(6) 'F', 'Should be:';
+ WRITE(6) '4.443   -1.531    4.349072   487.44559759E-3';
+ WRITE(6) 1.456+2.987, 1.456-2.987, 1.456 2.987, 1.456 / 2.987;
+
+ X1 = 1.456+2.987;
+ X2 = 1.456-2.987;
+ X3 = 1.456 2.987;
+ X4 = 1.456 / 2.987;
+ WRITE(6) 'G', 'Should be:';
+ WRITE(6) '4.443   -1.531    4.349072   487.44559759E-3';
+ WRITE(6) X1, X2, X3, X4;
+
+ CLOSE testVXSCLEAR;

@@ -58,3 +58,15 @@ discover_hal_tests(
         "bench11"
         ${HAL_EXCLUDE_PROGRAMS}
 )
+
+# Unit tests (test/unit/*.hal)
+discover_hal_tests(
+    MAX_STEPS 500000
+    SRC_DIRS "${UNIT_SRC_DIR}"
+)
+
+# Regression tests (test/regress/*.hal)
+discover_hal_tests(
+    MAX_STEPS 500000
+    SRC_DIRS "${REGRESS_SRC_DIR}"
+)
