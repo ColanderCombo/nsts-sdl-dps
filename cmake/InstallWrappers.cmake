@@ -52,10 +52,15 @@ set(WRAPPER_BINDIR "${CMAKE_BINARY_DIR}/bin")
 set(WRAPPER_LIBDIR "${CMAKE_BINARY_DIR}/lib")
 _configure_wrapper(asm101s.sh.in   asm101s)
 _configure_wrapper(lnk101.sh.in   lnk101)
-_configure_wrapper(gpc-batch.sh.in gpc-batch)
-_configure_wrapper(gpc-dbg.sh.in   gpc-dbg)
-_configure_wrapper(gpc-dump.sh.in  gpc-dump)
+_configure_wrapper(gpc.sh.in       gpc)
 _configure_wrapper(gpc-gui.sh.in   gpc-gui)
+# Legacy compat aliases (gpc-batch, gpc-dbg, gpc-dump) delegate to the
+# unified `gpc` command internally.  Skip them when SDL_UNIFIED_GPC is ON.
+if(NOT SDL_UNIFIED_GPC)
+    _configure_wrapper(gpc-batch.sh.in gpc-batch)
+    _configure_wrapper(gpc-dbg.sh.in   gpc-dbg)
+    _configure_wrapper(gpc-dump.sh.in  gpc-dump)
+endif()
 _configure_wrapper(fcmcmp.sh.in    fcmcmp)
 _configure_wrapper(rldanalyze.sh.in rldanalyze)
 _configure_wrapper(ibmobjdump.sh.in ibmobjdump)
@@ -86,16 +91,24 @@ install(
 )
 
 if(EXISTS "${SIM_DIR}/package.json")
-    _configure_install_wrapper(gpc-batch.sh.in gpc-batch)
-    _configure_install_wrapper(gpc-dbg.sh.in   gpc-dbg)
-    _configure_install_wrapper(gpc-dump.sh.in  gpc-dump)
+    set(_gpc_install_programs
+        "${CMAKE_BINARY_DIR}/install-bin/gpc"
+        "${CMAKE_BINARY_DIR}/install-bin/gpc-gui"
+    )
+    _configure_install_wrapper(gpc.sh.in       gpc)
     _configure_install_wrapper(gpc-gui.sh.in   gpc-gui)
-    install(
-        PROGRAMS
+    if(NOT SDL_UNIFIED_GPC)
+        _configure_install_wrapper(gpc-batch.sh.in gpc-batch)
+        _configure_install_wrapper(gpc-dbg.sh.in   gpc-dbg)
+        _configure_install_wrapper(gpc-dump.sh.in  gpc-dump)
+        list(APPEND _gpc_install_programs
             "${CMAKE_BINARY_DIR}/install-bin/gpc-batch"
             "${CMAKE_BINARY_DIR}/install-bin/gpc-dbg"
             "${CMAKE_BINARY_DIR}/install-bin/gpc-dump"
-            "${CMAKE_BINARY_DIR}/install-bin/gpc-gui"
+        )
+    endif()
+    install(
+        PROGRAMS ${_gpc_install_programs}
         DESTINATION "${SDL_INSTALL_BINDIR}"
         COMPONENT wrappers
     )

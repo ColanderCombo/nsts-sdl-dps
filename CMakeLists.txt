@@ -12,6 +12,12 @@ project(SDL
 set(SDL_INSTALL_BINDIR "${CMAKE_INSTALL_PREFIX}/bin" CACHE PATH "Binary install dir")
 set(SDL_INSTALL_LIBDIR "${CMAKE_INSTALL_PREFIX}/lib" CACHE PATH "Library install dir")
 
+# When ON, generate only the unified `gpc` wrapper and have tests invoke it
+# directly as `gpc run ...`.  When OFF (default), additionally generate
+# compatibility wrappers (gpc-batch, gpc-dbg, gpc-dump) that delegate to
+# `gpc run/debug/dump`, preserving the prior external interface.
+option(SDL_UNIFIED_GPC "Use only the unified 'gpc' command (no gpc-batch/gpc-dbg/gpc-dump aliases)" OFF)
+
 # Paths to toolchain source (via symlinks into ext/virtualagc)
 set(XCOM_I_DIR "${CMAKE_SOURCE_DIR}/src/XCOM-I" CACHE PATH "Path to XCOM-I")
 set(HALSFC_SRC_DIR "${CMAKE_SOURCE_DIR}/code/PASS.REL32V0" CACHE PATH "Path to HAL/S-FC source")
@@ -155,8 +161,7 @@ file(GLOB_RECURSE GPC_SIM_SOURCES
     "${SIM_DIR}/simRunner/renderer/*.html"
 )
 list(APPEND GPC_SIM_SOURCES
-    "${SIM_DIR}/esbuild/esbuild.batch.config.js"
-    "${SIM_DIR}/esbuild/esbuild.dbg.config.js"
+    "${SIM_DIR}/esbuild/esbuild.gpc.config.js"
     "${SIM_DIR}/electron-esbuild.config.yaml"
     "${SIM_DIR}/package.json"
 )
@@ -175,16 +180,25 @@ add_custom_command(
 add_custom_command(
     OUTPUT "${GPC_SIM_STAMP}"
     COMMAND "${SIM_DIR}/node_modules/.bin/electron-esbuild" build
-    COMMAND "${NODE_EXECUTABLE}" "${SIM_DIR}/esbuild/esbuild.batch.config.js"
-    COMMAND "${NODE_EXECUTABLE}" "${SIM_DIR}/esbuild/esbuild.fcmdump.config.js"
-    COMMAND "${NODE_EXECUTABLE}" "${SIM_DIR}/esbuild/esbuild.dbg.config.js"
+    COMMAND "${NODE_EXECUTABLE}" "${SIM_DIR}/esbuild/esbuild.gpc.config.js"
     COMMAND ${CMAKE_COMMAND} -E touch "${GPC_SIM_STAMP}"
     WORKING_DIRECTORY "${SIM_DIR}"
     DEPENDS "${GPC_NPM_STAMP}" ${GPC_SIM_SOURCES}
-    COMMENT "Building GPC simulator (batch + debugger)"
+    COMMENT "Building GPC simulator (unified gpc CLI + GUI)"
     VERBATIM
 )
 add_custom_target(gpc-sim ALL DEPENDS "${GPC_SIM_STAMP}")
+
+# Self-contained package target — invokes electron-builder to produce a
+# distributable binary for the host platform.  Output lands in
+# ${SIM_DIR}/release/ (AppImage on Linux, .dmg/.zip on macOS).
+add_custom_target(gpc-pkg
+    COMMAND "${SIM_DIR}/node_modules/.bin/electron-builder"
+    WORKING_DIRECTORY "${SIM_DIR}"
+    COMMENT "Packaging GPC simulator (host platform)"
+    VERBATIM
+)
+add_dependencies(gpc-pkg gpc-sim)
 
 #-----------------------------------------------------------------------------
 # Build targets:
@@ -193,7 +207,8 @@ add_custom_target(gpc-sim ALL DEPENDS "${GPC_SIM_STAMP}")
 #   make check        build all test deps + run ctest
 #   make halsfc       just the compiler
 #   make runtime      just the runtime library
-#   make gpc-sim      just the simulator
+#   make gpc-sim      just the simulator (CLI + GUI bundles)
+#   make gpc-pkg      the simulator + electron-builder package
 #-----------------------------------------------------------------------------
 add_custom_target(world COMMENT "Build everything")
 add_dependencies(world halsfc runtime proghal bench unit regress gpc-sim)
@@ -223,7 +238,18 @@ include(InstallWrappers)
 #-----------------------------------------------------------------------------
 # Tests (ctest)
 #-----------------------------------------------------------------------------
-set(GPC_BATCH_WRAPPER "${CMAKE_BINARY_DIR}/bin/gpc-batch")
+# GPC_BATCH_COMMAND is a cmake list — when expanded unquoted, it becomes the
+# program + args prefix for a test.  In the unified path it's `gpc;run`; in
+# the legacy/compat path it's just the gpc-batch wrapper.
+if(SDL_UNIFIED_GPC)
+    set(GPC_BATCH_COMMAND "${CMAKE_BINARY_DIR}/bin/gpc" "run")
+    set(_env_check_gpc_path "${CMAKE_BINARY_DIR}/bin/gpc")
+    set(_env_check_gpc_name "gpc")
+else()
+    set(GPC_BATCH_COMMAND "${CMAKE_BINARY_DIR}/bin/gpc-batch")
+    set(_env_check_gpc_path "${CMAKE_BINARY_DIR}/bin/gpc-batch")
+    set(_env_check_gpc_name "gpc-batch")
+endif()
 
 set(HAL_TEST_FCM_DIR "${CMAKE_BINARY_DIR}/fcm")
 set(HAL_TEST_SRC_DIR "${CMAKE_SOURCE_DIR}/test")
@@ -240,7 +266,7 @@ import sys, os
 errors = []
 for name, path in [
     ('halsc',     '${CMAKE_BINARY_DIR}/bin/halsc'),
-    ('gpc-batch', '${CMAKE_BINARY_DIR}/bin/gpc-batch'),
+    ('${_env_check_gpc_name}', '${_env_check_gpc_path}'),
 ]:
     if not os.path.exists(path):
         errors.append(f'{name} not found at {path}')

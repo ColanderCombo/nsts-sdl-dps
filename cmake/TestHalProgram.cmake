@@ -29,9 +29,11 @@ function(hal_test)
     set(_baseline "${HAL_TEST_BASELINE_DIR}/${HT_NAME}.expected.out6")
     set(_infile5 "${HAL_TEST_SRC_DIR}/${HT_NAME}.in5")
 
-    # Build the gpc-batch command
+    # Build the gpc-batch command.  GPC_BATCH_COMMAND is a cmake list
+    # (either `[gpc-batch]` or `[gpc, run]`) — unquoted expansion below
+    # lets either shape work.
     set(_cmd
-        "${GPC_BATCH_WRAPPER}"
+        ${GPC_BATCH_COMMAND}
         "${_fcm}"
         "--no-trace"
         "--max-steps" "${HT_MAX_STEPS}"

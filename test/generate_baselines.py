@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate baseline output files for HAL/S test programs.
 
-Runs each .fcm through gpc-batch and saves output as .expected.out6
+Runs each .fcm through `gpc run` and saves output as .expected.out6
 baselines for regression testing.
 """
 
@@ -17,16 +17,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 FCM_DIR      = PROJECT_ROOT / "build" / "fcm"
 TEST_DIR     = PROJECT_ROOT / "test"
 BASELINE_DIR = TEST_DIR / "baselines"
-GPC_BATCH    = PROJECT_ROOT / "ext" / "sim" / "dist" / "gpc-batch.js"
+GPC_JS       = PROJECT_ROOT / "ext" / "sim" / "dist" / "gpc.js"
+
 
 app = typer.Typer(add_completion=False)
 
 
 def run_program(fcm: Path, outfile: Path, infile5: Path | None,
                 max_steps: int) -> tuple[int, str]:
-    """Run gpc-batch on an FCM, return (exit_code, stderr_text)."""
+    """Run `gpc run` on an FCM, return (exit_code, stderr_text)."""
     args = [
-        "node", str(GPC_BATCH), str(fcm),
+        "node", str(GPC_JS), "run", str(fcm),
         "--no-trace", "--max-steps", str(max_steps),
         f"--outfile6={outfile}",
     ]
@@ -38,7 +39,7 @@ def run_program(fcm: Path, outfile: Path, infile5: Path | None,
 
 
 def stop_reason(stderr: str) -> str:
-    """Pull the stop-reason line from gpc-batch stderr."""
+    """Pull the stop-reason line from `gpc run` stderr."""
     for line in stderr.splitlines():
         if "STOPPED" in line or "FATAL" in line:
             return line.strip()
@@ -51,9 +52,9 @@ def generate(
     max_steps: Annotated[int, typer.Option(help="Max simulation steps per program")] = 100_000,
     update: Annotated[bool, typer.Option("--update", help="Overwrite existing baselines")] = False,
 ):
-    if not GPC_BATCH.exists():
-        typer.echo(f"gpc-batch not built: {GPC_BATCH}\n"
-                   "  Run: cd ext/sim && npm run batch:build", err=True)
+    if not GPC_JS.exists():
+        typer.echo(f"gpc not built: {GPC_JS}\n"
+                   "  Run: cd ext/sim && npm run gpc:build", err=True)
         raise typer.Exit(1)
 
     BASELINE_DIR.mkdir(exist_ok=True)
