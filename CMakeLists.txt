@@ -16,7 +16,7 @@ set(SDL_INSTALL_LIBDIR "${CMAKE_INSTALL_PREFIX}/lib" CACHE PATH "Library install
 # directly as `gpc run ...`.  When OFF (default), additionally generate
 # compatibility wrappers (gpc-batch, gpc-dbg, gpc-dump) that delegate to
 # `gpc run/debug/dump`, preserving the prior external interface.
-option(SDL_UNIFIED_GPC "Use only the unified 'gpc' command (no gpc-batch/gpc-dbg/gpc-dump aliases)" OFF)
+option(SDL_UNIFIED_GPC "Use only the unified 'gpc' command (no gpc-batch/gpc-dbg/gpc-dump aliases)" ON)
 
 # Paths to toolchain source (via symlinks into ext/virtualagc)
 set(XCOM_I_DIR "${CMAKE_SOURCE_DIR}/src/XCOM-I" CACHE PATH "Path to XCOM-I")
