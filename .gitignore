@@ -5,3 +5,4 @@ docs
 *.pyc
 .DS_Store
 testCases
+*.repro.json

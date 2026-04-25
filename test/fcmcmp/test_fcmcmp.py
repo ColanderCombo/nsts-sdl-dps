@@ -175,6 +175,67 @@ def test_diff_json_and_fcm_b_exclusive():
     assert r.returncode == 2
 
 
+def test_csect_table_size_mismatch(tmp_path):
+    """When csectTable has a different size than sym.json, report 'vs N expected'."""
+    import json
+    with open(SYM_JSON) as f:
+        sym = json.load(f)
+
+    # Build a fake csectTable.json: shrink the first section's expected size
+    # by 1 hw, leave the rest matching, omit one entirely (no annotation),
+    # and include one not in sym.json (should be ignored).
+    target_section = sym["sections"][0]["name"]
+    target_addr = sym["sections"][0]["address"]
+    target_size = sym["sections"][0]["size"]
+    short_size = target_size - 1
+
+    csect_table = {
+        target_section: {
+            "start": target_addr,
+            "end": target_addr + short_size - 1,
+        },
+    }
+    # Add the rest with matching sizes (so they don't render the 'vs' note)
+    for s in sym["sections"][1:]:
+        csect_table[s["name"]] = {
+            "start": s["address"],
+            "end": s["address"] + s["size"] - 1,
+        }
+
+    csect_path = tmp_path / "csectTable.json"
+    csect_path.write_text(json.dumps(csect_table))
+
+    r = run_fcmcmp("--csect-table", str(csect_path), SYM_JSON, FCM, FCM)
+    assert r.returncode == 0
+    # The mismatched section line should include 'vs N expected'
+    target_lines = [l for l in r.stdout.splitlines() if target_section in l]
+    assert any(f"{target_size} halfwords vs {short_size} expected" in l
+               for l in target_lines), \
+        f"Expected size-mismatch annotation in: {target_lines}"
+    # Other (matching) sections should not get the annotation
+    for line in r.stdout.splitlines():
+        if target_section in line:
+            continue
+        assert "expected" not in line, f"Unexpected annotation in: {line}"
+
+
+def test_csect_table_size_match_no_annotation(tmp_path):
+    """When sizes match, the message should be unchanged ('N halfwords' only)."""
+    import json
+    with open(SYM_JSON) as f:
+        sym = json.load(f)
+    csect_table = {
+        s["name"]: {"start": s["address"], "end": s["address"] + s["size"] - 1}
+        for s in sym["sections"]
+    }
+    csect_path = tmp_path / "csectTable.json"
+    csect_path.write_text(json.dumps(csect_table))
+
+    r = run_fcmcmp("--csect-table", str(csect_path), SYM_JSON, FCM, FCM)
+    assert r.returncode == 0
+    assert "expected" not in r.stdout
+
+
 def test_extract_fcmcmp_diffs():
     """Test the extraction script against the issue_13 log."""
     from lnk101.extract_fcmcmp_diffs import extract_diffs

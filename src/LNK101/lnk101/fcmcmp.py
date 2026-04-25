@@ -76,6 +76,31 @@ def load_annotations(sym_json_path, csect_table_path=None):
     return addr_to_sym, addr_to_rld
 
 
+def load_expected_sizes(csect_table_path):
+    """Build a {section_name: expected_size_hw} map from csectTable.json.
+
+    csectTable.json describes the reference (image_b) layout — `start` and
+    `end` are inclusive halfword addresses. Sections without both fields are
+    omitted, since they don't have a known size in the reference image.
+    """
+    with open(csect_table_path) as f:
+        data = json.load(f)
+    sizes = {}
+    for name, info in data.items():
+        start = info.get("start")
+        end = info.get("end")
+        if start is not None and end is not None:
+            sizes[name] = end - start + 1
+    return sizes
+
+
+def _format_size(size_hw, expected_hw):
+    """Return '(N halfwords)' or '(N halfwords vs M expected)' if mismatched."""
+    if expected_hw is not None and expected_hw != size_hw:
+        return f"({size_hw} halfwords vs {expected_hw} expected)"
+    return f"({size_hw} halfwords)"
+
+
 def load_sections(sym_json_path, modules=None, include_all=False):
     with open(sym_json_path) as f:
         data = json.load(f)
@@ -194,7 +219,7 @@ def _print_diffs(diff_positions, max_hw_diffs, pad, addr_to_sym, addr_to_rld):
 
 
 def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
-            equiv=None, diff_if_shifted=True):
+            equiv=None, diff_if_shifted=True, expected_sizes=None):
     failures = 0
     checked = 0
 
@@ -205,16 +230,18 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         offset = addr.bytes
         length = size.bytes
         padded = name.ljust(name_width)
+        exp_hw = expected_sizes.get(name) if expected_sizes else None
+        size_str = _format_size(size.hw, exp_hw)
 
         if offset + length > len(image_a):
             print(
-                f"  SKIP: {padded} @ {addr.x} ({size.hw} halfwords)"
+                f"  SKIP: {padded} @ {addr.x} {size_str}"
                 f" — beyond end of first image"
             )
             continue
         if offset + length > len(image_b):
             print(
-                f"  SKIP: {padded} @ {addr.x} ({size.hw} halfwords)"
+                f"  SKIP: {padded} @ {addr.x} {size_str}"
                 f" — beyond end of second image"
             )
             continue
@@ -235,10 +262,10 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
                     diff_positions.append((addr + Addr(hi * 2), hw_a, hw_b))
 
         if not diff_positions:
-            print(f"  OK:   {padded} @ {addr.x} ({size.hw} halfwords)")
+            print(f"  OK:   {padded} @ {addr.x} {size_str}")
         else:
             print(
-                f"  FAIL: {padded} @ {addr.x} ({size.hw} halfwords)"
+                f"  FAIL: {padded} @ {addr.x} {size_str}"
                 f" — {len(diff_positions)} halfwords differ"
             )
 
@@ -550,6 +577,7 @@ def main(
             equiv_set = frozenset(vals)
 
     addr_to_sym, addr_to_rld = load_annotations(sym_json, csect_table)
+    expected_sizes = load_expected_sizes(csect_table) if csect_table else None
 
     # --diff-json mode: compare FCM_A against recorded reference values
     if diff_json:
@@ -595,6 +623,7 @@ def main(
     checked, failures = compare(
         sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         equiv=equiv_set, diff_if_shifted=diff_if_shifted,
+        expected_sizes=expected_sizes,
     )
 
     # Collect all diffs (no elision) when dumping or when repro needs them
