@@ -354,6 +354,7 @@ class Linker:
         self.appliedRelocations = []    # populated by applyRelocations()
         self.unresolvedRelocations = [] # populated by applyRelocations()
         self.csectTable = {}            # populated by loadExternalSyms()
+        self.deadERsLogged = set()      # (filename, symName) pairs already reported
     
     def loadInputFiles(self):
         """Load all input files and explicit libraries from args."""
@@ -478,7 +479,12 @@ class Linker:
 
     def _addUndefRef(self, symName, module, esdId):
         """Record that module references undefined symbol symName (ESD ID esdId).
-        Uses RLD entries to identify which CSECT(s) contain the reference."""
+        Uses RLD entries to identify which CSECT(s) contain the reference.
+
+        If no RLD entry references the ER, the symbol is dead — emitted by the
+        compiler (e.g., for an INCLUDE'd COMPOOL whose variables are never
+        actually used) but never relocated against. Drop it silently with an
+        informational message rather than failing the link."""
         csects = {module.sections[r.posId].name.strip()
                   for r in module.relocations
                   if r.relId == esdId and r.posId in module.sections}
@@ -486,7 +492,11 @@ class Linker:
             for csect in csects:
                 self.undefinedSymbols[symName].add((module.filename, csect))
         else:
-            self.undefinedSymbols[symName].add((module.filename, None))
+            key = (module.filename, symName)
+            if key not in self.deadERsLogged:
+                self.deadERsLogged.add(key)
+                log.info(f"Dropping dead ER '{symName}' in "
+                         f"{Path(module.filename).name} (no RLD references)")
 
     def resolveExternals(self, searchLibraries=True):
         """
