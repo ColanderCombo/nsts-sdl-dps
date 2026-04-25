@@ -88,23 +88,26 @@ class AddrCon:
         return target.hw
 
     def apply(self, existing: int, target: Addr) -> int:
-        """Apply this relocation: compute new value from existing and target."""
+        """Apply this relocation: compute new value from existing and target.
+
+        Per OBJECTGE.xpl: V (sign) is the sign of the YCON in the text
+        record — V=1 means existing is the absolute value of a negative
+        number.  S (direction) is the direction of relocation.  So:
+            result = (V==0 ? +existing : -existing)
+                   + (S==0 ? +value : -value)
+        """
         value = self.encode(target)
-        reloc_value = -value if self.sign else value
-        if self.direction == 0:
-            return (existing + reloc_value) & self.mask
-        else:
-            return (existing - reloc_value) & self.mask
+        signed_existing = -existing if self.sign else existing
+        signed_value = -value if self.direction else value
+        return (signed_existing + signed_value) & self.mask
 
     def reverse(self, existing: int, result: int, sector: int = 0) -> int:
         """Reverse this relocation: given existing and result, recover
         the target halfword address.  For sector 1+ ZCONs, pass the
         sector register value to fully decode."""
-        if self.direction == 0:
-            reloc_value = (result - existing) & self.mask
-        else:
-            reloc_value = (existing - result) & self.mask
-        target_raw = (-reloc_value & self.mask) if self.sign else reloc_value
+        signed_existing = -existing if self.sign else existing
+        signed_value = (result - signed_existing) & self.mask
+        target_raw = (-signed_value & self.mask) if self.direction else signed_value
         return sector_decode(target_raw, sector) if self.length == 2 else target_raw
 
     def __repr__(self) -> str:
