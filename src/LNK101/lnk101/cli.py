@@ -107,8 +107,8 @@ def link(
         print(f"{prog_name} {version_string()}")
         raise typer.Exit()
 
-    # --repro implies verbose
-    if repro:
+    # --repro implies verbose, unless --quiet overrides
+    if repro and not quiet:
         verbose = True
 
     tracker = ReproTracker("lnk101", prog_version)
@@ -265,7 +265,8 @@ def link(
 
     # Repro file: repro metadata + embedded json_symbols data
     if repro:
-        tracker.print_summary()
+        if not quiet:
+            tracker.print_summary()
         repro_path = Path(opts.output).parent / (Path(opts.output).stem + '.lnk101.repro.json')
         extra = {}
         if json_symbols_data:
@@ -277,10 +278,8 @@ def link(
         tracker.print_check(check_repro)
 
     if success:
-        print(f"\nLinked {len(linker.modules)} module(s) -> {opts.output} "
-              f"({linker.imageSize} bytes)")
+        print(f"SUCCESS: wrote output to {opts.output}")
     else:
-        print(f"\nLinked with errors -> {opts.output}", file=sys.stderr)
         raise typer.Exit(1)
 
 
@@ -295,4 +294,10 @@ def _embed_repro(json_path, repro_dict):
 
 
 def main():
-    app()
+    try:
+        app()
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else (1 if e.code else 0)
+        if code != 0:
+            print("ERROR: link failed", file=sys.stderr)
+        raise
