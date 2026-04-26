@@ -81,9 +81,11 @@ class AddrCon:
 
     def encode(self, target: Addr) -> int:
         """Encode a target address to the value written by this relocation.
-        All 16-bit relocations use sector-encoded halfwords (bit 15 set
-        if address is in sector 1+).  32-bit relocations use raw values."""
+		ZCON *always* sets 0x8000 (even if target in sector 0)
+		YCON+ACON set 0x800 if the target is in sector 1+."""
         if self.length == 2:
+            if self.is_zcon:
+                return 0x8000 | (target.hw & 0x7FFF)
             return target.sector_encode()
         return target.hw
 

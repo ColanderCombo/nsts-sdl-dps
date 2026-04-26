@@ -67,6 +67,38 @@ class TestAddrConApply(unittest.TestCase):
                     expected=(0xC8F8 - 0x0019) & 0xFFFF)
 
 
+class TestAddrConZconBit15(unittest.TestCase):
+    """ZCON addresses (flag 0x04/0x10/0x50) are always BSR/DSR-relative,
+    so bit 15 must always be set in the encoded halfword — even when the
+    target is in sector 0."""
+
+    def _check_zcon(self, flag_type, existing, target_hw, expected):
+        from lnk101.addrcon import AddrCon
+        from lnk101.addr import Addr
+        con = AddrCon(flag_type, 2)
+        target = Addr.from_hw(target_hw)
+        got = con.apply(existing, target)
+        self.assertEqual(
+            got, expected,
+            f"flag=0x{flag_type:02X} existing=0x{existing:04X} target=0x{target_hw:05X}: "
+            f"got 0x{got:04X}, expected 0x{expected:04X}")
+
+    def test_zcon_data_sector0(self):
+        # flag 0x50 (ZCON/data) to sector-0 target #PCMDKMD+A @ hw 0x3858
+        # Reference build emits 0xB858 (bit 15 set), our linker was emitting 0x3858.
+        self._check_zcon(0x50, existing=0, target_hw=0x3858, expected=0xB858)
+
+    def test_zcon_code_sector0(self):
+        self._check_zcon(0x04, existing=0, target_hw=0x3858, expected=0xB858)
+
+    def test_zcon_addr_sector0(self):
+        self._check_zcon(0x10, existing=0, target_hw=0x3858, expected=0xB858)
+
+    def test_zcon_data_sector8(self):
+        # Sector-1+ target already had bit 15 set; behavior unchanged.
+        self._check_zcon(0x50, existing=0, target_hw=0x448F8, expected=0xC8F8)
+
+
 class TestAddrConReverse(unittest.TestCase):
     """Round-trip: apply then reverse should recover the target hw."""
 
