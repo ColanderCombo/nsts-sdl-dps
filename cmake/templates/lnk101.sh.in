@@ -5,11 +5,12 @@
 
 LIB_ARGS=()
 USER_NO_DEFAULTS=0
+USER_HAS_L=0
 for arg in "$@"; do
-    if [ "$arg" = "--no-default-libs" ]; then
-        USER_NO_DEFAULTS=1
-        break
-    fi
+    case "$arg" in
+        --no-default-libs)                       USER_NO_DEFAULTS=1 ;;
+        -L|--library-path|-L*|--library-path=*)  USER_HAS_L=1 ;;
+    esac
 done
 if [ $USER_NO_DEFAULTS -eq 0 ]; then
     # lnk101 tries to automatically add add RUN and ZCON to the search path,
@@ -17,8 +18,28 @@ if [ $USER_NO_DEFAULTS -eq 0 ]; then
     # Instead, cmake bakes in the full searchpaths here.  if --no-default-libs
     # is on the cmdline we'll skip this (just like on the python side):
     #
-    [ -d "@WRAPPER_LIBDIR@/runtime/RUN" ]  && LIB_ARGS+=(-L "@WRAPPER_LIBDIR@/runtime/RUN")
-    [ -d "@WRAPPER_LIBDIR@/runtime/ZCON" ] && LIB_ARGS+=(-L "@WRAPPER_LIBDIR@/runtime/ZCON")
+    MISSING=()
+    if [ -d "@WRAPPER_LIBDIR@/runtime/RUN" ]; then
+        LIB_ARGS+=(-L "@WRAPPER_LIBDIR@/runtime/RUN")
+    else
+        MISSING+=("@WRAPPER_LIBDIR@/runtime/RUN")
+    fi
+    if [ -d "@WRAPPER_LIBDIR@/runtime/ZCON" ]; then
+        LIB_ARGS+=(-L "@WRAPPER_LIBDIR@/runtime/ZCON")
+    else
+        MISSING+=("@WRAPPER_LIBDIR@/runtime/ZCON")
+    fi
+    if [ ${#MISSING[@]} -gt 0 ]; then
+        for m in "${MISSING[@]}"; do
+            echo "lnk101: warning: runtime library directory not found:" >&2
+            echo "    $m" >&2
+        done
+        if [ $USER_HAS_L -eq 1 ]; then
+            echo "lnk101: continuing with only your -L paths; build the runtime ('make runtime') to silence" >&2
+        else
+            echo "lnk101: no library paths to search — pass -L explicitly or build the runtime ('make runtime')" >&2
+        fi
+    fi
 fi
 
 exec "@SDL_VENV_PYTHON@" -m lnk101 --no-default-libs "${LIB_ARGS[@]}" "$@"
