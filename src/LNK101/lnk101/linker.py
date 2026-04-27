@@ -883,19 +883,26 @@ class Linker:
                         targetAddr = ext.resolvedSection.baseAddress
                     else:
                         resolved = False
-                        if not ext.weak and not self.args.force:
+                        # Lenient #P* (REMOTE COMPOOL) references: target stays
+                        # at Addr(0), apply() preserves existing TXT, link continues.
+                        lenient = ext.name.startswith('#P') and not self.args.strict_compools
+                        if not ext.weak and not lenient and not self.args.force:
                             self.errors.append(
                                 f"{module.filename}: Unresolved external '{ext.name}' "
                                 f"at offset 0x{reloc.address:06X}(byte)")
                             relocErrors += 1
-                
+
                 else:
                     self.warnings.append(
                         f"{module.filename}: Unknown relocation target ESD#{reloc.relId}")
                     resolved = False
-                
-                if not resolved and not self.args.force:
-                    continue
+
+                if not resolved:
+                    lenient = (reloc.relId in module.externals
+                               and module.externals[reloc.relId].name.startswith('#P')
+                               and not self.args.strict_compools)
+                    if not lenient and not self.args.force:
+                        continue
 
                 # Calculate the image offset for this relocation (in bytes)
                 # RLD address field contains byte offsets relative to P section
@@ -1241,15 +1248,43 @@ class Linker:
                 allResolved = self.resolveExternals(searchLibraries=False)
         
         if not allResolved:
+            # It looks like the HAL/S-FC compiler can sometimes emit code
+            # that has references to COMPOOLs that aren't present in the
+            # link as long as the code is never executed. e.g, from issue #22,
+            # in an OPS 1 build:
+            #
+            #   IF CGOV_MMODE_CUR_LFE = 201 OR CGOV_MMODE_CUR_LFE = 202 OR
+            #     CGOV_MMODE_CUR_LFE = 801 THEN DO;  
+            #       /* access the un-linked COMPOOL */
+            #   END;
+            #
+            #  CGOV_MM_CUR_LFE will always only have 1xx values, so
+            #  the compiler allows it.
+            #
+            #  Make missing compools warnings, unless --strict-compools
+            #  is passed:
+            #
+            strict = []
+            lenient = []
             for sym in sorted(self.undefinedSymbols):
+                if sym.startswith('#P') and not self.args.strict_compools:
+                    lenient.append(sym)
+                else:
+                    strict.append(sym)
+
+            for sym in lenient:
+                log.warning(
+                    f"Undefined COMPOOL: {sym}, referenced by "
+                    f"{self._formatUndefRefs(self.undefinedSymbols[sym])}")
+            for sym in strict:
                 self.errors.append(
                     f"Undefined symbol: {sym}, referenced by "
                     f"{self._formatUndefRefs(self.undefinedSymbols[sym])}")
-            
-            if not self.args.force:
+
+            if strict and not self.args.force:
                 return False
-            else:
-                log.warning(f"{len(self.undefinedSymbols)} undefined symbol(s), continuing due to -f")
+            elif strict:
+                log.warning(f"{len(strict)} undefined symbol(s), continuing due to -f")
         
         #
         # Place Sections

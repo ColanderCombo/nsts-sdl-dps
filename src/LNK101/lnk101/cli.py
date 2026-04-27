@@ -42,6 +42,7 @@ class LinkerOpts:
     force:            bool             = False
     no_undefined:     bool             = False
     allow_undefined:  bool             = False
+    strict_compools:  bool             = False
     # diagnostics
     verbose:          bool             = False
     quiet:            bool             = False
@@ -82,6 +83,7 @@ def link(
     force: Annotated[bool, typer.Option("-f", "--force", help="Force output even with unresolved symbols")] = False,
     no_undefined: Annotated[bool, typer.Option("--no-undefined", help="Report unresolved symbols as errors (default)")] = False,
     allow_undefined: Annotated[bool, typer.Option("--allow-undefined", help="Allow unresolved symbols without -f")] = False,
+    strict_compools: Annotated[bool, typer.Option("--strict-compools", help="Error (don't warn) on undefined #P* (REMOTE COMPOOL) references")] = False,
 
     # Diagnostics
     verbose: Annotated[bool, typer.Option("-v", "--verbose", help="Verbose output")] = False,
@@ -193,6 +195,7 @@ def link(
         force=force or allow_undefined,
         no_undefined=no_undefined,
         allow_undefined=allow_undefined,
+        strict_compools=strict_compools,
         verbose=verbose,
         quiet=quiet,
         debug=debug,
