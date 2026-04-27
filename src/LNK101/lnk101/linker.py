@@ -883,8 +883,9 @@ class Linker:
                         targetAddr = ext.resolvedSection.baseAddress
                     else:
                         resolved = False
-                        # Lenient #P* (REMOTE COMPOOL) references: target stays
-                        # at Addr(0), apply() preserves existing TXT, link continues.
+                        # Lenient #P* (REMOTE COMPOOL) references skip the
+                        # apply step below — the IBM linker leaves existing
+                        # TXT untouched for these (see issue #22).
                         lenient = ext.name.startswith('#P') and not self.args.strict_compools
                         if not ext.weak and not lenient and not self.args.force:
                             self.errors.append(
@@ -897,12 +898,14 @@ class Linker:
                         f"{module.filename}: Unknown relocation target ESD#{reloc.relId}")
                     resolved = False
 
-                if not resolved:
-                    lenient = (reloc.relId in module.externals
-                               and module.externals[reloc.relId].name.startswith('#P')
-                               and not self.args.strict_compools)
-                    if not lenient and not self.args.force:
-                        continue
+                lenient_unresolved = (
+                    not resolved
+                    and reloc.relId in module.externals
+                    and module.externals[reloc.relId].name.startswith('#P')
+                    and not self.args.strict_compools
+                )
+                if not resolved and not lenient_unresolved and not self.args.force:
+                    continue
 
                 # Calculate the image offset for this relocation (in bytes)
                 # RLD address field contains byte offsets relative to P section
@@ -933,6 +936,10 @@ class Linker:
                         "module": Path(module.filename).name,
                         "existing": existing,
                     })
+
+                # Unresolved RLDs: leave existing TXT untouched:
+                if not resolved:
+                    continue
 
                 targetName = "???"
                 if reloc.relId in module.sections:
