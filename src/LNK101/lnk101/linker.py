@@ -937,8 +937,15 @@ class Linker:
                         "existing": existing,
                     })
 
-                # Unresolved RLDs: leave existing TXT untouched:
+                # Unresolved RLDs: behavior depends on RLD type (issue #22).
+                #   ZCON address (0x04/0x10/0x50): 
+                #     the IBM linker still sets bit 15 of HW0.
+                #     HW1 (BSR/DSR) is left untouched since RF is unknown.
+                #   YCON / ACON / BSR-only / DSR-only: TXT untouched.
                 if not resolved:
+                    flagType = reloc.flags & 0x7F
+                    if flagType in (0x04, 0x10, 0x50) and imageOffset < len(self.image):
+                        self.image[imageOffset] |= 0x80
                     continue
 
                 targetName = "???"

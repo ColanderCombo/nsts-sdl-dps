@@ -99,6 +99,62 @@ class TestAddrConZconBit15(unittest.TestCase):
         self._check_zcon(0x50, existing=0, target_hw=0x448F8, expected=0xC8F8)
 
 
+class TestUnresolvedRldHandling(unittest.TestCase):
+    """Issue #22: when an RLD's target is unresolved, the IBM linker leaves
+    YCON/ACON TXT completely untouched, but for ZCON address types
+    (0x04/0x10/0x50) it still sets bit 15 of HW0 (the structural marker).
+    This mirrors the linker's per-flag-type branching for unresolved RLDs.
+    """
+
+    def _apply_unresolved(self, flag, existing_hw0, existing_hw1=0x0000):
+        """Mimic linker behavior for an unresolved RLD: returns (hw0, hw1)."""
+        image = bytearray(existing_hw0.to_bytes(2, 'big')
+                          + existing_hw1.to_bytes(2, 'big'))
+        flag_type = flag & 0x7F
+        if flag_type in (0x04, 0x10, 0x50):
+            image[0] |= 0x80
+        return (image[0] << 8) | image[1], (image[2] << 8) | image[3]
+
+    def test_zcon_data_unresolved_sets_bit15(self):
+        # The DGL4SUP @ 0AA3C case: OBJ has 0x0038, IBM linker writes 0x8038.
+        hw0, hw1 = self._apply_unresolved(0x50, 0x0038, 0x0000)
+        self.assertEqual(hw0, 0x8038)
+        self.assertEqual(hw1, 0x0000)
+
+    def test_zcon_data_unresolved_bit15_idempotent(self):
+        # If OBJ already had bit 15 (shouldn't happen, but defensive):
+        # OR is idempotent, ADD would have wrapped.
+        hw0, _ = self._apply_unresolved(0x50, 0x8038)
+        self.assertEqual(hw0, 0x8038)
+
+    def test_zcon_code_unresolved_sets_bit15(self):
+        hw0, _ = self._apply_unresolved(0x04, 0x0038)
+        self.assertEqual(hw0, 0x8038)
+        hw0, _ = self._apply_unresolved(0x10, 0x0038)
+        self.assertEqual(hw0, 0x8038)
+
+    def test_ycon_unresolved_v0_untouched(self):
+        # The 0x8F/0x91/0x95 V=0 YCON cases: TXT bytes stay put.
+        hw0, _ = self._apply_unresolved(0x00, 0x0004)
+        self.assertEqual(hw0, 0x0004)
+
+    def test_ycon_unresolved_v1_untouched(self):
+        # The CGL4SUP @ 0x89 V=1 YCON case: pre-358c1d1 bug wrote FFFC;
+        # post-fix leaves the absolute-value 0x0004 untouched.
+        hw0, _ = self._apply_unresolved(0x80, 0x0004)
+        self.assertEqual(hw0, 0x0004)
+
+    def test_bsr_only_unresolved_untouched(self):
+        # 0x20 (BSR-only) targets HW1; we never modify it when unresolved.
+        hw0, hw1 = self._apply_unresolved(0x20, 0x8038, 0x0011)
+        self.assertEqual((hw0, hw1), (0x8038, 0x0011))
+
+    def test_dsr_only_unresolved_untouched(self):
+        # 0x40 (DSR-only) ditto.
+        hw0, hw1 = self._apply_unresolved(0x40, 0x8038, 0x0011)
+        self.assertEqual((hw0, hw1), (0x8038, 0x0011))
+
+
 class TestAddrConReverse(unittest.TestCase):
     """Round-trip: apply then reverse should recover the target hw."""
 
