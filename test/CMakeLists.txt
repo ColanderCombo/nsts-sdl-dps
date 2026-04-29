@@ -70,3 +70,16 @@ discover_hal_tests(
     MAX_STEPS 500000
     SRC_DIRS "${REGRESS_SRC_DIR}"
 )
+
+# Direct C-level unit tests of the IBM hex DP primitives in
+# ext/virtualagc/XCOM-I/ibmFloat.{c,h}.  Exercises the arithmetic and
+# conversion code without going through the compile/sim pipeline.
+set(_ibm_float_dir "${CMAKE_SOURCE_DIR}/ext/virtualagc/XCOM-I")
+add_executable(test_ibm_float
+    "${CMAKE_CURRENT_SOURCE_DIR}/test_ibm_float.c"
+    "${_ibm_float_dir}/ibmFloat.c"
+)
+target_include_directories(test_ibm_float PRIVATE "${_ibm_float_dir}")
+target_link_libraries(test_ibm_float PRIVATE m)
+add_test(NAME test_ibm_float COMMAND test_ibm_float)
+set_tests_properties(test_ibm_float PROPERTIES LABELS "unit")

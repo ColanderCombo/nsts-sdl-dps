@@ -1,0 +1,21 @@
+C/ Float-literal regression for virtualagc issue #1296: 1.0E-8 was
+C/ converted via atof + llround, losing the LSB.  ibm_dp_from_string
+C/ now matches the original IBM XXXTOD.bal truncating S/360 hex FP
+C/ behavior.
+
+ FLOAT_LITERAL: PROGRAM;
+    DECLARE SCALAR DOUBLE,
+        A INITIAL(1.0E-8),
+        B INITIAL(1.0E-9),
+        C INITIAL(1.5E-7),
+        D INITIAL(0.1),
+        E INITIAL(3.14159),
+        F INITIAL(2.718281828);
+    WRITE(6) A;
+    WRITE(6) B;
+    WRITE(6) C;
+    WRITE(6) D;
+    WRITE(6) E;
+    WRITE(6) F;
+Y %SVCI(0);
+ CLOSE FLOAT_LITERAL;

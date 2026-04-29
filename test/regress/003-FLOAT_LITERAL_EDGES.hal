@@ -1,0 +1,26 @@
+C/ Edge-case literals: negative numbers, very small / very large
+C/ exponents, both no-decimal and pure-fractional forms.  Exercises
+C/ the sign and exponent-range paths in ibm_dp_from_string.
+
+ FLOAT_EDGES: PROGRAM;
+    DECLARE SCALAR DOUBLE,
+        NEG_SMALL INITIAL(-1.0E-8),
+        NEG_LARGE INITIAL(-3.14159),
+        POS_PLUS  INITIAL(+2.5),
+        SMALL_E   INITIAL(1.0E-30),
+        LARGE_E   INITIAL(1.0E25),
+        NO_DEC    INITIAL(7),
+        PURE_FRAC INITIAL(.125),
+        SIXTEEN   INITIAL(16.0),
+        EIGHTH    INITIAL(0.125);
+    WRITE(6) NEG_SMALL;
+    WRITE(6) NEG_LARGE;
+    WRITE(6) POS_PLUS;
+    WRITE(6) SMALL_E;
+    WRITE(6) LARGE_E;
+    WRITE(6) NO_DEC;
+    WRITE(6) PURE_FRAC;
+    WRITE(6) SIXTEEN;
+    WRITE(6) EIGHTH;
+Y %SVCI(0);
+ CLOSE FLOAT_EDGES;

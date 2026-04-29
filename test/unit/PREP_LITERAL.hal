@@ -1,0 +1,15 @@
+C/ Exercises PREP_LITERAL / MAKE_FIXED_LIT / ROUND_SCALAR — the AW-with-
+C/ FIXER path that turns a scalar literal into an integer.  Verifies the
+C/ ADR/SDR/CD chain that follows AW (integer detection / range check)
+C/ still works after the ibm_dp_addsub guard-digit refactor.
+
+ PREP_LITERAL: PROGRAM;
+    DECLARE I1 INTEGER INITIAL(3);
+    DECLARE I2 INTEGER INITIAL(3.0);
+    DECLARE I3 INTEGER INITIAL(3.4);
+    DECLARE I4 INTEGER INITIAL(-7);
+    DECLARE I5 INTEGER INITIAL(-7.6);
+    DECLARE I6 INTEGER INITIAL(0);
+    WRITE(6) I1, I2, I3, I4, I5, I6;
+Y %SVCI(0);
+ CLOSE PREP_LITERAL;
