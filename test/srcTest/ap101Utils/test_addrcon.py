@@ -7,17 +7,17 @@
 # direction S indicates the direction of relocation.  So:
 #     result = (V==0 ? +existing : -existing) + (S==0 ? +value : -value)
 #
-# Run:  python -m pytest test/test_addrcon.py
-#  or:  python test/test_addrcon.py
+# Run:  python -m pytest test/srcTest/ap101Utils/test_addrcon.py
+#  or:  python test/srcTest/ap101Utils/test_addrcon.py
 #
 import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "LNK101"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 
-from lnk101.addr import Addr
-from lnk101.addrcon import AddrCon
+from ap101Utils.addr import Addr
+from ap101Utils.addrcon import AddrCon
 
 
 def flags_for(sign: int, direction: int) -> int:
@@ -73,8 +73,8 @@ class TestAddrConZconBit15(unittest.TestCase):
     target is in sector 0."""
 
     def _check_zcon(self, flag_type, existing, target_hw, expected):
-        from lnk101.addrcon import AddrCon
-        from lnk101.addr import Addr
+        from ap101Utils.addrcon import AddrCon
+        from ap101Utils.addr import Addr
         con = AddrCon(flag_type, 2)
         target = Addr.from_hw(target_hw)
         got = con.apply(existing, target)
