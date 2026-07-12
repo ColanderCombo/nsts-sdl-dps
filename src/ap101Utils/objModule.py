@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# IBM AP-101S / System-360 object module codec.
+# IBM AP-101 / System-360 object module codec.
 #
 # This is the single card<->record codec for AP-101 object files: it decodes a
 # punched-card object deck into typed records and a structured per-module view
@@ -811,7 +811,7 @@ class Module:
                    order; address includes its section's origin.
       end:         (address, section) for the END entry point, or None.
       relocations: [(symbol, section, type, address)] RLD sites; type is
-                   the AP-101S relocation letter ('Y'/'A'/'Z'), mapped to a
+                   the AP-101 relocation letter ('Y'/'A'/'Z'), mapped to a
                    flag byte by AddrCon.  Sites whose symbol or section is
                    not in the ESD are dropped.
 

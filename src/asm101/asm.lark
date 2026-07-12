@@ -1,0 +1,244 @@
+// asm101 grammar
+// Ref. the IBM Assembler AS037F1
+//  - IEUF2 GS15 GSCAN categories -> terminals
+//  - IEUF8V for precedence
+//  - IEUF8M style start rule per opcode
+//
+// Codegen parses AFTER macro &-substitution, but the conditional-assembly path
+// parses unsubstituted text -- so &VAR (mvar) is a first-class token here.
+
+// ========================= ARITHMETIC =========================
+// IEUF8V precedence: unary +/-, then * /, then + - ; left associative.
+?arith    : sum
+?sum      : sum ADDOP product   -> binop
+          | product
+?product  : product MULOP factor -> binop
+          | factor
+?factor   : atom
+          | ADDOP factor          -> unary
+?atom     : NUMBER                -> num
+          | HEXLIT                -> hexlit
+          | BINLIT                -> binlit
+          | CHARLIT               -> charlit
+          | LOC                   -> loc
+          | mvar
+          | SYMBOL                -> sym
+          | attr
+          | "(" arith ")"
+attr      : ATTRPFX (mvar | SYMBOL)
+mvar      : MVAR subscript?
+subscript : "(" arith ("," arith)? ("," arith)? ")"
+// Note: up to THREE arguments
+
+ADDOP : "+" | "-"
+MULOP : "*" | "/"
+
+// ========================= BOOLEAN ============================
+?bool     : or_expr
+?or_expr  : or_expr OR and_expr   -> orop
+          | and_expr
+?and_expr : and_expr AND notf     -> andop
+          | notf
+?notf     : NOT notf              -> notop
+          | bfactor
+?bfactor  : BOOLLIT               -> boollit
+          | DPFX SYMBOL           -> defined
+          | DPFX mvar             -> defined
+          | rel
+          | mvar
+          | "(" bool ")"
+rel       : arith RELOP arith     -> arith_rel
+          | cexpr RELOP cexpr     -> char_rel
+
+// ========================= CHARACTER ==========================
+// Concat by '.' or bare adjacency ('a''b'); the '.' is optional (transformer joins).
+?cexpr    : catom ((DOT)? catom)*  -> concat
+catom     : STRING substring?      -> strlit
+          | TPFX (mvar | SYMBOL)   -> tattr
+          | mvar
+substring : "(" arith "," arith ")"
+
+// ============= ANCHORED EXPRESSION START RULES ================
+// {arith,bool,cexpr}_only; same as {arith,bool,cexpr} but DOESN'T
+// strip comments:
+?arith_only : arith
+?bool_only  : bool
+?cexpr_only : cexpr
+
+// ===================== OPERAND FORMATS ========================
+// Ops from IEUF8M
+
+// rr: register-register.
+rr : arith ("," arith)?
+
+// ri: register / immediate (e.g. LHI R0,X'10').
+ri : arith "," arith ("(" ")")?
+
+// si: storage / immediate.  
+si : arith "(" arith ")" "," arith   -> si_based
+   | arith "," arith                 -> si_plain
+
+// rs: storage / literal addressing forms; a leading "=" is a literal (lcon).
+rs : (arith ",")? lcon                            -> rs_lit
+   | (arith ",")? arith                           -> rs_d2
+   | (arith ",")? arith "(" arith ")"             -> rs_d2_b2
+   | (arith ",")? arith "(" arith "," arith ")"   -> rs_d2_x2_b2
+   | (arith ",")? arith "(" "," arith ")"         -> rs_d2_b2only
+   | (arith ",")? arith "(" ")"                   -> rs_d2_empty
+
+// lcon: the "=" literal sublanguage -- IBM parses it in IEUF8D, not the
+// IEUF8V evaluator, so it has its own terminals.  =Z is declined.  The quoted body
+// keeps "''" verbatim (the pool key needs it); =Y also carries its raw source text.
+lcon : LITTYPE LMOD? SMOD? STRING        -> lcon_quoted
+     | LITY LMOD? "(" arith ")"          -> lcon_y
+     // =Z literal: a ZCON in the literal pool (e.g. `L R3,=Z(,FPMXQETB+2,0)`).
+     // Same operand shape as `DC Z(...)`: reloc target (arith, with an optional
+     // addend) +/- a leading length and a trailing flags expr.
+     | LITZ "(" "," arith ")"                  -> lcon_z
+     | LITZ "(" arith ")"                      -> lcon_z
+     | LITZ "(" arith "," arith? ")"           -> lcon_z
+     | LITZ "(" "," arith "," arith ")"        -> lcon_z_flags
+     | LITZ "(" arith "," arith? "," arith ")" -> lcon_z_flags
+
+// equ (EQU): value, optional length, optional type attribute (3rd operand).
+equ : arith ("," arith ("," arith)?)?
+
+// exprs: USING / DROP value list.
+exprs : arith ("," arith)*
+
+// idlist: ENTRY / EXTRN symbol list.  A trailing comment may follow the list
+// (e.g. `ENTRY FSVC0030  ALTERNATE ENTRY`) -> Stage-0 strip.
+idlist : SYMBOL ("," SYMBOL)*
+
+// aif (AIF): boolean guard then a target sequence symbol.
+aif : "(" bool ")" SEQSYM
+SEQSYM.8 : /\.[@#$A-Z][@#$A-Z0-9]*/
+
+// nameset (SET name field).  Anchored.
+nameset : MVAR ("(" arith ("," arith)? ")")?
+
+// mnote (MNOTE): severity / "*" / bare message forms; the message's "''" are
+// un-doubled.  Non-anchored (a comment may follow the close quote) -> Stage-0 strip.
+mnote : NUMBER "," STRING   -> mnote_sev
+      | "*" "," STRING       -> mnote_com
+      | STRING               -> mnote_msg
+
+// ===================== IOP (MSC / BCE) OPERANDS ===============
+msc : iopconst "," arith ("(" iopconst ")")?    -> msc_named
+    | arith ("(" iopconst ")")?                 -> msc_expr
+
+bce : arith "(" iopconst ")"   -> bce_idx
+    | arith "," arith          -> bce_two
+    | arith                    -> bce_one
+
+iopconst : NUMBER   -> num
+         | HEXLIT   -> hexlit
+         | BINLIT   -> binlit
+         | CHARLIT  -> charlit
+         | LOC      -> loc
+
+// ===================== MACRO PROTOTYPE ========================
+// oproto: the macro prototype's formal &names, each with an
+// optional "=default" that runs to the next comma or blank.  Anchored (after Stage-0
+// strips the trailing comment).
+oproto  : oparam ("," oparam)*
+oparam  : MVAR "=" PROTOVAL?   -> oparam_kw
+        | MVAR                 -> oparam_bare
+PROTOVAL : /[^, ]+/
+
+// ===================== MACRO INVOCATION =======================
+// oinv: a macro call's argument list, positional or "kw=val".
+// Keyword alternatives outrank positional by rule priority (kwrepl.2 > posrepl.1),
+// so "CC=5" binds as a keyword.  A bare item absorbs a balanced "()" subscript
+// (DEC(BASEREG), =Y(END-START)).  Stage-0 trims the trailing comment, quote/paren-aware.
+oinv  : irepl ("," irepl)*
+?irepl : kwrepl | posrepl
+kwrepl.2  : SYMBOL "=" "(" rlist ")"   -> kw_list
+          | SYMBOL "=" STRING          -> kw_qstr
+          | SYMBOL "=" REPLVAL?        -> kw_bare
+posrepl.1 : STRING                     -> pos_qstr
+          | "(" rlist ")"             -> pos_list
+          | NUMID "(" NUMID ")"        -> pos_numid
+          | REPLVAL?                   -> pos_bare
+
+// rlist (sublist): nested or bare items; a bare item absorbs a balanced "()"
+// subscript (captured by raw source span).
+rlist : litem ("," litem)*
+litem : "(" rlist ")"       -> litem_sub
+      | litembody           -> litem_bare
+litembody : (LTOK ltpart*)?
+?ltpart   : LTOK | lpgroup
+lpgroup   : "(" lpitem* ")"
+?lpitem   : LTOK | lpgroup | ","
+
+NUMID    : /[0-9]+/ | /[A-Z@#$][A-Z0-9@#$]*/
+REPLVAL  : /[^, ()]+/
+LTOK     : /[^ ,()]+/
+
+// ===================== DC / DS CONSTANTS ======================
+// A comma-separated suboperand list: [dup] type [length] [value].  The value is
+// optional (DS reserves space) except the A/Y address forms, which always carry a
+// parenthesized list; one value-optional grammar serves both DC and DS.  Type
+// letters C/X/B clash with the arith CHARLIT/HEXLIT/BINLIT terminals -- the earley
+// dynamic lexer disambiguates by grammar position (type-letter at suboperand start
+// vs a self-def term inside an A/Y expression).
+dc : dcsub ("," dcsub)*
+ds : dcsub ("," dcsub)*
+dcsub : dup? dctyped
+dup   : NUMBER | "(" arith ")"
+dctyped : "C" DCLEN? STRING?                      -> dc_c
+        | "X" DCLEN? STRING?                      -> dc_x
+        | "B" DCLEN? STRING?                      -> dc_b
+        | DCFLOAT DCLEN? SMOD? STRING?            -> dc_float
+        | "A" DCLEN? "(" arith ("," arith)* ")"   -> dc_a
+        | "A" DCLEN? STRING                       -> dc_ahex
+        | "A" DCLEN?                              -> dc_a
+        | "Y" DCLEN? "(" arith ("," arith)* ")"   -> dc_y
+        | "Y" DCLEN?                              -> dc_y
+        // DC Z: a fullword adcon to an external symbol.  The reloc target may
+        // lead or follow an (ignored) length/base field, with an optional
+        // trailing flags expr.  The target is an `arith` (not just a bare
+        // SYMBOL) so a relocatable expression with an addend -- `Z(,FIOBRU+4,0)`,
+        // `Z(FPMSVCL+2,FPMSVC21,8)` -- parses; codegen extracts (symbol, addend).
+        | "Z" "(" "," arith ")"                  -> dc_z
+        | "Z" "(" arith ")"                      -> dc_z
+        | "Z" "(" arith "," arith? ")"           -> dc_z
+        | "Z" "(" "," arith "," arith ")"        -> dc_z_flags
+        | "Z" "(" arith "," arith? "," arith ")" -> dc_z_flags
+        // bare Z (no parens): DS Z reserves a 4-byte fullword (ZCON slot).
+        | "Z" DCLEN?                              -> dc_z
+DCFLOAT  : "F" | "H" | "E" | "D"
+DCLEN.7  : /L\.?[-+]?[0-9]+/
+
+LITTYPE : "=C" | "=X" | "=B" | "=F" | "=H" | "=E" | "=D"
+LITY    : "=Y"
+LITZ    : "=Z"
+LMOD    : /L[0-9]+/
+SMOD    : /S-?[0-9]+/
+
+// ============================ TERMINALS =======================
+// GSCAN categories 6/7/8: attribute and self-defining prefixes own the
+// apostrophe, so they out-rank a bare SYMBOL.  (Priorities: higher = first.)
+HEXLIT.6  : /X'[0-9A-Fa-f]+'/
+BINLIT.6  : /B'[01]+'/
+CHARLIT.6 : /C'([^']|'')*'/
+ATTRPFX.6 : /[NKLSI]'/          // N' K' L' S' I'  (number/count/length/scale/integer)
+TPFX.6    : "T'"
+DPFX.6    : "D'"
+STRING.5  : /'([^']|'')*'/
+LOC       : "*"
+NUMBER    : /[0-9]+/
+MVAR      : /&[A-Z#$@][A-Z#$@0-9]*/
+DOT       : "."
+
+// Boolean keywords (GSCAN cats 9/10) -- higher priority than SYMBOL so they win
+// in boolean context; the arithmetic grammar never references them.
+OR.7   : "OR"
+AND.7  : "AND"
+NOT.7  : "NOT"
+RELOP.7 : "EQ" | "NE" | "LT" | "GT" | "LE" | "GE"
+BOOLLIT.7 : "0" | "1"
+
+SYMBOL : /[A-Z#$@][A-Z#$@0-9]*/
+
+%ignore /[ \t]+/

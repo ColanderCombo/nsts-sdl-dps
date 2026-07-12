@@ -1,0 +1,329 @@
+[
+ {
+  "lines": [
+   "&NAME    FCW2  &Y,&ENDRF=0,&INCRM=0,&POLRX=0,&POLRY=0,&ANCTL1=0,&ANCTL2*000200AA",
+   "               =0,&ANCTL3=0,&ANCTL4=0,&ANCTL5=0                         000300AA"
+  ],
+  "index": 0,
+  "column": 15,
+  "kind": "proto",
+  "expected": [
+   true,
+   "&Y,&ENDRF=0,&INCRM=0,&POLRX=0,&POLRY=0,&ANCTL1=0,&ANCTL2=0,&ANCTL3=0,&ANCTL4=0,&ANCTL5=0",
+   1
+  ]
+ },
+ {
+  "lines": [
+   "&NAME    FCW3  &E,&V,&SC=0                      75080                   000200AA"
+  ],
+  "index": 0,
+  "column": 15,
+  "kind": "proto",
+  "expected": [
+   true,
+   "&E,&V,&SC=0",
+   0
+  ]
+ },
+ {
+  "lines": [
+   " FTBEGIN &TID=NO,&STACKX=1,&EQUS=YES,&PDE=YES,&DSTACK=NO,&TYPE=MAIN     000200AA"
+  ],
+  "index": 0,
+  "column": 9,
+  "kind": "proto",
+  "expected": [
+   true,
+   "&TID=NO,&STACKX=1,&EQUS=YES,&PDE=YES,&DSTACK=NO,&TYPE=MAIN",
+   0
+  ]
+ },
+ {
+  "lines": [
+   "&NAME    GENERATE &TYPE=,&COPY=,&NPCT=,&NTQE=,&NEQE=,&NIOQE=,&STOR=,   X007900AQ",
+   "               &NBRQ=                                                   008000AQ"
+  ],
+  "index": 0,
+  "column": 18,
+  "kind": "proto",
+  "expected": [
+   true,
+   "&TYPE=,&COPY=,&NPCT=,&NTQE=,&NEQE=,&NIOQE=,&STOR=,&NBRQ=",
+   1
+  ]
+ },
+ {
+  "lines": [
+   "         IF    &P1,&P2,&P3,&P4,&P5,&P6,&P7,&P8,&P9,&P10,&P11,&P12,&P13,X000200AA",
+   "               &P14,&P15,&P16,&P17,&P18,&P19,&P20,&P21,&P22,&P23,&P24,&X000300AA",
+   "               P25,&P26,&P27,&P28,&P29,&P30,&P31,&P32,&P33,&P34,&P35,&PX000400AA",
+   "               36,&P37,&P38,&P39,&P40,&P41,&P42,&P43,&P44,&P45,&P46,&P4X000500AA",
+   "               7,&P48,&P49,&P50,&CC=                                    000600AA"
+  ],
+  "index": 0,
+  "column": 15,
+  "kind": "proto",
+  "expected": [
+   true,
+   "&P1,&P2,&P3,&P4,&P5,&P6,&P7,&P8,&P9,&P10,&P11,&P12,&P13,&P14,&P15,&P16,&P17,&P18,&P19,&P20,&P21,&P22,&P23,&P24,&P25,&P26,&P27,&P28,&P29,&P30,&P31,&P32,&P33,&P34,&P35,&P36,&P37,&P38,&P39,&P40,&P41,&P42,&P43,&P44,&P45,&P46,&P47,&P48,&P49,&P50,&CC=",
+   4
+  ]
+ },
+ {
+  "lines": [
+   "         TFRST                                                          000200AA"
+  ],
+  "index": 0,
+  "column": 71,
+  "kind": "proto",
+  "expected": [
+   true,
+   "",
+   0
+  ]
+ },
+ {
+  "lines": [
+   "&BUSTYP  TCBUS &LST1,&LST2,&LST3,&LST4,&LST5,&LST6,&LST7,&LST8,&LST9,  X000200AA",
+   "               &LST10,&LST11,&LST12,&LST13,&LST14,&LST15,&LST16,&LST17,X000300AA",
+   "               &LST18,&LST19,&LST20,&LST21,&LST22,&LST23,&LST24,&LST25,X000400AA",
+   "               &LST26,&LST27,&LST28,&LST29,&LST30                       000500AA"
+  ],
+  "index": 0,
+  "column": 15,
+  "kind": "proto",
+  "expected": [
+   true,
+   "&LST1,&LST2,&LST3,&LST4,&LST5,&LST6,&LST7,&LST8,&LST9,&LST10,&LST11,&LST12,&LST13,&LST14,&LST15,&LST16,&LST17,&LST18,&LST19,&LST20,&LST21,&LST22,&LST23,&LST24,&LST25,&LST26,&LST27,&LST28,&LST29,&LST30",
+   3
+  ]
+ },
+ {
+  "lines": [
+   "         TFBCD &FCMLST=,&PLMLST=,                                      X000200AH",
+   "               &DEVID01,&DEVID02,&DEVID03,&DEVID04,&DEVID05,           X000300AH",
+   "               &DEVID06,&DEVID07,&DEVID08,&DEVID09,&DEVID10,           X000400AH",
+   "               &DEVID11,&DEVID12,&DEVID13,&DEVID14,&DEVID15,           X000500AH",
+   "               &DEVID16,&DEVID17,&DEVID18,&DEVID19,&DEVID20,           X000600AH",
+   "               &DEVID21,&DEVID22,&DEVID23,&DEVID24,&DEVID25,           X000700AH",
+   "               &DEVID26,&DEVID27,&DEVID28,&DEVID29,&DEVID30,           X000800AH",
+   "               &DEVID31,&DEVID32,&DEVID33,&DEVID34,&DEVID35,           X000900AH",
+   "               &DEVID36,&DEVID37,&DEVID38,&DEVID39,&DEVID40,           X001000AH",
+   "               &DEVID41,&DEVID42,&DEVID43,&DEVID44,&DEVID45,           X001100AH",
+   "               &DEVID46,&DEVID47,&DEVID48,&DEVID49,&DEVID50,           X001200AH",
+   "               &DEVID51,&DEVID52,&DEVID53,&DEVID54,&DEVID55,           X001300AH",
+   "               &DEVID56,&DEVID57,&DEVID58,&DEVID59,&DEVID60,           X001400AH",
+   "               &DEVID61,&DEVID62,&DEVID63,&DEVID64,&DEVID65,           X001500AH",
+   "               &DEVID66,&DEVID67,&DEVID68,&DEVID69,&DEVID70,           X001600AH",
+   "               &DEVID71,&DEVID72,&DEVID73,&DEVID74,&DEVID75,           X001700AH",
+   "               &DEVID76,&DEVID77,&DEVID78,&DEVID79,&DEVID80,           X001800AH",
+   "               &DEVID81,&DEVID82,&DEVID83,&DEVID84,&DEVID85,           X001900AH",
+   "               &DEVID86,&DEVID87,&DEVID88,&DEVID89,&DEVID90,           X002000AH",
+   "               &DEVID91,&DEVID92,&DEVID93,&DEVID94,&DEVID95,           X002100AH",
+   "               &DEVID96,&DEVID97,&DEVIC98,&DEVID99,&DEVIDA0,           X002200AH",
+   "               &DEVIDA1,&DEVIDA2,&DEVIDA3,&DEVIDA4,&DEVIDA5,           X002300AH",
+   "               &DEVIDA6,&DEVIDA7,&DEVIDA8,&DEVIDA9,&DEVIDB0,           X002400AH",
+   "               &DEVIDB1,&DEVIDB2,&DEVIDB3,&DEVIDB4,&DEVIDB5,           X002500AH",
+   "               &DEVIDB6,&DEVIDB7,&DEVIDB8,&DEVIDB9,&DEVIDC0             002600AH"
+  ],
+  "index": 0,
+  "column": 15,
+  "kind": "proto",
+  "expected": [
+   true,
+   "&FCMLST=,&PLMLST=,&DEVID01,&DEVID02,&DEVID03,&DEVID04,&DEVID05,&DEVID06,&DEVID07,&DEVID08,&DEVID09,&DEVID10,&DEVID11,&DEVID12,&DEVID13,&DEVID14,&DEVID15,&DEVID16,&DEVID17,&DEVID18,&DEVID19,&DEVID20,&DEVID21,&DEVID22,&DEVID23,&DEVID24,&DEVID25,&DEVID26,&DEVID27,&DEVID28,&DEVID29,&DEVID30,&DEVID31,&DEVID32,&DEVID33,&DEVID34,&DEVID35,&DEVID36,&DEVID37,&DEVID38,&DEVID39,&DEVID40,&DEVID41,&DEVID42,&DEVID43,&DEVID44,&DEVID45,&DEVID46,&DEVID47,&DEVID48,&DEVID49,&DEVID50,&DEVID51,&DEVID52,&DEVID53,&DEVID54,&DEVID55,&DEVID56,&DEVID57,&DEVID58,&DEVID59,&DEVID60,&DEVID61,&DEVID62,&DEVID63,&DEVID64,&DEVID65,&DEVID66,&DEVID67,&DEVID68,&DEVID69,&DEVID70,&DEVID71,&DEVID72,&DEVID73,&DEVID74,&DEVID75,&DEVID76,&DEVID77,&DEVID78,&DEVID79,&DEVID80,&DEVID81,&DEVID82,&DEVID83,&DEVID84,&DEVID85,&DEVID86,&DEVID87,&DEVID88,&DEVID89,&DEVID90,&DEVID91,&DEVID92,&DEVID93,&DEVID94,&DEVID95,&DEVID96,&DEVID97,&DEVIC98,&DEVID99,&DEVIDA0,&DEVIDA1,&DEVIDA2,&DEVIDA3,&DEVIDA4,&DEVIDA5,&DEVIDA6,&DEVIDA7,&DEVIDA8,&DEVIDA9,&DEVIDB0,&DEVIDB1,&DEVIDB2,&DEVIDB3,&DEVIDB4,&DEVIDB5,&DEVIDB6,&DEVIDB7,&DEVIDB8,&DEVIDB9,&DEVIDC0",
+   24
+  ]
+ },
+ {
+  "lines": [
+   "         TFPSA &TYPE,&PON=,&POF=,&SR=,&MC=,&PC=,&SVC=,&PC1=,&PC2=,&IM=,X004600AG",
+   "               &EI0=,&EI1=,&EI2=,&EI3=,&SI=,&DSR=1,&BSR=1,&PD=YES,     X004700AG",
+   "               &TRCPGM=,&TRCBGN=,&TRCEND=                               004800AG"
+  ],
+  "index": 0,
+  "column": 15,
+  "kind": "proto",
+  "expected": [
+   true,
+   "&TYPE,&PON=,&POF=,&SR=,&MC=,&PC=,&SVC=,&PC1=,&PC2=,&IM=,&EI0=,&EI1=,&EI2=,&EI3=,&SI=,&DSR=1,&BSR=1,&PD=YES,&TRCPGM=,&TRCBGN=,&TRCEND=",
+   2
+  ]
+ },
+ {
+  "lines": [
+   "         TFRST                                                         ?000200AA",
+   "               &A,&B  THIS IS MY COMMENT                                        "
+  ],
+  "index": 0,
+  "column": 71,
+  "kind": "proto",
+  "expected": [
+   true,
+   "&A,&B",
+   1
+  ]
+ },
+ {
+  "lines": [
+   "         FCW2   ANCTL2=1      DISABLE TRANSLATE MODE                    002600AB"
+  ],
+  "index": 0,
+  "column": 16,
+  "kind": "invoke",
+  "expected": [
+   true,
+   "ANCTL2=1",
+   0
+  ]
+ },
+ {
+  "lines": [
+   "         FCW2   POLRX=1,POLRY=1,ANCTL5=1,ANCTL4=1,ANCTL1=1              029800AB"
+  ],
+  "index": 0,
+  "column": 16,
+  "kind": "invoke",
+  "expected": [
+   true,
+   "POLRX=1,POLRY=1,ANCTL5=1,ANCTL4=1,ANCTL1=1",
+   0
+  ]
+ },
+ {
+  "lines": [
+   "         GENERATE COPY=(TFPCT,TFTQE,TFEQE)                              009300AK"
+  ],
+  "index": 0,
+  "column": 18,
+  "kind": "invoke",
+  "expected": [
+   true,
+   "COPY=(TFPCT,TFTQE,TFEQE)",
+   0
+  ]
+ },
+ {
+  "lines": [
+   "         GENERATE TYPE=CSECT,NPCT=35,NTQE=30,NEQE=25,NBRQ=20,          X048100CE",
+   "               STOR=(1,1)                                               048200BW"
+  ],
+  "index": 0,
+  "column": 18,
+  "kind": "invoke",
+  "expected": [
+   true,
+   "TYPE=CSECT,NPCT=35,NTQE=30,NEQE=25,NBRQ=20,STOR=(1,1)",
+   1
+  ]
+ },
+ {
+  "lines": [
+   "         IF    (C,R4,EQ,=F'0'),AND,(C,R5,EQ,=F'0') THEN VALUE ZERO      035400AO"
+  ],
+  "index": 0,
+  "column": 15,
+  "kind": "invoke",
+  "expected": [
+   true,
+   "(C,R4,EQ,=F'0'),AND,(C,R5,EQ,=F'0')",
+   0
+  ]
+ },
+ {
+  "lines": [
+   "         TFBCD FCMLST=(FCMODT,FCPCTAB-FCMODT,FCMODEND-FCPCTAB,         X113700CN",
+   "               FCMODDEV,29),                                           X113750CN",
+   "               PLMLST=(PLMODT,0,PLMODEND-PLPCTAB,PLMODDEV,13),         X113800CN",
+   "               (1,,46,FIOIPRPC),                                       *113900BE",
+   "               (2),                                                    *113950BJ",
+   "               (3,(1,2,3,4,5),291,FIOICCPC),                           *114000BE",
+   "               (4,(10,11),,20),                                        *114050BE",
+   "               (5,6,,1),                                               *114100BA",
+   "               (6,7,,1),                                               *114200BA",
+   "               (7,8,,1),                                               *114300BA",
+   "               (8,9,,1),                                               *114400BA",
+   "               (9,(20,21,22,23),,2),                                   *114500BA",
+   "               (10,24,,3),                                             *114600BA",
+   "               (11,(18,19)),                                           *114700BA",
+   "               (12,(14,15,16,17,20,21,22,23),30,FIOFCBPC),             *114800BE",
+   "               (13,(14,15,16,17,20,21,22,23),348,11),                  *115000BV",
+   "               (14,(14,15,16,17,20,21,22,23),855,18),                  *115200BK",
+   "               (15,(14,15,16,17,20,21,22,23),355,12),                  *115300BV",
+   "               (16,(14,15,16,17,20,21,22,23),173,21),                  *115500CI",
+   "               (17,(20,21,22),103,14),                                 *115700BE",
+   "               (18,(20,21,22),45,FIOIMUWP),                            *115800BK",
+   "               (19,20,19,4),                                           *115900BK",
+   "               (20,21,19,4),                                           *116000BK",
+   "               (21,22,19,4),                                           *116100BK",
+   "               (22,(20,21,22),47,4),                                   *116200BE",
+   "               (23,(20,21,22,23),32,FIOCWWRP),                         *116300BE",
+   "               (24,(20,22),141,13),                                    *116400BE",
+   "               (25,(14,15,16,17),59,FIOFAOPC),                         *116500BE",
+   "               (26,(14,15,16,17,20,21,22,23),206,19),                  *116600BE",
+   "               (27,20,,5),                                             *116700BA",
+   "               (28,21,,5),                                             *116800BA",
+   "               (29,22,,5),                                             *116900BA",
+   "               (30,23,,5),                                             *117000BA",
+   "               (31,14,,5),                                             *117100BA",
+   "               (32,15,,5),                                             *117200BA",
+   "               (33,16,,5),                                             *117300BA",
+   "               (34,17,,5),                                             *117400BA",
+   "               (35,(14,15,16,17),,5),                                  *117500BA",
+   "               (36,(20,21,22,23),,5),                                  *117600BA",
+   "               (37,(14,15,16,17,20,21,22,23),24,FIOHD2PC),             *117700BK",
+   "               (38,(20,21,23),32,24),                                  *117800BU",
+   "               (39,,21,23),                                            *117810CH",
+   "               (40,(14,15,16,17),1161,FIOG9OPC),                       *117820CX",
+   "               (41,,,26),                                              *117825CC",
+   "               (42,,,25),                                              *117830CB",
+   "               (43,(10,11),29,FIOPFBPC),                               *117900BE",
+   "               (44,10,20,FIOPF1PC),                                    *118000BK",
+   "               (45,11,37,FIOPF1PC),                                    *118100BK",
+   "               (46,10,,5),                                             *118200BA",
+   "               (47,11,,5),                                             *118300BA",
+   "               (48,(10,11),,6),                                        *118500BJ",
+   "               (49,10,,7),                                             *118700BJ",
+   "               (50,11,,7),                                             *118800BJ",
+   "               (51,(10,11),,16),                                       *118810BJ",
+   "               (52,(10,11),,17),                                       *118815BJ",
+   "               (53,(10,11),,16),                                       *118820BJ",
+   "               (54,(10,11),,16),                                       *118825BJ",
+   "               (55,(10,11),,16),                                       *118830BJ",
+   "               (56,(10,11),,16),                                       *118835BJ",
+   "               (57,(10,11),,16),                                       *118840BJ",
+   "               (58,(10,11),,16),                                       *118845BJ",
+   "               (59,(10,11),,22),                                       *118880BJ",
+   "               (60,10,,10),                                            *118890BJ",
+   "               (61,12,,8),                                             *118900BJ",
+   "               (62,12,,5),                                             *119000BJ",
+   "               (63,12,570,15),                                         *119100CH",
+   "               (64,12,,5),                                             *119200BJ",
+   "               (65,12,233,9),                                          *119300BX",
+   "               (66,12,229,FIOMCIWP),                                   *119310BX",
+   "               (67,12,,5),                                             *119311BJ",
+   "               (68,(10,11),,5),                                        *119400CL",
+   "               (69,(10,11),,5),                                        *119500CL",
+   "               (70,(14,20),,5),                                        *119600CL",
+   "               (71,(15,21),,5),                                        *119700CL",
+   "               (72,(16,22),,5),                                        *119800CL",
+   "               (73,(17,23),,5),                                        *119900CL",
+   "               (74,(14,20),,5),                                        *120000CL",
+   "               (75,(15,21),,5),                                        *120100CL",
+   "               (76,(16,22),,5),                                        *120200CL",
+   "               (77,(17,23),,5),                                        *120300CL",
+   "               (78,(21),162,FIOGPSOP),                                 *120400CW",
+   "               (79,(20,21,22),109,27),                                 *120500CN",
+   "               (80,(14,15,16,17),,5)                                    120700BJ"
+  ],
+  "index": 0,
+  "column": 15,
+  "kind": "invoke",
+  "expected": [
+   true,
+   "FCMLST=(FCMODT,FCPCTAB-FCMODT,FCMODEND-FCPCTAB,FCMODDEV,29),PLMLST=(PLMODT,0,PLMODEND-PLPCTAB,PLMODDEV,13),(1,,46,FIOIPRPC),(2),(3,(1,2,3,4,5),291,FIOICCPC),(4,(10,11),,20),(5,6,,1),(6,7,,1),(7,8,,1),(8,9,,1),(9,(20,21,22,23),,2),(10,24,,3),(11,(18,19)),(12,(14,15,16,17,20,21,22,23),30,FIOFCBPC),(13,(14,15,16,17,20,21,22,23),348,11),(14,(14,15,16,17,20,21,22,23),855,18),(15,(14,15,16,17,20,21,22,23),355,12),(16,(14,15,16,17,20,21,22,23),173,21),(17,(20,21,22),103,14),(18,(20,21,22),45,FIOIMUWP),(19,20,19,4),(20,21,19,4),(21,22,19,4),(22,(20,21,22),47,4),(23,(20,21,22,23),32,FIOCWWRP),(24,(20,22),141,13),(25,(14,15,16,17),59,FIOFAOPC),(26,(14,15,16,17,20,21,22,23),206,19),(27,20,,5),(28,21,,5),(29,22,,5),(30,23,,5),(31,14,,5),(32,15,,5),(33,16,,5),(34,17,,5),(35,(14,15,16,17),,5),(36,(20,21,22,23),,5),(37,(14,15,16,17,20,21,22,23),24,FIOHD2PC),(38,(20,21,23),32,24),(39,,21,23),(40,(14,15,16,17),1161,FIOG9OPC),(41,,,26),(42,,,25),(43,(10,11),29,FIOPFBPC),(44,10,20,FIOPF1PC),(45,11,37,FIOPF1PC),(46,10,,5),(47,11,,5),(48,(10,11),,6),(49,10,,7),(50,11,,7),(51,(10,11),,16),(52,(10,11),,17),(53,(10,11),,16),(54,(10,11),,16),(55,(10,11),,16),(56,(10,11),,16),(57,(10,11),,16),(58,(10,11),,16),(59,(10,11),,22),(60,10,,10),(61,12,,8),(62,12,,5),(63,12,570,15),(64,12,,5),(65,12,233,9),(66,12,229,FIOMCIWP),(67,12,,5),(68,(10,11),,5),(69,(10,11),,5),(70,(14,20),,5),(71,(15,21),,5),(72,(16,22),,5),(73,(17,23),,5),(74,(14,20),,5),(75,(15,21),,5),(76,(16,22),,5),(77,(17,23),,5),(78,(21),162,FIOGPSOP),(79,(20,21,22),109,27),(80,(14,15,16,17),,5)",
+   82
+  ]
+ }
+]

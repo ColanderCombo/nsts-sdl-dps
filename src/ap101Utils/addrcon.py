@@ -176,10 +176,24 @@ class ZCon:
         hw1 = (image[byte_offset + 2] << 8) | image[byte_offset + 3]
         return cls(hw0, hw1)
 
+    @classmethod
+    def prelink(cls, addend: int, flags: int = 0) -> ZCon:
+        """The assembler's pre-link ZCON: HW0 holds the (masked) addend --
+        the linker adds the resolved symbol address via the 'Z' RLD -- and
+        the DC Z(...) source flags operand is HW1's high byte (the XC/C/CB/CD
+        control bits); the BSR/DSR byte stays 0 until the linker patches it."""
+        return cls(hw0=addend & 0xFFFF, hw1=(flags & 0xFF) << 8)
+
     def write_to_image(self, image: bytearray, byte_offset: int) -> None:
         """Write both halfwords back to a memory image."""
         image[byte_offset:byte_offset + 2] = self.hw0.to_bytes(2, 'big')
         image[byte_offset + 2:byte_offset + 4] = self.hw1.to_bytes(2, 'big')
+
+    def to_bytes(self) -> bytearray:
+        """The 4-byte big-endian ZCON image."""
+        out = bytearray(4)
+        self.write_to_image(out, 0)
+        return out
 
     # --- HW0: target address ---
 

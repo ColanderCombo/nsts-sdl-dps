@@ -1,0 +1,10 @@
+         MACRO
+         ACTRDIR
+         LCLA  &I
+         ACTR  8000
+&I       SETA  0
+.TOP     ANOP
+&I       SETA  &I+1
+         AIF   (&I LT 5000).TOP
+         DC    H'1'
+         MEND

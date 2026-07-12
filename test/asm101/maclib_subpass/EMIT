@@ -1,0 +1,8 @@
+         MACRO                                                                  
+         EMIT  &Q1                                                              
+         LCLA  &K                                                               
+&K       SETA  K'&SYSLIST(1,1)                                                  
+         &Q1(1) &Q1(2),&Q1(3)                                                   
+         BC    07-&K,SKIPLBL                                                    
+SKIPLBL  DS    0H                                                               
+         MEND                                                                   

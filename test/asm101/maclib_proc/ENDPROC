@@ -1,0 +1,29 @@
+         MACRO                                                          000100AA
+         ENDPROC &PROC,&REG                                             000200AA
+         COPY  GBLVARS                                                  000300AA
+         LCLA  &COUNT                                                   000400AA
+         AIF   (K'&PROC EQ 0 OR K'&PROC GT 8).ERROR1                    000500AA
+         AIF   (K'&REG EQ 0 OR K'&REG GT 8).ERROR2                      000600AA
+&COUNT   SETA  &PROCNDX                                                 000700AA
+.LOOP    AIF   (&COUNT EQ 0).ERROR3                **  CHECK IF         000800AA
+         AIF   ('&PROCS(&COUNT)' EQ '&PROC').KNOWN  ** PROCEDURE NAME   000900AA
+&COUNT   SETA  &COUNT-1                            **  ALREADY DEFINED  001000AA
+         AGO   .LOOP                                                    001100AA
+.KNOWN   AIF   ('&RTNREG(&COUNT)' EQ '&REG').AOK  **   DEFINE           001200AA
+         AIF   ('&RTNREG(&COUNT)' NE '').ERROR4    **  RETURN REGISTER  001300AA
+&RTNREG(&COUNT) SETC '&REG'                       **   FOR ASSEMBLY     001400AA
+.AOK     ANOP                                                           001500AA
+         BR    &REG                                                     001600AA
+         MEXIT                                                          001700AA
+.ERROR1  MNOTE 4,'PROCEDURE NAME IS OMITTED OR GREATER THAN 8 CHARACTERX001800AA
+               S.'                                                      001900AA
+         MEXIT                                                          002000AA
+.ERROR2  MNOTE 4,'RETURN REGISTER IS OMITTED OR GREATER THAN 8 CHARACTEX002100AA
+               RS.'                                                     002200AA
+         MEXIT                                                          002300AA
+.ERROR3  MNOTE 4,'PROCEDURE NAME WAS NOT PREVIOUSLY DEFINED IN A PROC MX002400AA
+               ACRO.'                                                   002500AA
+         MEXIT                                                          002600AA
+.ERROR4  MNOTE 4,'RETURN REGISTER DOES NOT MATCH THAT DEFINED IN A PREVX002700AA
+               IOUS EXECUTE MACRO.'                                     002800AA
+         MEND                                                           002900AA

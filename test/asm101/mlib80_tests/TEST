@@ -1,0 +1,12 @@
+         MACRO                                                          000100AA
+&N       TEST  &TBD                           75080B                    000200AA
+         GBLA  &#IC,&#CLOCK                                             000300AA
+         LCLA  &LA,&TA                                                  000400AA
+&LA      SETA  &#CLOCK/100                                              000500AA
+&TA      SETA  &#CLOCK-&LA*100                                          000600AA
+         AIF   ('&N' EQ '').NONAME                                      000700AA
+&N       EQU   *,&LA+1,&TA+1                                            000800AA
+.NONAME  ANOP                                                           000900AA
+         DC   BL.6'000001',FL.10'0'                                     001000AA
+&#IC     SETA  1+&#IC                                                   001100AA
+         MEND                                                           001200AA

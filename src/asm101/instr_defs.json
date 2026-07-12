@@ -1,0 +1,1613 @@
+{
+  "_comment": "Auto-extracted from ext/sim/gpc/*_instr.coffee by tools/extract_instr_defs.cjs; do not hand-edit.",
+  "cpu": {
+    "PC": {
+      "d": "11011xxx11101yyy",
+      "fmt": [
+        "PC R1,R2"
+      ],
+      "name": "Program Controlled I/O"
+    },
+    "AR": {
+      "d": "00000xxx11100yyy",
+      "fmt": [
+        "AR R1,R2"
+      ],
+      "name": "Add",
+      "addrWidth": "FULLWORD"
+    },
+    "A": {
+      "d": "00000xxxddddddbb",
+      "fmt": [
+        "A R1,D2(B2)",
+        "A R1,D2(X2,B2)"
+      ],
+      "name": "Add",
+      "addrWidth": "FULLWORD"
+    },
+    "AH": {
+      "d": "10000xxxddddddbb",
+      "fmt": [
+        "AH R1,D2(B2)",
+        "AH R1,D2(X2,B2)"
+      ],
+      "name": "Add Halfword",
+      "addrWidth": "HALFWORD"
+    },
+    "AHI": {
+      "d": "1011000011100yyy/I",
+      "fmt": [
+        "AHI R2,Data"
+      ],
+      "name": "Add Halfword Immediate",
+      "addrWidth": "HALFWORD"
+    },
+    "AST": {
+      "d": "00000xxx11111abb/X",
+      "fmt": [
+        "AST R1,D2(B2)",
+        "AST R1,D2(X2,B2)"
+      ],
+      "name": "Add and Store"
+    },
+    "CR": {
+      "d": "00010xxx11100yyy",
+      "fmt": [
+        "CR R1,R2"
+      ],
+      "name": "Compare"
+    },
+    "C": {
+      "d": "00010xxxddddddbb",
+      "fmt": [
+        "C R1,D2(B2)",
+        "C R1,D2(X2,B2)"
+      ],
+      "name": "Compare",
+      "addrWidth": "FULLWORD"
+    },
+    "CBL": {
+      "d": "00001xxx11101yyy",
+      "fmt": [
+        "CBL R1,R2"
+      ],
+      "name": "Compare Between Limits"
+    },
+    "CH": {
+      "d": "10010xxxddddddbb",
+      "fmt": [
+        "CH R1,D2(B2)",
+        "CH R1,D2(X2,B2)"
+      ],
+      "name": "Compare Halfword",
+      "addrWidth": "HALFWORD"
+    },
+    "CHI": {
+      "d": "1011010111100yyy/I",
+      "fmt": [
+        "CHI R2,Data"
+      ],
+      "name": "Compare Halfword Immediate",
+      "addrWidth": "HALFWORD"
+    },
+    "CIST": {
+      "d": "10110101ddddddbb/I",
+      "fmt": [
+        "CIST D2(B2),Data"
+      ],
+      "name": "Compare Immediate and Store",
+      "addrWidth": "HALFWORD"
+    },
+    "DR": {
+      "d": "01001xxx11100yyy",
+      "fmt": [
+        "DR R1,R2"
+      ],
+      "name": "Divide"
+    },
+    "D": {
+      "d": "01001xxxddddddbb",
+      "fmt": [
+        "D R1,D2(B2)",
+        "D R1,D2(X2,B2)"
+      ],
+      "name": "Divide",
+      "addrWidth": "FULLWORD"
+    },
+    "XUL": {
+      "d": "00000xxx11101yyy",
+      "fmt": [
+        "XUL R1,R2"
+      ],
+      "name": "Exclusive OR Upper and Lower"
+    },
+    "IAL": {
+      "d": "11100xxxddddddbb",
+      "fmt": [
+        "IAL R1,D2(B2)",
+        "IAL R1,D2(X2,B2)"
+      ],
+      "name": "Insert Address Low",
+      "addrWidth": "HALFWORD"
+    },
+    "IHL": {
+      "d": "10000xxx11111abb/X",
+      "fmt": [
+        "IHL R1,D2(B2)",
+        "IHL R1,D2(X2,B2)"
+      ],
+      "name": "Insert Halfword Low",
+      "addrWidth": "HALFWORD"
+    },
+    "LR": {
+      "d": "00011xxx11100yyy",
+      "fmt": [
+        "LR R1,R2"
+      ],
+      "name": "Load Register"
+    },
+    "L": {
+      "d": "00011xxxddddddbb",
+      "fmt": [
+        "L R1,D2(B2)",
+        "L R1,D2(X2,B2)"
+      ],
+      "name": "Load",
+      "addrWidth": "FULLWORD"
+    },
+    "LA": {
+      "d": "11101xxxddddddbb",
+      "fmt": [
+        "LA R1,D2(B2)",
+        "LA R1,D2(X2,B2)"
+      ],
+      "name": "Load Address",
+      "addrWidth": "HALFWORD"
+    },
+    "LHI": {
+      "d": "11101xxx11110011/I",
+      "fmt": [
+        "LHI R1,Value"
+      ],
+      "name": "Load Halfword Immediate",
+      "addrWidth": "HALFWORD"
+    },
+    "LCR": {
+      "d": "11101xxx11101yyy",
+      "fmt": [
+        "LCR R1,R2"
+      ],
+      "name": "Load Complement",
+      "addrWidth": "FULLWORD"
+    },
+    "LFXI": {
+      "d": "10111xxx1110yyyy",
+      "fmt": [
+        "LFXI R1,Value"
+      ],
+      "name": "Load Fixed Immediate"
+    },
+    "LH": {
+      "d": "10011xxxddddddbb",
+      "fmt": [
+        "LH R1,D2(B2)",
+        "LH R1,D2(X2,B2)"
+      ],
+      "name": "Load Halfword",
+      "addrWidth": "HALFWORD"
+    },
+    "LM": {
+      "d": "1100110011111abb/X",
+      "fmt": [
+        "LM D2(B2)",
+        "LM D2(X2,B2)"
+      ],
+      "name": "Load Multiple",
+      "addrWidth": "FULLWORD"
+    },
+    "MSTH": {
+      "d": "10110000ddddddbb/I",
+      "fmt": [
+        "MSTH D2(B2),Data"
+      ],
+      "name": "Modify Storage Halfword",
+      "addrWidth": "HALFWORD"
+    },
+    "MR": {
+      "d": "01000xxx11100yyy",
+      "fmt": [
+        "MR R1,R2"
+      ],
+      "name": "Multiply"
+    },
+    "M": {
+      "d": "01000xxxddddddbb",
+      "fmt": [
+        "M R1,D2(B2)",
+        "M R1,D2(X2,B2)"
+      ],
+      "name": "Multiply",
+      "addrWidth": "FULLWORD"
+    },
+    "MH": {
+      "d": "10101xxxddddddbb",
+      "fmt": [
+        "MH R1,D2(B2)",
+        "MH R1,D2(X2,B2)"
+      ],
+      "name": "Multiply Halfword",
+      "addrWidth": "HALFWORD"
+    },
+    "MHI": {
+      "d": "1011011111100yyy/I",
+      "fmt": [
+        "MHI R2,Data"
+      ],
+      "name": "Multiply Halfword Immediate",
+      "addrWidth": "HALFWORD"
+    },
+    "MIH": {
+      "d": "10011xxx11111abb/X",
+      "fmt": [
+        "MIH R1,D2(B2)",
+        "MIH R1,D2(X2,B2)"
+      ],
+      "name": "Multiply Integer Halfword",
+      "addrWidth": "HALFWORD"
+    },
+    "ST": {
+      "d": "00110xxxddddddbb",
+      "fmt": [
+        "ST R1,D2(B2)",
+        "ST R1,D2(X2,B2)"
+      ],
+      "name": "Store",
+      "addrWidth": "FULLWORD"
+    },
+    "STH": {
+      "d": "10111xxxddddddbb",
+      "fmt": [
+        "STH R1,D2(B2)",
+        "STH R1,D2(X2,B2)"
+      ],
+      "name": "Store Halfword",
+      "addrWidth": "HALFWORD"
+    },
+    "STM": {
+      "d": "1100100011111abb/X",
+      "fmt": [
+        "STM D2(B2)",
+        "STM D2(X2,B2)"
+      ],
+      "name": "Store Multiple",
+      "addrWidth": "FULLWORD"
+    },
+    "SR": {
+      "d": "00001xxx11100yyy",
+      "fmt": [
+        "SR R1,R2"
+      ],
+      "name": "Subtract"
+    },
+    "S": {
+      "d": "00001xxxddddddbb",
+      "fmt": [
+        "S R1,D2(B2)",
+        "S R1,D2(X2,B2)"
+      ],
+      "name": "Subtract",
+      "addrWidth": "FULLWORD"
+    },
+    "SST": {
+      "d": "00001xxx11111abb/X",
+      "fmt": [
+        "SST R1,D2(B2)",
+        "SST R1,D2(X2,B2)"
+      ],
+      "name": "Subtract From Storage"
+    },
+    "SH": {
+      "d": "10001xxxddddddbb",
+      "fmt": [
+        "SH R1,D2(B2)",
+        "SH R1,D2(X2,B2)"
+      ],
+      "name": "Subtract Halfword",
+      "addrWidth": "HALFWORD"
+    },
+    "TD": {
+      "d": "10100000ddddddbb",
+      "fmt": [
+        "TD D2(B2)",
+        "TD D2(X2,B2)"
+      ],
+      "name": "Tally Down",
+      "addrWidth": "HALFWORD"
+    },
+    "BALR": {
+      "d": "11100xxx11100yyy",
+      "fmt": [
+        "BALR R1,R2"
+      ],
+      "name": "Branch and Link Register",
+      "opType": "BRCH"
+    },
+    "BAL": {
+      "d": "11100xxx11110abb/X",
+      "fmt": [
+        "BAL R1,D2(B2)",
+        "BAL R1,D2(X2,B2)"
+      ],
+      "name": "Branch and Link",
+      "opType": "BRCH",
+      "addrWidth": "HALFWORD"
+    },
+    "BIX": {
+      "d": "11011xxx11110abb/X",
+      "fmt": [
+        "BIX R1,D2(B2)",
+        "BIX R1,D2(X2,B2)"
+      ],
+      "name": "Branch and Index",
+      "opType": "BRCH",
+      "addrWidth": "HALFWORD"
+    },
+    "BCR": {
+      "d": "11000xxx11100yyy",
+      "fmt": [
+        "BCR M1,R2"
+      ],
+      "name": "Branch on Condition Register",
+      "opType": "BRCH"
+    },
+    "BC": {
+      "d": "11000xxx11110abb/X",
+      "fmt": [
+        "BC M1,D2(B2)",
+        "BC M1,D2(X2,B2)"
+      ],
+      "name": "Branch on Condition",
+      "opType": "BRCH",
+      "addrWidth": "HALFWORD"
+    },
+    "BCB": {
+      "d": "11011xxxdddddd10",
+      "fmt": [
+        "BCB M1,D2"
+      ],
+      "name": "Branch on Condition Backward",
+      "opType": "BRCH",
+      "addrWidth": "HALFWORD"
+    },
+    "BCRE": {
+      "d": "11000xxx11101yyy",
+      "fmt": [
+        "BCRE M1,R2"
+      ],
+      "name": "Branch on Condition (Extended)",
+      "opType": "BRCH"
+    },
+    "BCF": {
+      "d": "11011xxxdddddd00",
+      "fmt": [
+        "BCF M1,D2"
+      ],
+      "name": "Branch on Condition Forward",
+      "opType": "BRCH",
+      "addrWidth": "HALFWORD"
+    },
+    "BCTR": {
+      "d": "11010xxx11100yyy",
+      "fmt": [
+        "BCTR R1,R2"
+      ],
+      "name": "Branch on Count Register",
+      "opType": "BRCH"
+    },
+    "BCT": {
+      "d": "11010xxx11110abb/X",
+      "fmt": [
+        "BCT R1,D2(B2)",
+        "BCT R1,D2(X2,B2)"
+      ],
+      "name": "Branch on Count",
+      "opType": "BRCH",
+      "addrWidth": "HALFWORD"
+    },
+    "BCTB": {
+      "d": "11011xxxdddddd11",
+      "fmt": [
+        "BCTB R1,D2"
+      ],
+      "name": "Branch on Count Backward",
+      "opType": "BRCH",
+      "addrWidth": "HALFWORD"
+    },
+    "BVCR": {
+      "d": "11001xxx11100yyy",
+      "fmt": [
+        "BVCR M1,R2"
+      ],
+      "name": "Branch on Overflow/Carry Register",
+      "opType": "BRCH"
+    },
+    "BVC": {
+      "d": "11001xxx11110abb/X",
+      "fmt": [
+        "BVC M1,D2(B2)",
+        "BVC M1,D2(X2,B2)"
+      ],
+      "name": "Branch on Overflow/Carry",
+      "opType": "BRCH",
+      "addrWidth": "HALFWORD"
+    },
+    "BVCF": {
+      "d": "11011xxxdddddd01",
+      "fmt": [
+        "BVCF M1,D2"
+      ],
+      "name": "Branch on Overflow/Carry Forward",
+      "opType": "BRCH",
+      "addrWidth": "HALFWORD"
+    },
+    "NCT": {
+      "d": "11100xxx11101yyy",
+      "fmt": [
+        "NCT R1,R2"
+      ],
+      "name": "Normalize and Count"
+    },
+    "SLL": {
+      "d": "11110xxxdddddd00",
+      "fmt": [
+        "SLL R1,Count"
+      ],
+      "name": "Shift Left Logical",
+      "opType": "SHFT"
+    },
+    "SLDL": {
+      "d": "11111xxxdddddd00",
+      "fmt": [
+        "SLDL R1,Count"
+      ],
+      "name": "Shift Left Double Logical",
+      "opType": "SHFT"
+    },
+    "SRA": {
+      "d": "11110xxxdddddd01",
+      "fmt": [
+        "SRA R1,Count"
+      ],
+      "name": "Shift Right Arithmetic",
+      "opType": "SHFT"
+    },
+    "SRDA": {
+      "d": "11111xxxdddddd01",
+      "fmt": [
+        "SRDA R1,Count"
+      ],
+      "name": "Shift Right Double Arithmetic",
+      "opType": "SHFT"
+    },
+    "SRDL": {
+      "d": "11111xxxdddddd10",
+      "fmt": [
+        "SRDL R1,Count"
+      ],
+      "name": "Shift Right Double Logical",
+      "opType": "SHFT"
+    },
+    "SRL": {
+      "d": "11110xxxdddddd10",
+      "fmt": [
+        "SRL R1,Count"
+      ],
+      "name": "Shift Right Logical",
+      "opType": "SHFT"
+    },
+    "SRR": {
+      "d": "11110xxxdddddd11",
+      "fmt": [
+        "SRR R1,Count"
+      ],
+      "name": "Shift Right Rotate",
+      "opType": "SHFT"
+    },
+    "SRDR": {
+      "d": "11111xxxdddddd11",
+      "fmt": [
+        "SRDR R1,Count"
+      ],
+      "name": "Shift Right Double Rotate",
+      "opType": "SHFT"
+    },
+    "NR": {
+      "d": "00100xxx11100yyy",
+      "fmt": [
+        "NR R1,R2"
+      ],
+      "name": "AND"
+    },
+    "N": {
+      "d": "00100xxxddddddbb",
+      "fmt": [
+        "N R1,D2(B2)",
+        "N R1,D2(X2,B2)"
+      ],
+      "name": "AND",
+      "addrWidth": "FULLWORD"
+    },
+    "NHI": {
+      "d": "1011011011100yyy/I",
+      "fmt": [
+        "NHI R2,Data"
+      ],
+      "name": "AND Halfword Immediate",
+      "addrWidth": "HALFWORD"
+    },
+    "NIST": {
+      "d": "10110110ddddddbb/I",
+      "fmt": [
+        "NIST D2(B2),Data"
+      ],
+      "name": "AND Immediate and Store",
+      "addrWidth": "HALFWORD"
+    },
+    "NST": {
+      "d": "00100xxx11111abb/X",
+      "fmt": [
+        "NST R1,D2(B2)",
+        "NST R1,D2(X2,B2)"
+      ],
+      "name": "AND and Store"
+    },
+    "XR": {
+      "d": "01110xxx11100yyy",
+      "fmt": [
+        "XR R1,R2"
+      ],
+      "name": "Exclusive OR"
+    },
+    "X": {
+      "d": "01110xxxddddddbb",
+      "fmt": [
+        "X R1,D2(B2)",
+        "X R1,D2(X2,B2)"
+      ],
+      "name": "Exclusive OR",
+      "addrWidth": "FULLWORD"
+    },
+    "XHI": {
+      "d": "1011010011100yyy/I",
+      "fmt": [
+        "XHI R2,Data"
+      ],
+      "name": "Exclusive OR Halfword Immediate",
+      "addrWidth": "HALFWORD"
+    },
+    "XIST": {
+      "d": "10110100ddddddbb/I",
+      "fmt": [
+        "XIST D2(B2),Data"
+      ],
+      "name": "Exclusive OR Immediate and Store",
+      "addrWidth": "HALFWORD"
+    },
+    "XST": {
+      "d": "01110xxx11111abb/X",
+      "fmt": [
+        "XST R1,D2(B2)",
+        "XST R1,D2(X2,B2)"
+      ],
+      "name": "Exclusive OR and Store"
+    },
+    "OR": {
+      "d": "00101xxx11100yyy",
+      "fmt": [
+        "OR R1,R2"
+      ],
+      "name": "OR"
+    },
+    "O": {
+      "d": "00101xxxddddddbb",
+      "fmt": [
+        "O R1,D2(B2)",
+        "O R1,D2(X2,B2)"
+      ],
+      "name": "OR",
+      "addrWidth": "FULLWORD"
+    },
+    "OHI": {
+      "d": "1011001011100yyy/I",
+      "fmt": [
+        "OHI R2,Data"
+      ],
+      "name": "OR Halfword Immediate",
+      "addrWidth": "HALFWORD"
+    },
+    "OST": {
+      "d": "00101xxx11111abb/X",
+      "fmt": [
+        "OST R1,D2(B2)",
+        "OST R1,D2(X2,B2)"
+      ],
+      "name": "OR and Store"
+    },
+    "SUM": {
+      "d": "10011xxx11101yyy",
+      "fmt": [
+        "SUM R1,R2"
+      ],
+      "name": "Search Under Mask"
+    },
+    "SB": {
+      "d": "10110010ddddddbb/I",
+      "fmt": [
+        "SB D2(B2),Data"
+      ],
+      "name": "Set Bits",
+      "addrWidth": "HALFWORD"
+    },
+    "SHW": {
+      "d": "10100010ddddddbb",
+      "fmt": [
+        "SHW D2(B2)",
+        "SHW D2(X2,B2)"
+      ],
+      "name": "Store Halfword to Word",
+      "addrWidth": "HALFWORD"
+    },
+    "TB": {
+      "d": "10110011ddddddbb/I",
+      "fmt": [
+        "TB D2(B2),Data"
+      ],
+      "name": "Test Under Mask",
+      "addrWidth": "HALFWORD"
+    },
+    "TRB": {
+      "d": "1011001111100yyy/I",
+      "fmt": [
+        "TRB R2,Data"
+      ],
+      "name": "Test Register Bits"
+    },
+    "TH": {
+      "d": "10100011ddddddbb",
+      "fmt": [
+        "TH D2(B2)",
+        "TH D2(X2,B2)"
+      ],
+      "name": "Test Halfword",
+      "addrWidth": "HALFWORD"
+    },
+    "ZB": {
+      "d": "10110001ddddddbb/I",
+      "fmt": [
+        "ZB D2(B2),Data"
+      ],
+      "name": "Zero Bits",
+      "addrWidth": "HALFWORD"
+    },
+    "ZRB": {
+      "d": "1011000111100yyy/I",
+      "fmt": [
+        "ZRB R2,Data"
+      ],
+      "name": "Zero Register Bits"
+    },
+    "ZH": {
+      "d": "10100001ddddddbb",
+      "fmt": [
+        "ZH D2(B2)",
+        "ZH D2(X2,B2)"
+      ],
+      "name": "Zero Halfword",
+      "addrWidth": "HALFWORD"
+    },
+    "AEDR": {
+      "d": "01010xxx11101yyy",
+      "fmt": [
+        "AEDR R1,R2"
+      ],
+      "name": "Add Long"
+    },
+    "AED": {
+      "d": "01010xxx11111abb/X",
+      "fmt": [
+        "AED R1,D2(B2)",
+        "AED R1,D2(X2,B2)"
+      ],
+      "name": "Add Long",
+      "addrWidth": "DBLEWORD",
+      "fp": "DP"
+    },
+    "AER": {
+      "d": "01010xxx11100yyy",
+      "fmt": [
+        "AER R1,R2"
+      ],
+      "name": "Add Short",
+      "addrWidth": "HALFWORD"
+    },
+    "AE": {
+      "d": "01010xxxddddddbb",
+      "fmt": [
+        "AE R1,D2(B2)",
+        "AE R1,D2(X2,B2)"
+      ],
+      "name": "Add Short",
+      "addrWidth": "FULLWORD",
+      "fp": "SP"
+    },
+    "CER": {
+      "d": "01001xxx11101yyy",
+      "fmt": [
+        "CER R1,R2"
+      ],
+      "name": "Compare Short",
+      "addrWidth": "HALFWORD"
+    },
+    "CE": {
+      "d": "01001xxx11111abb/X",
+      "fmt": [
+        "CE R1,D2(B2)",
+        "CE R1,D2(X2,B2)"
+      ],
+      "name": "Compare Short",
+      "addrWidth": "FULLWORD",
+      "fp": "SP"
+    },
+    "CEDR": {
+      "d": "00011xxx11101yyy",
+      "fmt": [
+        "CEDR R1,R2"
+      ],
+      "name": "Compare (Long Operands)",
+      "addrWidth": "HALFWORD"
+    },
+    "CED": {
+      "d": "00011xxx11111abb/X",
+      "fmt": [
+        "CED R1,D2(B2)",
+        "CED R1,D2(X2,B2)"
+      ],
+      "name": "Compare (Long Operands)",
+      "addrWidth": "DBLEWORD",
+      "fp": "DP"
+    },
+    "CVFX": {
+      "d": "00111xxx11100yyy",
+      "fmt": [
+        "CVFX R1,R2"
+      ],
+      "name": "Convert Float to Fixed"
+    },
+    "CVFL": {
+      "d": "00111xxx11101yyy",
+      "fmt": [
+        "CVFL R1,R2"
+      ],
+      "name": "Convert Fixed to Float Long"
+    },
+    "DEDR": {
+      "d": "00010xxx11101yyy",
+      "fmt": [
+        "DEDR R1,R2"
+      ],
+      "name": "Divide Long",
+      "addrWidth": "HALFWORD"
+    },
+    "DED": {
+      "d": "00010xxx11111abb/X",
+      "fmt": [
+        "DED R1,D2(B2)",
+        "DED R1,D2(X2,B2)"
+      ],
+      "name": "Divide Long",
+      "addrWidth": "DBLEWORD",
+      "fp": "DP"
+    },
+    "DER": {
+      "d": "01101xxx11100yyy",
+      "fmt": [
+        "DER R1,R2"
+      ],
+      "name": "Divide Short",
+      "addrWidth": "HALFWORD"
+    },
+    "DE": {
+      "d": "01101xxxddddddbb",
+      "fmt": [
+        "DE R1,D2(B2)",
+        "DE R1,D2(X2,B2)"
+      ],
+      "name": "Divide Short",
+      "addrWidth": "FULLWORD",
+      "fp": "SP"
+    },
+    "LED": {
+      "d": "01111xxx11111abb/X",
+      "fmt": [
+        "LED R1,D2(B2)",
+        "LED R1,D2(X2,B2)"
+      ],
+      "name": "Load Long",
+      "addrWidth": "DBLEWORD",
+      "fp": "DP"
+    },
+    "LER": {
+      "d": "01111xxx11100yyy",
+      "fmt": [
+        "LER R1,R2"
+      ],
+      "name": "Load Short Register",
+      "addrWidth": "FULLWORD"
+    },
+    "LE": {
+      "d": "01111xxxddddddbb",
+      "fmt": [
+        "LE R1,D2(B2)",
+        "LE R1,D2(X2,B2)"
+      ],
+      "name": "Load Short",
+      "addrWidth": "FULLWORD",
+      "fp": "SP"
+    },
+    "LECR": {
+      "d": "01111xxx11101yyy",
+      "fmt": [
+        "LECR R1,R2"
+      ],
+      "name": "Load Complement Short"
+    },
+    "LFXR": {
+      "d": "00100xxx11101yyy",
+      "fmt": [
+        "LFXR R1,R2"
+      ],
+      "name": "Load Fixed Register"
+    },
+    "LFLI": {
+      "d": "10001xxx1110yyyy",
+      "fmt": [
+        "LFLI R1,Value"
+      ],
+      "name": "Load Float Long Immediate"
+    },
+    "LFLR": {
+      "d": "00101xxx11101yyy",
+      "fmt": [
+        "LFLR R1,R2"
+      ],
+      "name": "Load Float Long Register"
+    },
+    "MVS": {
+      "d": "01100xxx11111abb/X",
+      "fmt": [
+        "MVS R1,D2(B2)",
+        "MVS R1,D2(X2,B2)"
+      ],
+      "name": "Mid-Value Select"
+    },
+    "MEDR": {
+      "d": "00110xxx11101yyy",
+      "fmt": [
+        "MEDR R1,R2"
+      ],
+      "name": "Multiply Long"
+    },
+    "MED": {
+      "d": "00110xxx11111abb/X",
+      "fmt": [
+        "MED R1,D2(B2)",
+        "MED R1,D2(X2,B2)"
+      ],
+      "name": "Multiply Long",
+      "addrWidth": "DBLEWORD",
+      "fp": "DP"
+    },
+    "MER": {
+      "d": "01100xxx11100yyy",
+      "fmt": [
+        "MER R1,R2"
+      ],
+      "name": "Multiply Short"
+    },
+    "ME": {
+      "d": "01100xxxddddddbb",
+      "fmt": [
+        "ME R1,D2(B2)",
+        "ME R1,D2(X2,B2)"
+      ],
+      "name": "Multiply Short",
+      "addrWidth": "FULLWORD",
+      "fp": "SP"
+    },
+    "SEDR": {
+      "d": "01011xxx11101yyy",
+      "fmt": [
+        "SEDR R1,R2"
+      ],
+      "name": "Subtract Long"
+    },
+    "SED": {
+      "d": "01011xxx11111abb/X",
+      "fmt": [
+        "SED R1,D2(B2)",
+        "SED R1,D2(X2,B2)"
+      ],
+      "name": "Subtract Long",
+      "addrWidth": "DBLEWORD",
+      "fp": "DP"
+    },
+    "SER": {
+      "d": "01011xxx11100yyy",
+      "fmt": [
+        "SER R1,R2"
+      ],
+      "name": "Subtract Short",
+      "addrWidth": "FULLWORD"
+    },
+    "SE": {
+      "d": "01011xxxddddddbb",
+      "fmt": [
+        "SE R1,D2(B2)",
+        "SE R1,D2(X2,B2)"
+      ],
+      "name": "Subtract Short",
+      "addrWidth": "FULLWORD",
+      "fp": "SP"
+    },
+    "STED": {
+      "d": "00111xxx11111abb/X",
+      "fmt": [
+        "STED R1,D2(B2)",
+        "STED R1,D2(X2,B2)"
+      ],
+      "name": "Store Long",
+      "addrWidth": "DBLEWORD",
+      "fp": "DP"
+    },
+    "STE": {
+      "d": "00111xxxddddddbb",
+      "fmt": [
+        "STE R1,D2(B2)",
+        "STE R1,D2(X2,B2)"
+      ],
+      "name": "Store Short",
+      "addrWidth": "FULLWORD",
+      "fp": "SP"
+    },
+    "DIAG": {
+      "d": "11000xxx11111abb/X",
+      "fmt": [
+        "DIAG R1,D2(B20)",
+        "DIAG R1,D2(X2,B2)"
+      ],
+      "name": "Diagnose",
+      "addrWidth": "HALFWORD"
+    },
+    "ISPB": {
+      "d": "11101xxx11111abb/X",
+      "fmt": [
+        "ISPB M1,D2(B2)",
+        "ISPB M1,D2(X2,B2)"
+      ],
+      "name": "Insert Storage Protect Bits",
+      "addrWidth": "HALFWORD"
+    },
+    "LPS": {
+      "d": "1100110111111abb/X",
+      "fmt": [
+        "LPS D2(B2)",
+        "LPS D2(X2,B2)"
+      ],
+      "name": "Load Program Status",
+      "addrWidth": "FULLWORD"
+    },
+    "MVH": {
+      "d": "01101xxx11101yyy",
+      "fmt": [
+        "MVH R1,R2"
+      ],
+      "name": "Move Halfword Operands"
+    },
+    "SPM": {
+      "d": "1100100011101yyy",
+      "fmt": [
+        "SPM R2"
+      ],
+      "name": "Set Program Mask"
+    },
+    "SSM": {
+      "d": "1000100011111abb/X",
+      "fmt": [
+        "SSM D2(B2)",
+        "SSM D2(X2,B2)"
+      ],
+      "name": "Set System Mask"
+    },
+    "SCAL": {
+      "d": "11010xxx11111abb/X",
+      "fmt": [
+        "SCAL R1,D2(B2)",
+        "SCAL R1,D2(X2,B2)"
+      ],
+      "name": "Stack Call",
+      "opType": "BRCH",
+      "addrWidth": "HALFWORD"
+    },
+    "SRET": {
+      "d": "10010xxx11101yyy",
+      "fmt": [
+        "SRET M1,R2"
+      ],
+      "name": "Stack Return"
+    },
+    "SVC": {
+      "d": "1100100111111abb/X",
+      "fmt": [
+        "SVC D2(B2)",
+        "SVC D2(X2,B2)"
+      ],
+      "name": "Supervisor Call",
+      "addrWidth": "HALFWORD"
+    },
+    "TS": {
+      "d": "1011100011111abb/X",
+      "fmt": [
+        "TS D2(B2)",
+        "TS D2(X2,B2)"
+      ],
+      "name": "Test and Set"
+    },
+    "TSB": {
+      "d": "10110111ddddddbb/I",
+      "fmt": [
+        "TSB D2(B2),Data"
+      ],
+      "name": "Test and Set Bits",
+      "addrWidth": "HALFWORD"
+    },
+    "LDM": {
+      "d": "0110100011111abb/X",
+      "fmt": [
+        "LDM D2(B2)",
+        "LDM D2(X2,B2)"
+      ],
+      "name": "Load Data Memory"
+    },
+    "LXAR": {
+      "d": "01000xxx11101yyy",
+      "fmt": [
+        "LXAR R1,R2"
+      ],
+      "name": "Load Extended Address Register"
+    },
+    "LXA": {
+      "d": "01000xxx11111abb/X",
+      "fmt": [
+        "LXA R1,D2(B2)",
+        "LXA R1,D2(X2,B2)"
+      ],
+      "name": "Load Extended Address"
+    },
+    "STXAR": {
+      "d": "10100xxx11101yyy",
+      "fmt": [
+        "STXAR R1,R2"
+      ],
+      "name": "Store Extended Address Register"
+    },
+    "STXA": {
+      "d": "10100xxx11111abb/X",
+      "fmt": [
+        "STXA R1,D2(B2)",
+        "STXA R1,D2(X2,B2)"
+      ],
+      "name": "Store Extended Address"
+    },
+    "STDM": {
+      "d": "1001000011111abb/X",
+      "fmt": [
+        "STDM D2(B2)",
+        "STDM D2(X2,B2)"
+      ],
+      "name": "Store Data Memory"
+    },
+    "ICR": {
+      "d": "11011xxx11100yyy",
+      "fmt": [
+        "ICR R1,R2"
+      ],
+      "name": "Internal Control Register"
+    }
+  },
+  "msc": {
+    "@L": {
+      "d": "0100iddddddddddd",
+      "fmt": [
+        "@L ADDRESS"
+      ],
+      "pcrel": true
+    },
+    "@A": {
+      "d": "0101iddddddddddd",
+      "fmt": [
+        "@A ADDRESS"
+      ],
+      "pcrel": true
+    },
+    "@N": {
+      "d": "0110iddddddddddd",
+      "fmt": [
+        "@N ADDRESS"
+      ],
+      "pcrel": true
+    },
+    "@X": {
+      "d": "0111iddddddddddd",
+      "fmt": [
+        "@X ADDRESS"
+      ],
+      "pcrel": true
+    },
+    "@ST": {
+      "d": "1000iddddddddddd",
+      "fmt": [
+        "@ST ADDRESS"
+      ],
+      "pcrel": true
+    },
+    "@LF": {
+      "d": "1111i100000000aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "@LF ADDRESS"
+      ]
+    },
+    "@LH": {
+      "d": "1111i100000010aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "@LH ADDRESS"
+      ]
+    },
+    "@STF": {
+      "d": "1111i101000000aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "@STF ADDRESS"
+      ]
+    },
+    "@STH": {
+      "d": "1111i101000010aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "@STH ADDRESS"
+      ]
+    },
+    "@BC": {
+      "d": "00100cccdddddddd",
+      "fmt": [
+        "@BC CONDITION,ADDRESS"
+      ],
+      "pcrel": true
+    },
+    "@BXC": {
+      "d": "00101cccdddddddd",
+      "fmt": [
+        "@BXC CONDITION,ADDRESS"
+      ],
+      "pcrel": true
+    },
+    "@BU": {
+      "d": "1111i000_____0aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "@BU ADDRESS"
+      ]
+    },
+    "@BU@": {
+      "d": "1111i000_____1aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "@BU@ ADDRESS"
+      ]
+    },
+    "@CALL": {
+      "d": "1111i001ttttt0aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "@CALL DELTA,ADDRESS"
+      ]
+    },
+    "@CALL@": {
+      "d": "1111i001ttttt1aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "@CALL@ DELTA,ADDRESS"
+      ]
+    },
+    "@REC": {
+      "d": "1010iddddddddddd",
+      "fmt": [
+        "@REC ADDRESS"
+      ],
+      "pcrel": true
+    },
+    "@TSZ": {
+      "d": "1001iddddddddddd",
+      "fmt": [
+        "@TSZ ADDRESS"
+      ],
+      "pcrel": true
+    },
+    "@CI": {
+      "d": "1111i110_____0aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "@CI VALUE"
+      ]
+    },
+    "@C": {
+      "d": "1111i110_____1aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "@C ADDRESS"
+      ]
+    },
+    "@TMI": {
+      "d": "1111i111_____0aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "@TMI VALUE"
+      ]
+    },
+    "@TM": {
+      "d": "1111i111_____1aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "@TM ADDRESS"
+      ]
+    },
+    "@LBB": {
+      "d": "1111i010bbbbb0aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "@LBB BCE,ADDRESS"
+      ]
+    },
+    "@LBB@": {
+      "d": "1111i010bbbbb1aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "@LBB@ BCE,ADDRESS"
+      ]
+    },
+    "@LBP": {
+      "d": "1111i011bbbbb0aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "@LBP BCE,ADDRESS"
+      ]
+    },
+    "@LBP@": {
+      "d": "1111i011bbbbb1aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "@LBP@ BCE,ADDRESS"
+      ]
+    },
+    "@LAR": {
+      "d": "11100000dddddddd",
+      "fmt": [
+        "@LAR REGISTER"
+      ]
+    },
+    "@SFD": {
+      "d": "1110000100000000",
+      "fmt": [
+        "@SFD"
+      ]
+    },
+    "@RFD": {
+      "d": "1110001000000000",
+      "fmt": [
+        "@RFD"
+      ]
+    },
+    "@LMS": {
+      "d": "1110001100000000",
+      "fmt": [
+        "@LMS"
+      ]
+    },
+    "@SIO": {
+      "d": "1110010000000000",
+      "fmt": [
+        "@SIO"
+      ]
+    },
+    "@XAX": {
+      "d": "1110010100000000",
+      "fmt": [
+        "@XAX"
+      ]
+    },
+    "@SEC": {
+      "d": "1110011000000000",
+      "fmt": [
+        "@SEC ADDRESS"
+      ]
+    },
+    "@RBI": {
+      "d": "11100111bbbbb000",
+      "fmt": [
+        "@RBI BCE"
+      ]
+    },
+    "@NIX": {
+      "d": "11101000iiiiiiii",
+      "fmt": [
+        "@NIX IMM"
+      ]
+    },
+    "@TAX": {
+      "d": "11101001iiiiiiii",
+      "fmt": [
+        "@TAX IMM"
+      ]
+    },
+    "@TXI": {
+      "d": "11101010iiiiiiii",
+      "fmt": [
+        "@TXI IMM"
+      ]
+    },
+    "@LXI": {
+      "d": "11101011iiiiiiii",
+      "fmt": [
+        "@LXI IMM"
+      ]
+    },
+    "@TXA": {
+      "d": "11101100iiiiiiii",
+      "fmt": [
+        "@TXA IMM"
+      ]
+    },
+    "@TI": {
+      "d": "11101101iiiiiiii",
+      "fmt": [
+        "@TI IMM"
+      ]
+    },
+    "@SAI": {
+      "d": "11101110iiiiiiii",
+      "fmt": [
+        "@SAI IMM"
+      ]
+    },
+    "@LI": {
+      "d": "11101111iiiiiiii",
+      "fmt": [
+        "@LI IMM"
+      ]
+    },
+    "@RAI": {
+      "d": "1101i100dddddddd",
+      "fmt": [
+        "@RAI COUNT"
+      ]
+    },
+    "@RAW": {
+      "d": "1101i000dddddddd",
+      "fmt": [
+        "@RAW COUNT"
+      ]
+    },
+    "@RNI": {
+      "d": "1101i101dddddddd",
+      "fmt": [
+        "@RNI COUNT"
+      ]
+    },
+    "@RNW": {
+      "d": "1101i001dddddddd",
+      "fmt": [
+        "@RNW COUNT"
+      ]
+    },
+    "@WAT": {
+      "d": "0000100000000000",
+      "fmt": [
+        "@WAT"
+      ]
+    },
+    "@DLY": {
+      "d": "1100iddddddddddd",
+      "fmt": [
+        "@DLY COUNT"
+      ]
+    },
+    "@INT": {
+      "d": "0011Illlllllllll",
+      "fmt": [
+        "@INT IL"
+      ]
+    },
+    "@STP": {
+      "d": "0001000000000000",
+      "fmt": [
+        "@STP"
+      ]
+    }
+  },
+  "bce": {
+    "#LTOI": {
+      "d": "10110ddddddddddd",
+      "fmt": [
+        "#LTOI COUNT"
+      ]
+    },
+    "#LTO": {
+      "d": "10111ddddddddddd",
+      "fmt": [
+        "#LTO ADDR"
+      ],
+      "pcrel": true
+    },
+    "#RIB": {
+      "d": "11100___________",
+      "fmt": [
+        "#RIB"
+      ]
+    },
+    "#SIB": {
+      "d": "11101___________",
+      "fmt": [
+        "#SIB"
+      ]
+    },
+    "#SSC": {
+      "d": "0100mddddddddddd",
+      "fmt": [
+        "#SSC ADDRESS"
+      ],
+      "pcrel": true
+    },
+    "#SST": {
+      "d": "0101mddddddddddd",
+      "fmt": [
+        "#SST ADDRESS"
+      ],
+      "pcrel": true
+    },
+    "#LBR": {
+      "d": "11110010000000aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "#LBR ADDRESS"
+      ]
+    },
+    "#LBR@": {
+      "d": "11111010000000aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "#LBR@ ADDRESS"
+      ]
+    },
+    "#BU": {
+      "d": "11110000000000aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "#BU ADDRESS"
+      ]
+    },
+    "#BU@": {
+      "d": "11111000000000aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "#BU@ ADDRESS"
+      ]
+    },
+    "#WIX": {
+      "d": "00100ddddddddddd",
+      "fmt": [
+        "#WIX DISP"
+      ],
+      "pcrel": true
+    },
+    "#CMDI": {
+      "d": "11110110uuuuuiiiiiiiiiiiiiiiiiii",
+      "fmt": [
+        "#CMDI IUA,IMMED"
+      ]
+    },
+    "#CMD": {
+      "d": "11111110000000aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "#CMD ADDRESS"
+      ]
+    },
+    "#TDS": {
+      "d": "100cccccdddddddd",
+      "fmt": [
+        "#TDS COUNT,DISPLACEMENT"
+      ]
+    },
+    "#TDLI": {
+      "d": "11110100000000cccccccccccccccccc",
+      "fmt": [
+        "#TDLI Count"
+      ]
+    },
+    "#TDL": {
+      "d": "11111100000000aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "#TDL Address"
+      ]
+    },
+    "#MOUT": {
+      "d": "11110101ddddddddcccccccccccccccc",
+      "fmt": [
+        "#MOUT Displacement,Transfer Count"
+      ]
+    },
+    "#MOUTC": {
+      "d": "________uuuuummmmmmmmmmmmmmmmmmm",
+      "fmt": [
+        "#MOUTC IUA,Command"
+      ]
+    },
+    "#MOUT@": {
+      "d": "11111101000000aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "#MOUT@ Address"
+      ]
+    },
+    "#RDS": {
+      "d": "011cccccdddddddd",
+      "fmt": [
+        "#RDS COUNT,DISP"
+      ]
+    },
+    "#RDLI": {
+      "d": "11110011000000cccccccccccccccccc",
+      "fmt": [
+        "#RDLI COUNT"
+      ]
+    },
+    "#RDL": {
+      "d": "11111011000000cccccccccccccccccc",
+      "fmt": [
+        "#RDL ADDRESS"
+      ]
+    },
+    "#MIN": {
+      "d": "11110001ddddddddcccccccccccccccc",
+      "fmt": [
+        "#MIN DISPLACEMENT,Transfer Count"
+      ]
+    },
+    "#MINC": {
+      "d": "________uuuuuccccccccccccccccccc",
+      "fmt": [
+        "#MINC IUA,COMMAND"
+      ]
+    },
+    "#MIN@": {
+      "d": "11111001000000aaaaaaaaaaaaaaaaaa",
+      "fmt": [
+        "#MIN@ ADDRESS"
+      ]
+    },
+    "#DLYI": {
+      "d": "11000iiiiiiiiiii",
+      "fmt": [
+        "#DLYI TIMEOUT"
+      ]
+    },
+    "#DLY": {
+      "d": "11001ddddddddddd",
+      "fmt": [
+        "#DLY ADDRESS"
+      ],
+      "pcrel": true
+    },
+    "#WAT": {
+      "d": "00001___________",
+      "fmt": [
+        "#WAT"
+      ]
+    },
+    "#STP": {
+      "d": "0001___________f",
+      "fmt": [
+        "#STP FLAG"
+      ]
+    }
+  }
+}

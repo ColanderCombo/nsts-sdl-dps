@@ -1,0 +1,4 @@
+         MACRO                                                                  
+         OUTER &P1                                                              
+         MID   ,&P1                                                             
+         MEND                                                                   

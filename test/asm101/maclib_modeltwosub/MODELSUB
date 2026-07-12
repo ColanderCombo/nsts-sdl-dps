@@ -1,0 +1,4 @@
+         MACRO
+         MODELSUB &P1
+         LR    &SYSLIST(1,1),&SYSLIST(1,2)
+         MEND

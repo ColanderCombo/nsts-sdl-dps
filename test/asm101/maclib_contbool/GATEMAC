@@ -1,0 +1,10 @@
+         MACRO                                                          000000AA
+&N       GATEMAC &ANCTL2=0                                              000000AA
+         GBLB  &#AC2B                                                   000000AA
+&#AC2B   SETB  (('&ANCTL2' EQ '1') OR ('&ANCTL2' EQ 'ON') OR           X000000AA
+               ('&ANCTL2' EQ 'YES'))                                    000000AA
+         AIF   (&#AC2B).OK                                              000000AA
+         MNOTE 8,'NOT GATED'                                            000000AA
+.OK      ANOP                                                           000000AA
+&N       DC    H'1'                                                     000000AA
+         MEND                                                           000000AA

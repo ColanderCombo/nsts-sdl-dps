@@ -1,0 +1,12 @@
+         MACRO
+&L       CAGO  &N
+&L       DS    0H
+         AGO   (&N).P1,.P2,.P3
+.P1      DC    H'11'
+         AGO   .DONE
+.P2      AGO   .MID
+.EMIT    DC    H'22'
+         AGO   .DONE
+.MID     AGO   .EMIT
+.P3      DC    H'33'
+.DONE    MEND

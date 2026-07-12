@@ -1,0 +1,4 @@
+         MACRO
+         EMIT  &VAL
+         DC    F'&VAL'
+         MEND

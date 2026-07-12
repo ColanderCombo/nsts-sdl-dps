@@ -1,0 +1,7 @@
+* A non-macro program deck that happens to live in the macro library
+* directory.  In macro-library scan mode it defines no macro, so none of
+* its top-level statements (which would otherwise error) must be assembled.
+PROG     CSECT
+         L     R1,NOSUCHSYMBOL
+         GARBAGE OPERAND,LIST
+         END

@@ -110,7 +110,7 @@ set(INCENV ${CMAKE_COMMAND} -E env PYTHONUTF8=1 \
 """)
 
     # ---- ASM + patch objects (independent -> parallel) ---------------------
-    w("# ---- AP-101S assembly (parallel) ----")
+    w("# ---- AP-101 assembly (parallel) ----")
     asm_objs: list[str] = []
     items = [(p, p.stem) for p in asm_sources]
     items += [(p, member) for p, member in sorted(patches.items())]

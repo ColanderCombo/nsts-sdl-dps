@@ -1,0 +1,24 @@
+         MACRO                                                          000100AA
+         PROC  &PROC                                                    000200AA
+         COPY  GBLVARS                                                  000300AA
+         LCLA  &COUNT                                                   000400AA
+         AIF   (K'&PROC EQ 0 OR K'&PROC GT 8).ERROR1                    000500AA
+&COUNT   SETA  &PROCNDX                                                 000600AA
+.LOOP    ANOP                                                           000700AA
+         AIF   (&COUNT EQ 0).UNKNOWN               **  CHECK IF         000800AA
+         AIF   ('&PROCS(&COUNT)' EQ '&PROC').KNOWN  ** PROCEDURE NAME   000900AA
+&COUNT   SETA  &COUNT-1                            **  ALREADY DEFINED  001000AA
+         AGO   .LOOP                                                    001100AA
+.UNKNOWN ANOP                                                           001200AA
+         AIF   (&PROCNDX GE 50).ERROR2  **   DEFINE                     001300AA
+&PROCNDX SETA  &PROCNDX+1                **  PROCEDURE NAME             001400AA
+&PROCS(&PROCNDX) SETC '&PROC'           **   FOR ASSEMBLY               001500AA
+.KNOWN   ANOP                                                           001600AA
+&PROC    DS    0H                                                       001700AA
+         MEXIT                                                          001800AA
+.ERROR1  MNOTE 4,'PROCEDURE NAME IS OMITTED OR GREATER THAN 8 CHARACTERX001900AA
+               S.'                                                      002000AA
+         MEXIT                                                          002100AA
+.ERROR2  MNOTE 4,'PROCEDURE STACK SIZE EXCEEDED.  PROCEDURE CANNOT BE DX002200AA
+               EFINED.'                                                 002300AA
+         MEND                                                           002400AA

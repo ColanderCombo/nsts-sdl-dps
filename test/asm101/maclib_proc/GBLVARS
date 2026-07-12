@@ -1,0 +1,3 @@
+         GBLC  &PROCS(50)               PROCEDURE NAME  STACK
+         GBLC  &RTNREG(50)              RETURN REGISTER STACK
+         GBLA  &PROCNDX                 INDEX FOR PROCEDURE STACKS

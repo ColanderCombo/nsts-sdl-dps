@@ -1,0 +1,4 @@
+         MACRO                                                                  
+         MID                                                                    
+         EMIT  &SYSLIST(2)                                                      
+         MEND                                                                   

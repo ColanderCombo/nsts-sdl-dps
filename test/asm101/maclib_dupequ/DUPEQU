@@ -1,0 +1,5 @@
+         MACRO
+         DUPEQU
+DUP      EQU   *
+         DC    H'1'
+         MEND

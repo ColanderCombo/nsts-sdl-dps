@@ -1,0 +1,12 @@
+         MACRO                                                                  
+         INNER                                                                  
+         LCLC  &OP,&A,&B                                                        
+         LCLA  &K                                                               
+&OP      SETC  '&SYSLIST(2,1)'                                                  
+&A       SETC  '&SYSLIST(2,2)'                                                  
+&B       SETC  '&SYSLIST(2,3)'                                                  
+&K       SETA  K'&SYSLIST(2,1)                                                  
+         &OP   &A,&B                                                            
+         BC    07-&K,SKIPLBL                                                    
+SKIPLBL  DS    0H                                                               
+         MEND                                                                   

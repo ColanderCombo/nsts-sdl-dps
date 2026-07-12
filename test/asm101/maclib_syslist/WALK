@@ -1,0 +1,9 @@
+         MACRO                                                                  
+         WALK                                                                   
+         LCLA  &N                                                               
+&N       SETA  1                                                                
+.LOOP    AIF   ('&SYSLIST(&N)' EQ '').DONE                                      
+         DC    C'&SYSLIST(&N)'                                                  
+&N       SETA  &N+1                                                             
+         AGO   .LOOP                                                            
+.DONE    MEND                                                                   

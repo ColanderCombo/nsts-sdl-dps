@@ -1,0 +1,4 @@
+         MACRO                                                                  
+         M2    &A                                                               
+         DC    X'BEEF'                                                          
+         MEND                                                                   

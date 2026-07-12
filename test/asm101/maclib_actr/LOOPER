@@ -1,0 +1,8 @@
+         MACRO
+         LOOPER
+         LCLA  &I
+&I       SETA  1
+.TOP     ANOP
+&I       SETA  &I+1
+         AGO   .TOP
+         MEND

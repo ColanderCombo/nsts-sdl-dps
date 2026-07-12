@@ -1,0 +1,32 @@
+         MACRO                                                          000100AA
+         EXECUTE &PROC,&REG                                             000200AA
+         COPY  GBLVARS                                                  000300AA
+         LCLA  &COUNT                                                   000400AA
+         AIF   (K'&PROC EQ 0 OR K'&PROC GT 8).ERROR1                    000500AA
+         AIF   (K'&REG EQ 0 OR K'&REG GT 8).ERROR2                      000600AA
+&COUNT   SETA  &PROCNDX                                                 000700AA
+.LOOP    AIF   (&COUNT EQ 0).UNKNOWN               **  CHECK IF         000800AA
+         AIF   ('&PROCS(&COUNT)' EQ '&PROC').KNOWN  ** PROCEDURE NAME   000900AA
+&COUNT   SETA  &COUNT-1                            **  ALREADY DEFINED  001000AA
+         AGO   .LOOP                                                    001100AA
+.KNOWN   AIF   ('&RTNREG(&COUNT)' NE '&REG').ERROR3                     001200AA
+         AGO   .AOK                                                     001300AA
+.UNKNOWN AIF   (&PROCNDX GE 50).ERROR4  **   DEFINE                     001400AA
+&PROCNDX SETA  &PROCNDX+1                **  PROCEDURE NAME AND         001500AA
+&PROCS(&PROCNDX) SETC '&PROC'            **  RETURN REGISTER            001600AA
+&RTNREG(&PROCNDX) SETC '&REG'           **   FOR ASSEMBLY               001700AA
+.AOK     ANOP                                                           001800AA
+         BAL   &REG,&PROC                                               001900AA
+         MEXIT                                                          002000AA
+.ERROR1  MNOTE 4,'PROCEDURE NAME IS OMITTED OR GREATER THAN 8 CHARACTERX002100AA
+               S.'                                                      002200AA
+         MEXIT                                                          002300AA
+.ERROR2  MNOTE 4,'RETURN REGISTER IS OMITTED OR GREATER THAN 8 CHARACTEX002400AA
+               RS.'                                                     002500AA
+         MEXIT                                                          002600AA
+.ERROR3  MNOTE 4,'RETURN REGISTER DOES NOT MATCH THAT DEFINED IN A PREVX002700AA
+               IOUS EXECUTE OR RETURN MACRO.'                           002800AA
+         MEXIT                                                          002900AA
+.ERROR4  MNOTE 4,'PROCEDURE STACK SIZE EXCEEDED.  PROCEDURE CANNOT BE DX003000AA
+               EFINED.'                                                 003100AA
+         MEND                                                           003200AA

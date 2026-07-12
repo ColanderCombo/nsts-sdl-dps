@@ -1,0 +1,140 @@
+XTENTEST CSECT                                                          000100AA
+         BALR  R1,0                                                    000200AA
+         USING *,R1                                                    000300AA
+         IF    AR,R2,R3,NZ,OR,                                         X000400AA
+               (TRB,(R1),X'0110',Z),ORIF,                             X000500AA
+               H,AND,                                                  X000600AA
+               CR,R2,LT,R5                                              000700AA
+           LA    R3,X'01'                                               000800AA
+           DO    WHILE=(2),UNTIL=(CR,R5,NE,R6)                          000900AA
+           DOEXIT M                                                     001000AA
+             LA    R3,X'02'                                             001100AA
+           DOEXIT   (CR,R2,NL,R4),ANDIF,                               X001200AA
+               AR,R3,R5,P,OR,                                          X001300AA
+               LR,R2,R3,M,ORIF,                                        X001400AA
+               3,AND,                                                  X001500AA
+               (CR,R2,NM,R3)                                            001600AA
+             LA    R3,X'03'                                             001700AA
+             STRTSRCH WHILE=(CR,R3,GE,R4),UNTIL=P                       001800AA
+             EXITIF Z,AND,                                             X001900AA
+               NR,R2,R3,Z,ORIF,                                        X002000AA
+               (CIST,48(R2),EQ,C'OK'),AND,                             X002100AA
+               NP                                                       002200AA
+               LA    R3,X'04'                                           002300AA
+             ORELSE                                                     002400AA
+               LA    R3,X'05'                                           002500AA
+             EXITIF CC=5                                                002600AA
+               LA    R3,X'06'                                           002700AA
+             ENDLOOP                                                    002800AA
+               LA    R3,X'07'                                           002900AA
+             ENDSRCH                                                    003000AA
+           DOEXIT CC=2                                                  003100AA
+           ENDDO                                                        003200AA
+             LA    R3,X'08'                                             003300AA
+           IF    (5),ORIF,                                             X003400AA
+               (CR,R2,NE,R3),ANDIF,                                    X003500AA
+               P,AND,                                                  X003600AA
+               (C,R6,NE,D2(R2)),ORIF,                                  X003700AA
+               CH,R4,LT,D2(R2),OR,                                     X003800AA
+               (LR,R2,R3,NZ)                                            003900AA
+             LA    R3,X'09'                                             004000AA
+           ELSE                                                         004100AA
+             LA    R3,X'10'                                             004200AA
+           ENDIF                                                        004300AA
+         ENDIF                                                          004400AA
+         IF    AR,R2,R3,Z,OR,                                          X004500AA
+               CR,R3,EQ,R4,AND,                                        X004600AA
+               AR,R2,R4,NZ,OR,                                         X004700AA
+               CR,R2,NE,R3                                              004800AA
+           LA    R3,X'10'                                               004900AA
+         ENDIF                                                          005000AA
+         IF    AR,R2,R3,Z,AND,                                         X005100AA
+               CR,R3,EQ,R4,OR,                                         X005200AA
+               AR,R2,R4,NZ,AND,                                        X005300AA
+               CR,R2,NE,R3                                              005400AA
+           LA    R3,X'11'                                               005500AA
+         ENDIF                                                          005600AA
+         IF    AR,R2,R3,Z,ORIF,                                        X005700AA
+               CR,R3,EQ,R4,ANDIF,                                      X005800AA
+               AR,R2,R4,NZ,ORIF,                                       X005900AA
+               CR,R2,NE,R3                                              006000AA
+           LA    R3,X'12'                                               006100AA
+         ENDIF                                                          006200AA
+         IF    AR,R2,R3,Z,ANDIF,                                       X006300AA
+               CR,R3,EQ,R4,ORIF,                                       X006400AA
+               AR,R2,R4,NZ,ANDIF,                                      X006500AA
+               CR,R2,NE,R3                                              006600AA
+           LA    R3,X'13'                                               006700AA
+         ENDIF                                                          006800AA
+         DO    INF                                                      006900AA
+           LA  R5,X'00'                                                 007000AA
+         DOEXIT (O)                                                     007100AA
+           LA  R5,X'05'                                                 007200AA
+           DO    FROM=(R3,10),TO=(R4,-1)                                007300AA
+             LA  R5,X'0A'                                               007400AA
+           DOEXIT (CR,R3,E,R5)                                          007500AA
+             LA  R5,X'0F'                                               007600AA
+             DO    WHILE=(NR,R2,R4,Z)                                   007700AA
+               LA  R5,X'10'                                             007800AA
+             DOEXIT (NZ)                                                007900AA
+               LA  R5,X'15'                                             008000AA
+             ENDDO                                                      008100AA
+             LA  R5,X'1A'                                               008200AA
+           ENDDO                                                        008300AA
+           LA  R5,X'1F'                                                 008400AA
+         ENDDO                                                          008500AA
+         DO    WHILE=M                                                  008600AA
+           LA    R3,X'FF'                                               008700AA
+         ENDDO                                                          008800AA
+         DO    UNTIL=(NO)                                               008900AA
+           LA    R3,X'FF'                                               009000AA
+         ENDDO                                                          009100AA
+         DO    WHILE=M,UNTIL=NM                                         009200AA
+           LA    R3,X'66'                                               009300AA
+         ENDDO                                                          009400AA
+         CHKSTACK                                                       009500AA
+         CASENTRY R4,POWER=3                                            009600AA
+         CASE (16,32)                                                   009700AA
+           LA R4,X'03'                                                  009800AA
+           CASENTRY R4,VECTOR=BR                                        009900AA
+             LA R2,X'10'                                                010000AA
+           CASE 1,3,4                                                   010100AA
+             LA R3,X'20'                                                010200AA
+           CASE 5                                                       010300AA
+             LA R3,X'30'                                                010400AA
+           ENDCASE                                                      010500AA
+           CASENTRY R4,POWER=1,VECTOR=B                                 010600AA
+           CASE 4                                                       010700AA
+             LA R3,X'40'                                                010800AA
+           CASE (2)                                                     010900AA
+             LA R3,X'50'                                                011000AA
+           ENDCASE                                                      011100AA
+         CASE 24                                                        011200AA
+           CASENTRY R4,POWER=0                                          011300AA
+           CASE 1                                                       011400AA
+             LA R3,X'60'                                                011500AA
+           CASE 2                                                       011600AA
+             LA R3,X'70'                                                011700AA
+           ENDCASE                                                      011800AA
+         ENDCASE                                                        011900AA
+         CASENTRY R4,POWER=2                                            012000AA
+         CASE 8                                                         012100AA
+           LA    R3,X'80'                                               012200AA
+         ENDCASE                                                        012300AA
+         CHKSTACK                                                       012400AA
+WORD1    DC    C'A'                                                     012500AA
+B        EQU   4                                                        012600AA
+BASEREG  EQU   5                                                        012700AA
+B2       EQU   6                                                        012800AA
+DEC      EQU   16                                                       012900AA
+D2       EQU   32                                                       013000AA
+L        EQU   64                                                       013100AA
+LENGTH   EQU   4                                                        013200AA
+M1       EQU   6                                                        013300AA
+R2       EQU   2                                                        013400AA
+R3       EQU   3                                                        013500AA
+R4       EQU   4                                                        013600AA
+R5       EQU   5                                                        013700AA
+R6       EQU   6                                                        013800AA
+R1      EQU   1                                                        013900AA
+         END   XTENTEST                                                 014000AA
