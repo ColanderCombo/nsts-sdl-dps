@@ -1,7 +1,7 @@
 # BuildRuntime.cmake - CMake module for assembling runtime library files
 #
 # 1. Find all .asm files in RUNASM and ZCONASM directories
-# 2. Assemble each file using asm101s
+# 2. Assemble each file using asm101
 # 3. Installs the .obj files to lib/RUN and lib/ZCON
 
 set(RUNASM_DIR "${HALSFC_SRC_DIR}/RUNASM")
@@ -24,19 +24,19 @@ function(assemble_file ASM_FILE OUTPUT_DIR INSTALL_DIR STAMP_VAR)
     # Build the assembler command - use stamp file for CMake tracking
     # The actual .obj file has the original name (may contain #)
     # Note: --tolerable=4 allows MNOTE severity 4 warnings from macros
-    # Uses the venv-installed asm101s package via "python -m asm101s"
+    # Uses the venv-installed asm101 package via "python -m asm101"
     add_custom_command(
         OUTPUT "${STAMP_FILE}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${OUTPUT_DIR}"
         COMMAND ${CMAKE_COMMAND} -E env PYTHONUTF8=1
-                "${SDL_VENV_PYTHON}" -m asm101s
+                "${SDL_VENV_PYTHON}" -m asm101
                 "--object=${OUTPUT_DIR}/${ASM_NAME}.obj"
                 "--library=${RUNMAC_DIR}"
                 --tolerable=4
                 "${ASM_FILE}"
         COMMAND ${CMAKE_COMMAND} -E touch "${STAMP_FILE}"
         DEPENDS "${ASM_FILE}"
-        COMMENT "[ASM101S] Assembling ${ASM_BASENAME}..."
+        COMMENT "[asm101] Assembling ${ASM_BASENAME}..."
         VERBATIM
     )
     

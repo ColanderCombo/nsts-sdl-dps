@@ -77,6 +77,10 @@ function(build_halsfc_pass PASS_NAME SRC_FOLDER IDENTIFIER CONDITIONS OUTPUT_NAM
     set(XCOM_STAMP "${PASS_BUILD_DIR}/.xcom-stamp")
 
     file(GLOB XPL_SOURCES "${PASS_SRC_DIR}/*.xpl")
+    # The generated C also depends on the XCOM-I translator itself: a change to
+    # XCOM-I/*.py (e.g. a codegen fix) must force regeneration, otherwise the
+    # build keeps emitting stale C and the fix silently never takes effect.
+    file(GLOB XCOM_I_SOURCES "${XCOM_I_DIR}/*.py")
 
     set(XCOM_CMD "${Python3_EXECUTABLE}" "${XCOM_I_SCRIPT}")
     set(PASS_BINARY "HALSFC-${OUTPUT_NAME}${EXE_SUFFIX}")
@@ -94,7 +98,7 @@ function(build_halsfc_pass PASS_NAME SRC_FOLDER IDENTIFIER CONDITIONS OUTPUT_NAM
                 "##DRIVER.xpl"
         COMMAND ${CMAKE_COMMAND} -E touch "${XCOM_STAMP}"
         WORKING_DIRECTORY "${PASS_SRC_DIR}"
-        DEPENDS ${XPL_SOURCES}
+        DEPENDS ${XPL_SOURCES} ${XCOM_I_SOURCES}
         COMMENT "[XCOM-I] Translating ${PASS_NAME} XPL to C..."
         VERBATIM
     )

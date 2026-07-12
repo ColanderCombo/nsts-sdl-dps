@@ -21,8 +21,7 @@ option(SDL_UNIFIED_GPC "Use only the unified 'gpc' command (no gpc-batch/gpc-dbg
 # Paths to toolchain source (via symlinks into ext/virtualagc)
 set(XCOM_I_DIR "${CMAKE_SOURCE_DIR}/src/XCOM-I" CACHE PATH "Path to XCOM-I")
 set(HALSFC_SRC_DIR "${CMAKE_SOURCE_DIR}/code/PASS.REL32V0" CACHE PATH "Path to HAL/S-FC source")
-set(ASM101S_DIR "${CMAKE_SOURCE_DIR}/src/ASM101S" CACHE PATH "Path to ASM101S")
-set(LNK101S_DIR "${CMAKE_SOURCE_DIR}/src/LNK101")
+set(SDL_SRC_DIR "${CMAKE_SOURCE_DIR}/src" CACHE PATH "Path to Python package sources (asm101, lnk101, ap101Utils, tools)")
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 include(BuildHALSFC)
@@ -40,7 +39,8 @@ else()
 endif()
 
 #-----------------------------------------------------------------------------
-# Python venv via uv workspace (installs ASM101S + LNK101S)
+# Python venv via uv workspace (installs the unified 'ap101' distribution:
+# asm101, lnk101, ap101Utils, tools)
 #-----------------------------------------------------------------------------
 set(SDL_VENV_DIR "${CMAKE_BINARY_DIR}/venv")
 set(SDL_VENV_PYTHON "${SDL_VENV_DIR}/bin/python")
@@ -52,14 +52,13 @@ uv_initialize(
     WORKSPACE_PACKAGE_NAME "sdl"
     WORKSPACE_VENV "${SDL_VENV_DIR}"
 )
-uv_add_pyproject("src/ASM101S/pyproject.toml")
-uv_add_pyproject("src/LNK101/pyproject.toml")
+uv_add_pyproject("src/pyproject.toml")
 
 #-----------------------------------------------------------------------------
-# asm101s / lnk101
+# asm101 / lnk101
 #-----------------------------------------------------------------------------
-add_custom_target(asm101s ALL COMMENT "ASM101S assembler")
-add_dependencies(asm101s uv_sync)
+add_custom_target(asm101 ALL COMMENT "asm101 assembler")
+add_dependencies(asm101 uv_sync)
 
 add_custom_target(lnk101 ALL COMMENT "LNK101S linker")
 add_dependencies(lnk101 uv_sync)
@@ -93,7 +92,7 @@ add_dependencies(halsfc
 # Runtime Library (RUNASM+ZCONASM)
 #-----------------------------------------------------------------------------
 build_runtime_library()
-add_dependencies(runtime asm101s)
+add_dependencies(runtime asm101)
 
 #-----------------------------------------------------------------------------
 # HAL/S sample programs
@@ -202,7 +201,7 @@ add_dependencies(gpc-pkg gpc-sim)
 
 #-----------------------------------------------------------------------------
 # Build targets:
-#   make              just the venv + lnk101/asm101s tools (fast)
+#   make              just the venv + lnk101/asm101 tools (fast)
 #   make world        everything (halsfc, runtime, programs, simulator)
 #   make check        build all test deps + run ctest
 #   make halsfc       just the compiler
@@ -252,7 +251,7 @@ else()
 endif()
 
 set(HAL_TEST_FCM_DIR "${CMAKE_BINARY_DIR}/fcm")
-set(HAL_TEST_SRC_DIR "${CMAKE_SOURCE_DIR}/test")
+set(HAL_TEST_SRC_DIR "${CMAKE_SOURCE_DIR}/test/in5")
 set(HAL_TEST_BASELINE_DIR "${CMAKE_SOURCE_DIR}/test/baselines")
 
 include(TestHalProgram)

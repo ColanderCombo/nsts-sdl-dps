@@ -4,7 +4,17 @@ inst
 docs
 *.pyc
 .DS_Store
+.vscode
 testCases
 *.repro.json
+
+# Machine-local
 .cache
-.history
+.history/
+__pycache__/
+
+/testData/
+/code/BFS.SRC
+/code/OI301700
+/code/OI340600
+/ext/hals-lsp/

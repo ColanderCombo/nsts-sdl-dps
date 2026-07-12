@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ap101"
+version = "0.1.0"
+description = "AP-101 toolchain: AP-101 assembler, LNK101 linker, shared utilities, and object-file tools"
+requires-python = ">=3.8"
+license = {text = "Public Domain"}
+dependencies = [
+    "typer>=0.9.0",
+    "lark>=1.1",
+    "pyyaml",
+]
+
+[project.scripts]
+asm101 = "asm101.cli:main"
+lnk101 = "lnk101.cli:main"
+dfg = "dfg.cli:main"
+fcmcmp = "tools.fcmcmp:app"
+ibmobjdump = "tools.objdump:app"
+
+# Flat layout: each top-level directory under src/ is its own importable
+# package.  `tools` is a PEP 420 namespace package (no __init__.py) so it
+# coexists with the repo-root tools/ used by the test harness.
+[tool.hatch.build.targets.wheel]
+packages = ["asm101", "lnk101", "dfg", "ap101Utils", "tools"]

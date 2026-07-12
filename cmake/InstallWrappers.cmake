@@ -1,6 +1,5 @@
 # InstallWrappers.cmake — Configure and install wrapper scripts
 
-set(WRAPPER_ASM101S_DIR "${ASM101S_DIR}")
 set(WRAPPER_XCOM_I_DIR "${XCOM_I_DIR}")
 set(WRAPPER_PYTHON_CMD "${SDL_VENV_PYTHON}")
 
@@ -50,8 +49,10 @@ endforeach()
 
 set(WRAPPER_BINDIR "${CMAKE_BINARY_DIR}/bin")
 set(WRAPPER_LIBDIR "${CMAKE_BINARY_DIR}/lib")
-_configure_wrapper(asm101s.sh.in   asm101s)
+_configure_wrapper(asm101.sh.in   asm101)
 _configure_wrapper(lnk101.sh.in   lnk101)
+_configure_wrapper(dfg.sh.in      dfg)
+_configure_wrapper(deucflm.sh.in  deucflm)
 _configure_wrapper(gpc.sh.in       gpc)
 _configure_wrapper(gpc-gui.sh.in   gpc-gui)
 # Legacy compat aliases (gpc-batch, gpc-dbg, gpc-dump) delegate to the
@@ -63,7 +64,11 @@ if(NOT SDL_UNIFIED_GPC)
 endif()
 _configure_wrapper(fcmcmp.sh.in    fcmcmp)
 _configure_wrapper(rldanalyze.sh.in rldanalyze)
+_configure_wrapper(readlisting.sh.in readlisting)
 _configure_wrapper(ibmobjdump.sh.in ibmobjdump)
+_configure_wrapper(concard.sh.in   concard)
+_configure_wrapper(mmubuild.sh.in  mmubuild)
+_configure_wrapper(con80build.sh.in con80build)
 
 # Install-tree wrappers: reconfigure with install-prefix paths
 set(WRAPPER_BINDIR "${SDL_INSTALL_BINDIR}")
@@ -78,14 +83,20 @@ function(_configure_install_wrapper TEMPLATE OUTPUT_NAME)
 endfunction()
 
 _configure_install_wrapper(halsc.in        halsc)
-_configure_install_wrapper(asm101s.sh.in   asm101s)
+_configure_install_wrapper(asm101.sh.in   asm101)
 _configure_install_wrapper(lnk101.sh.in   lnk101)
+_configure_install_wrapper(dfg.sh.in      dfg)
+_configure_install_wrapper(deucflm.sh.in  deucflm)
+_configure_install_wrapper(con80build.sh.in con80build)
 
 install(
     PROGRAMS
         "${CMAKE_BINARY_DIR}/install-bin/halsc"
-        "${CMAKE_BINARY_DIR}/install-bin/asm101s"
+        "${CMAKE_BINARY_DIR}/install-bin/asm101"
         "${CMAKE_BINARY_DIR}/install-bin/lnk101"
+        "${CMAKE_BINARY_DIR}/install-bin/dfg"
+        "${CMAKE_BINARY_DIR}/install-bin/deucflm"
+        "${CMAKE_BINARY_DIR}/install-bin/con80build"
     DESTINATION "${SDL_INSTALL_BINDIR}"
     COMPONENT wrappers
 )

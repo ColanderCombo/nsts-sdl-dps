@@ -14,7 +14,7 @@ repositories:
     - HAL/S runtime library assembler source
     - HAL/S example/test/benchmark programs
     - XCOM-I XPL->C translator package
-    - Original ASM101S assembler (modified version in src/ASM101S)
+    - Original ASM101S assembler (modified version in src/asm101)
   - nsts-sim-gpc
     - gpc-batch: AP-101 batch emulator
     - gpc-dbu: AP-101 debugger
@@ -113,5 +113,6 @@ these trees, symlinks elsewhere in the tree point into the `ext/` tree.
       - halTests/
       - regress/
     - vscode/
-      - tatsu-ebnf-vscode/: plugin for doing syntax highlighting on tatsu parser grammars.
+      - nsts-dps-lang/: unified VS Code extension for the DPS languages
+        (HAL/S, DFG, AP-101S assembler, CONCARD, MMU build cards, TatSu EBNF).
   
