@@ -14,6 +14,7 @@
 #   --parm=OPTS      Compiler options (e.g. SRN,LISTING2,LIST,NOTABLES,DECK,HALMAT)
 #   --bfs            Use BFS variant
 #   --templib=DIR    Template library path
+#   --inclib=DIR     Inclusion library path (D INCLUDE macros; default build/lib/INCLIB)
 #   --errorlib=DIR   Error library path
 #   --listing=FILE   Save listing
 #   --pass1-rpt=FILE Save PASS1 report
@@ -27,7 +28,7 @@ HALSFC_LIBDIR="@WRAPPER_LIBDIR@"
 
 # Defaults
 OUTPUT="" VERBOSE=0 KEEP_TEMPS=0 PARM_STRING="" TARGET="PASS"
-TEMPLIB="" ERRORLIB="${HALSFC_LIBDIR}/ERRORLIB"
+TEMPLIB="" INCLIB="" ERRORLIB="${HALSFC_LIBDIR}/ERRORLIB"
 LISTING_FILE="" PASS1_RPT="" PASS2_RPT="" HALMAT_FILE="" LITFILE="" WORKDIR=""
 SOURCE_FILE=""
 
@@ -46,6 +47,7 @@ while [[ $# -gt 0 ]]; do
         --parm=*)       PARM_STRING="${1#--parm=}"; shift ;;
         --bfs)          TARGET="BFS"; shift ;;
         --templib=*)    TEMPLIB="${1#--templib=}"; shift ;;
+        --inclib=*)     INCLIB="${1#--inclib=}"; shift ;;
         --errorlib=*)   ERRORLIB="${1#--errorlib=}"; shift ;;
         --listing=*)    LISTING_FILE="${1#--listing=}"; shift ;;
         --pass1-rpt=*)  PASS1_RPT="${1#--pass1-rpt=}"; shift ;;
@@ -99,7 +101,7 @@ for exe in "$PASS1" "$FLO" "$OPT" "$AUXP" "$PASS2"; do
 done
 
 [[ -z "$TEMPLIB" ]] && TEMPLIB="${HALSFC_LIBDIR}/${TEMPLIB_NAME}"
-INCLIB="${HALSFC_LIBDIR}/${INCLIB_NAME}"
+[[ -z "$INCLIB" ]] && INCLIB="${HALSFC_LIBDIR}/${INCLIB_NAME}"
 TEMPINC="${HALSFC_LIBDIR}/&&TEMPINC"
 mkdir -p "$INCLIB" "$TEMPINC"
 
@@ -135,19 +137,20 @@ run PASS1 "$PASS1" \
     --pdsi=8,"$INCLIB",E --pdso=8,"$TEMPINC",E \
     --pdsi=9,"$TEMPINC",E \
     --commono=COMMON0.out \
-    --raf=B,7200,1,halmat.bin --raf=B,1560,2,litfile.bin --raf=B,3360,6,vmem.bin
+    --raf=B,7200,1,halmat.bin --raf=B,1560,2,litfile.bin \
+    --raf=B,1600,3,icfile.bin --raf=B,3360,6,vmem.bin
 
 run FLO "$FLO" \
-    --commoni=COMMON0.out --commono=COMMON1.out \
+    --commoni=COMMON0.out --commono=COMMON1.out --pdsi=5,"$ERRORLIB" \
     --raf=B,7200,1,halmat.bin --raf=B,1560,2,litfile.bin --raf=B,3360,6,vmem.bin
 
 run OPT "$OPT" \
-    --commoni=COMMON1.out --commono=COMMON2.out \
+    --commoni=COMMON1.out --commono=COMMON2.out --pdsi=5,"$ERRORLIB" \
     --raf=B,7200,1,halmat.bin --raf=B,1560,2,litfile.bin \
     --raf=B,7200,4,optmat.bin --raf=B,3360,6,vmem.bin
 
 run AUXP "$AUXP" \
-    --commoni=COMMON2.out --commono=COMMON3.out \
+    --commoni=COMMON2.out --commono=COMMON3.out --pdsi=5,"$ERRORLIB" \
     --raf=B,7200,1,auxmat.bin --raf=B,1560,2,litfile.bin \
     --raf=B,7200,4,optmat.bin --raf=B,3360,6,vmem.bin
 

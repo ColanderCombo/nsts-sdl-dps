@@ -1,0 +1,32 @@
+C/ Float-literal regression for virtualagc issue #1296.
+C/ The original IBM HAL/S-FC compiler converts decimal literals via
+C/ XXXTOD.bal which uses S/360 hex FP (truncating).  Our reimplementation
+C/ went through atof + llround, losing the LSB.  Issue case: 1.0E-8.
+
+ FLOAT_LITERAL: PROGRAM;
+    DECLARE SCALAR DOUBLE,
+        A INITIAL(1.0E-8),
+        B INITIAL(1E-9),
+        C INITIAL(1E-10),
+        D INITIAL(1.5E-7),
+        E INITIAL(0.1),
+        F INITIAL(0.3),
+        G INITIAL(3.14159),
+        H INITIAL(2.718281828),
+        I INITIAL(1.41421356),
+        J INITIAL(9.81);
+    DECLARE SCALAR DOUBLE,
+        X1 INITIAL(1.0),
+        X2 INITIAL(0.5),
+        X3 INITIAL(0.25),
+        X4 INITIAL(2.0),
+        X5 INITIAL(-2.5),
+        X6 INITIAL(16.0),
+        X7 INITIAL(256.0),
+        X8 INITIAL(1E10);
+    WRITE(6) A; WRITE(6) B; WRITE(6) C; WRITE(6) D;
+    WRITE(6) E; WRITE(6) F; WRITE(6) G; WRITE(6) H;
+    WRITE(6) I; WRITE(6) J;
+    WRITE(6) X1; WRITE(6) X2; WRITE(6) X3; WRITE(6) X4;
+    WRITE(6) X5; WRITE(6) X6; WRITE(6) X7; WRITE(6) X8;
+ CLOSE FLOAT_LITERAL;

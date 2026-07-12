@@ -1,0 +1,5 @@
+C DEBUG ¢D¢E¢F
+
+ BRACKET: PROGRAM;
+   WRITE(6) '][';
+ CLOSE BRACKET;

@@ -1,0 +1,37 @@
+ CHARSET: PROGRAM;
+    DECLARE INTEGER SINGLE, V, X, Y, Z;
+    DECLARE CHARACTER(32), C ARRAY(16);
+    DECLARE INTEGER SINGLE, IMAGE ARRAY(16 17);
+    DECLARE CHARACTER(29), D ARRAY(8) INITIAL(
+        '¢0][¢7¢8¢9¢V¢.¢_¢/¢H¢>¢<¢|¢5¢6',   /* 0 */
+        '¢A¢B¢R¢W¢E¢O_¢I¢J¢K¢M¢N¢1¢2¢3¢4',  /* 1 */
+        ' !¢Q#¢a%&''()*+,-./',              /* 2 */
+        '0123456789:;<=>?',                 /* 3 */
+        '¢GABCDEFGHIJKLMNO',                /* 4 */
+        'PQRSTUVWXYZ¢S¢T¢Z¢P¢F',            /* 5 */
+        '¢Yabcdefghijklmno',                /* 6 */
+        'pqrstuvwxyz¢C¢U¢X¢L¢D');           /* 7 */
+
+    DO FOR X = 1 TO 8;
+       WRITE(6) D$(X:);
+    END;
+    WRITE(6);
+
+    Z = 0;
+    V = 8191;
+    DO FOR X = 1 TO 16;
+       Z = Z + 1;
+       IMAGE$Z = 65312;
+       DO FOR Y = 1 TO 16;
+          Z = Z + 1;
+          V = V + 1;
+          IMAGE$Z = V;
+       END;
+    END;
+   %COPY(C, IMAGE, Z);
+    DO FOR X = 1 TO 16;
+       WRITE(6) C$(X:);
+    END;
+    WRITE(6);
+
+ CLOSE CHARSET;

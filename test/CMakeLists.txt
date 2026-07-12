@@ -83,3 +83,215 @@ target_include_directories(test_ibm_float PRIVATE "${_ibm_float_dir}")
 target_link_libraries(test_ibm_float PRIVATE m)
 add_test(NAME test_ibm_float COMMAND test_ibm_float)
 set_tests_properties(test_ibm_float PROPERTIES LABELS "unit")
+
+# Survey tests over the vagc#1296 literal-scalars datasets.  The datasets
+# (and the harnesses that read them) can't be included in the public
+# repository, so they live in the untracked testCases/ tree; both tests
+# are skipped quietly when it is absent.
+set(_vagc1296_dir "${CMAKE_SOURCE_DIR}/testCases/vagc#1296")
+
+# Survey test: feeds the HAL/S source literals from rburkey's
+# literalSCALARS.txt (virtualagc issue #1296) through ibm_dp_from_string
+# and writes a comparison report against HAL/S-FC's compiled output.
+# Always exits 0 — diagnostic, not gating.
+if(EXISTS "${_vagc1296_dir}/test_literal_scalars.c")
+    add_executable(test_literal_scalars
+        "${_vagc1296_dir}/test_literal_scalars.c"
+        "${_ibm_float_dir}/ibmFloat.c"
+    )
+    target_include_directories(test_literal_scalars PRIVATE "${_ibm_float_dir}")
+    target_link_libraries(test_literal_scalars PRIVATE m)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/halfp")
+    add_test(NAME test_literal_scalars
+        COMMAND test_literal_scalars
+            "${_vagc1296_dir}/literalSCALARS-rburkey.txt"
+            "${CMAKE_CURRENT_BINARY_DIR}/halfp/literal_scalars_report.txt"
+    )
+    set_tests_properties(test_literal_scalars PROPERTIES LABELS "diagnostic")
+endif()
+
+# Survey test (Python-driven) over the larger vagc#1296 dataset, which
+# preserves MAFGEN's '*' marks on hand-patched binary values.  The Python
+# parser drives a tiny C batch-mode driver that wraps ibmFloat.c, so all
+# conversions go through the same code as the rest of the pipeline.
+# Always exits 0 — diagnostic, not gating.
+if(EXISTS "${_vagc1296_dir}/test_literal_scalars_v2.py"
+   AND EXISTS "${CMAKE_SOURCE_DIR}/tools/halfp/halfp_driver.c")
+    add_executable(halfp_driver
+        "${CMAKE_SOURCE_DIR}/tools/halfp/halfp_driver.c"
+        "${_ibm_float_dir}/ibmFloat.c"
+    )
+    target_include_directories(halfp_driver PRIVATE "${_ibm_float_dir}")
+    target_link_libraries(halfp_driver PRIVATE m)
+    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/halfp")
+    add_test(NAME test_literal_scalars_v2
+        COMMAND "${SDL_VENV_PYTHON}"
+            "${_vagc1296_dir}/test_literal_scalars_v2.py"
+            "${_vagc1296_dir}/literalSCALARS-exp2.txt"
+            "$<TARGET_FILE:halfp_driver>"
+            "${CMAKE_CURRENT_BINARY_DIR}/halfp/literal_scalars_v2_report.txt"
+    )
+    set_tests_properties(test_literal_scalars_v2 PROPERTIES LABELS "diagnostic")
+endif()
+
+# =====================================================================
+# floatIBM AP-101S compliance test.  Two pieces:
+#   1. tools/floatIBM/refgen          — emits NDJSON reference vectors
+#                                       from the AP-101S-faithful
+#                                       primitives in tools/floatIBM/
+#                                       ibmFloat.c.
+#   2. ext/sim/test/test_floatIBM.cjs — bundles ext/sim/gpc/floatIBM.coffee
+#                                       via esbuild and grades it
+#                                       against the vectors.
+#
+# A FAIL row is a real bug in floatIBM.coffee.  GAP rows are exception-
+# path vectors waiting on the bigger API change (returning exception
+# flags from the arithmetic primitives — items 4-6 of the original
+# compliance plan).  Currently gating: 0 FAILs allowed.
+# =====================================================================
+set(_floatIBM_dir "${CMAKE_SOURCE_DIR}/tools/floatIBM")
+add_executable(floatIBM_refgen
+    "${_floatIBM_dir}/refgen.c"
+    "${_floatIBM_dir}/ibmFloat.c"
+)
+target_include_directories(floatIBM_refgen PRIVATE "${_floatIBM_dir}")
+target_link_libraries(floatIBM_refgen PRIVATE m)
+
+# Smoke test for the C-side primitives — fast sanity check that runs
+# without Node, useful for iterating on tools/floatIBM/ibmFloat.c.
+add_executable(floatIBM_smoke
+    "${_floatIBM_dir}/smoke.c"
+    "${_floatIBM_dir}/ibmFloat.c"
+)
+target_include_directories(floatIBM_smoke PRIVATE "${_floatIBM_dir}")
+target_link_libraries(floatIBM_smoke PRIVATE m)
+add_test(NAME floatIBM_smoke COMMAND floatIBM_smoke)
+set_tests_properties(floatIBM_smoke PROPERTIES LABELS "unit;floatIBM")
+
+add_test(NAME floatIBM_compliance
+    COMMAND node
+            "${CMAKE_SOURCE_DIR}/ext/sim/test/test_floatIBM.cjs"
+            "$<TARGET_FILE:floatIBM_refgen>"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/ext/sim"
+)
+set_tests_properties(floatIBM_compliance PROPERTIES
+    LABELS "unit;floatIBM"
+    DEPENDS floatIBM_smoke
+)
+
+# asm101 assembler tests (upstream smoke + fork feature/fastparse) live in
+# their own CMakeLists alongside the fixtures they assemble.  It also defines
+# the `test-asm101*` convenience run targets.
+add_subdirectory(asm101)
+
+# =====================================================================
+# fpasm tests — hand-written AP-101S assembly that exercises FP
+# instructions and prints results via halUCP.  The assembled obj is
+# linked against the runtime library (IOINIT, etc.) into a runnable
+# .fcm; output is captured via outfile6 and diffed against a baseline.
+# =====================================================================
+set(_fpasm_dir "${CMAKE_CURRENT_SOURCE_DIR}/fpasm")
+set(_fpasm_build_dir "${CMAKE_CURRENT_BINARY_DIR}/fpasm")
+set(_fpasm_src "${_fpasm_dir}/fpasm_test.asm")
+set(_fpasm_obj "${_fpasm_build_dir}/fpasm_test.obj")
+set(_fpasm_fcm "${_fpasm_build_dir}/fpasm_test.fcm")
+set(_fpasm_sym "${_fpasm_build_dir}/fpasm_test.sym.json")
+set(_fpasm_actual "${_fpasm_build_dir}/fpasm_test.actual.out6")
+set(_fpasm_baseline "${HAL_TEST_BASELINE_DIR}/fpasm_test.expected.out6")
+
+add_custom_command(
+    OUTPUT "${_fpasm_obj}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${_fpasm_build_dir}"
+    COMMAND ${CMAKE_COMMAND} -E env PYTHONUTF8=1
+            "${SDL_VENV_PYTHON}" -m asm101
+            "--object=${_fpasm_obj}"
+            "${_fpasm_src}"
+    DEPENDS "${_fpasm_src}"
+    COMMENT "[asm101] Assembling fpasm_test.asm"
+)
+add_custom_command(
+    OUTPUT "${_fpasm_fcm}" "${_fpasm_sym}"
+    COMMAND ${CMAKE_COMMAND} -E env PYTHONUTF8=1
+            "${SDL_VENV_PYTHON}" -m lnk101
+            --no-repro --generate-stacks 80 --entry FPTEST
+            -o "${_fpasm_fcm}"
+            --json-symbols "${_fpasm_sym}"
+            -L "${CMAKE_BINARY_DIR}/lib/runtime/RUN"
+            -L "${CMAKE_BINARY_DIR}/lib/runtime/ZCON"
+            "${_fpasm_obj}"
+    DEPENDS "${_fpasm_obj}" runtime
+    COMMENT "Linking fpasm_test"
+)
+add_custom_target(fpasm_test_build ALL DEPENDS "${_fpasm_fcm}")
+add_dependencies(fpasm_test_build halsfc lnk101 runtime)
+
+set(_fpasm_actual_exc "${_fpasm_build_dir}/fpasm_test.actual.exc")
+set(_fpasm_baseline_exc "${HAL_TEST_BASELINE_DIR}/fpasm_test.expected.exc")
+
+# Pass GPC_BATCH_COMMAND as a single semicolon-joined arg; the wrapper
+# splits it back into program+args.  This lets us route the same way
+# whether SDL_UNIFIED_GPC is on (gpc;run) or off (gpc-batch).
+string(REPLACE ";" "\;" _fpasm_gpc_cmd "${GPC_BATCH_COMMAND}")
+
+add_test(NAME fpasm_test
+    COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/fpasm/run_fpasm_test.sh"
+        "${_fpasm_gpc_cmd}"
+        "${_fpasm_fcm}"
+        "${_fpasm_sym}"
+        "${_fpasm_build_dir}"
+)
+set_tests_properties(fpasm_test PROPERTIES
+    LABELS "fpasm"
+    TIMEOUT 30
+    FIXTURES_SETUP "fpasm_test_OUTPUT"
+)
+add_test(NAME fpasm_test.compare
+    COMMAND diff -u "${_fpasm_baseline}" "${_fpasm_actual}")
+set_tests_properties(fpasm_test.compare PROPERTIES
+    LABELS "fpasm"
+    TIMEOUT 10
+    FIXTURES_REQUIRED "fpasm_test_OUTPUT"
+)
+add_test(NAME fpasm_test.exceptions
+    COMMAND diff -u "${_fpasm_baseline_exc}" "${_fpasm_actual_exc}")
+set_tests_properties(fpasm_test.exceptions PROPERTIES
+    LABELS "fpasm"
+    TIMEOUT 10
+    FIXTURES_REQUIRED "fpasm_test_OUTPUT"
+)
+
+# ---------------------------------------------------------------------
+# dfg (Display Format Generator) every-deck sweep: full generation of
+# every display deck in the out-of-tree OI301700 + OI340600 code trees
+# (194 decks), gating on zero errors, the pinned honest-refusal sets,
+# and the OI30 members' own 30.40-banner build metrics as a per-display
+# oracle (see test_dfg_decks.py).  SKIPs cleanly when pfs/code is
+# absent.  Run with:  ctest -R dfg_decks   or   make test-dfg
+# ---------------------------------------------------------------------
+add_test(NAME dfg_decks
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_dfg_decks.py"
+)
+set_tests_properties(dfg_decks PROPERTIES
+    LABELS "dfg"
+    TIMEOUT 300
+)
+
+# DEUCFLM critical-format load module: build from CON80/CFSYSIN and gate
+# the derivable structure (CFIT branch slots, DEULOC cross-check, body
+# tails, CFBSIZE budget).  SKIPs cleanly when pfs/code is absent.
+add_test(NAME dfg_deucflm
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_deucflm.py"
+)
+set_tests_properties(dfg_deucflm PROPERTIES
+    LABELS "dfg"
+    TIMEOUT 120
+)
+add_custom_target(test-dfg
+    COMMAND "${CMAKE_CTEST_COMMAND}" -L dfg --output-on-failure
+    DEPENDS uv_sync
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+    COMMENT "Running dfg tests"
+    USES_TERMINAL
+)

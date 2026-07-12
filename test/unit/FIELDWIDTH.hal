@@ -1,9 +1,38 @@
+C/ Field-width test for WRITE and auto-conversion to CHARACTER.
+C/
+C/ References:
+C/   https://github.com/ColanderCombo/nsts-sim-gpc/issues/1
+C/   https://github.com/ColanderCombo/nsts-sim-gpc/issues/2
+C/
+C/ Two distinct mechanisms are at work, with intentionally different widths:
+C/
+C/ 1. WRITE statement print formats.  Apply only when a value appears
+C/    directly in a WRITE list; the compiler emits a typed I/O code
+C/    (IOUT/HOUT/EOUT/DOUT) and HalUCP formats with a fixed field width:
+C/      INTEGER         -> 11 chars,  right-aligned:  "       1234"
+C/      INTEGER DOUBLE  -> 11 chars,  right-aligned:  "        567"
+C/      SCALAR          -> 14 chars,  " 0.0"+pad  or  " d.dddddddE+dd"
+C/      SCALAR DOUBLE   -> 23 chars,  " 0.0"+pad  or  " d.dddddddddddddddE+dd"
+C/
+C/ 2. Arithmetic-to-CHARACTER conversion.  Applies when a value is
+C/    concatenated via '||' or assigned to a CHARACTER variable.  The
+C/    compiler emits HTOC/ITOC/ETOC/DTOC.  The *integer* runtimes
+C/    (HTOC/ITOC) produce sign+digits with NO padding; only the *scalar*
+C/    runtimes (ETOC/DTOC) produce fixed-width 14/23-char fields:
+C/      INTEGER         -> "1234"             (variable length)
+C/      INTEGER DOUBLE  -> "567"              (variable length)
+C/      SCALAR          -> " 0.0          "   (14 chars)
+C/      SCALAR DOUBLE   -> " 0.0" + pad to 23 (23 chars)
+C/
+C/
  FIELDWIDTH: PROGRAM;
     DECLARE N1 INTEGER INITIAL(1234), N2 INTEGER DOUBLE INITIAL(567);
     DECLARE X0 SCALAR INITIAL(0.0), X1 SCALAR INITIAL(1.0);
     DECLARE SCALAR DOUBLE, X2 INITIAL(0.0), X3 INITIAL(2.0);
     DECLARE C CHARACTER(200);
-    WRITE(6) '1234567890123456789012345678901234567890';
+    WRITE(6) '123456789012345678901234567890' ||
+             '123456789012345678901234567890' ||
+             '123456789012345678901234567890';
     WRITE(6) N1;
     WRITE(6) N2;
     WRITE(6) X0;
@@ -12,6 +41,10 @@
     WRITE(6) X3;
     WRITE(6) 'A string',N1, N2, X0, X1, X2, X3;
     WRITE(6) 'A string' || N1 || N2 || X0 || X1 || X2 || X3;
+    C = '123456789012345678901234567890' ||
+        '123456789012345678901234567890' ||
+        '123456789012345678901234567890';
+    WRITE(6) C;
     C = N1;
     WRITE(6) C;
     C = N2;
@@ -24,7 +57,9 @@
     WRITE(6) C;
     C = X3;
     WRITE(6) C;
-    WRITE(6) '1234567890123456789012345678901234567890';
+    WRITE(6) '123456789012345678901234567890' ||
+             '123456789012345678901234567890' ||
+             '123456789012345678901234567890';
     WRITE(6) '';
 Y %SVCI(0);
  CLOSE FIELDWIDTH;
