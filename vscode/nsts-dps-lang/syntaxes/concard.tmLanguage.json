@@ -1,0 +1,371 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "CONCARD",
+  "scopeName": "source.concard",
+  "patterns": [
+    { "include": "#change-history-comment" },
+    { "include": "#section-comment" },
+    { "include": "#full-line-comment" },
+    { "include": "#address-insert-directive" },
+    { "include": "#address-directive" },
+    { "include": "#phase-directive" },
+    { "include": "#bank-directive" },
+    { "include": "#map-directive" },
+    { "include": "#overlay-directive" },
+    { "include": "#insert-directive" },
+    { "include": "#stack-directive" },
+    { "include": "#include-directive" },
+    { "include": "#library-star-directive" },
+    { "include": "#library-directive" },
+    { "include": "#clear-set-directive" },
+    { "include": "#control-keywords" },
+    { "include": "#mmu-build-directive" },
+    { "include": "#mmu-ipl-directive" },
+    { "include": "#mmu-loadmod-directive" },
+    { "include": "#mmu-alloc-directive" },
+    { "include": "#mmu-alocdesc-directive" },
+    { "include": "#simple-trailer" }
+  ],
+  "repository": {
+    "change-history-comment": {
+      "name": "comment.line.change-history.concard",
+      "match": "^(\\*@)([^;]*)(;)?(.*)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.concard" },
+        "2": { 
+          "name": "comment.line.metadata.concard",
+          "patterns": [
+            {
+              "name": "storage.type.cr.concard",
+              "match": "(CR|PCR|DR)[=]?[0-9A-Z]+"
+            },
+            {
+              "name": "comment.line.metadata.oi-version.concard",
+              "match": "OI[0-9]+\\.[0-9]+"
+            },
+            {
+              "name": "comment.line.metadata.action.concard",
+              "match": "\\b[ACD]=\\([^)]+\\)|\\b[ACDR]=\\d+"
+            }
+          ]
+        },
+        "3": { "name": "punctuation.separator.concard" },
+        "4": { 
+          "name": "comment.line.description.concard",
+          "patterns": [
+            { "include": "#full-trailer" }
+          ]
+        }
+      }
+    },
+    "section-comment": {
+      "name": "comment.block.section.concard",
+      "match": "^(\\*{2,})(.*)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.concard" },
+        "2": { 
+          "name": "comment.block.section.concard",
+          "patterns": [
+            { "include": "#any-trailer" }
+          ]
+        }
+      }
+    },
+    "full-line-comment": {
+      "name": "comment.line.concard",
+      "match": "^(\\*)(.*)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.concard" },
+        "2": { 
+          "name": "comment.line.concard",
+          "patterns": [
+            { "include": "#any-trailer" }
+          ]
+        }
+      }
+    },
+    "full-trailer": {
+      "comment": "Full card trailer: member name + single space + sequence number + revision",
+      "match": "\\s+([A-Z][A-Z0-9]{2,7}) ([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "comment.line.card-member.concard" },
+        "2": { "name": "comment.line.sequence-number.concard" },
+        "3": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "simple-trailer": {
+      "comment": "Simple card trailer: just sequence number + revision (no member)",
+      "match": "\\s+([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "comment.line.sequence-number.concard" },
+        "2": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "any-trailer": {
+      "comment": "Match either full (member + single space + seq) or simple (seq only) trailer",
+      "match": "(([A-Z][A-Z0-9]{2,7}) )?([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "2": { "name": "comment.line.card-member.concard" },
+        "3": { "name": "comment.line.sequence-number.concard" },
+        "4": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "address-insert-directive": {
+      "comment": "INSERT with hex address prefix like 06DC0    INSERT  #Y101001",
+      "name": "meta.address-insert.concard",
+      "match": "^([0-9A-Fa-f]{4,5})\\s+(INSERT)\\s+([A-Za-z0-9#$@_]+)(.*?)(?:([A-Z][A-Z0-9]{2,7})\\s+)?([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "constant.numeric.hex.address.concard" },
+        "2": { "name": "keyword.control.insert.concard" },
+        "3": { "name": "entity.name.function.csect.concard" },
+        "4": { "name": "comment.line.inline.concard" },
+        "5": { "name": "comment.line.card-member.concard" },
+        "6": { "name": "comment.line.sequence-number.concard" },
+        "7": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "address-directive": {
+      "name": "meta.address-directive.concard",
+      "match": "^([0-9A-Fa-f]{4,5})\\s+(ADDRMAX|OVERLAY|ORIGIN)\\s+([A-Za-z0-9#$@_]+)?(\\s*--+[^0-9]*|.*?)(?:([A-Z][A-Z0-9]{2,7})\\s+)?([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "constant.numeric.hex.address.concard" },
+        "2": { "name": "keyword.control.concard" },
+        "3": { "name": "entity.name.section.overlay.concard" },
+        "4": { "name": "comment.line.description.concard" },
+        "5": { "name": "comment.line.card-member.concard" },
+        "6": { "name": "comment.line.sequence-number.concard" },
+        "7": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "phase-directive": {
+      "name": "meta.phase.concard",
+      "match": "^\\s+(PHASE)\\s+([0-9,]+)(.*?)(?:([A-Z][A-Z0-9]{2,7})\\s+)?([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.phase.concard" },
+        "2": { "name": "constant.numeric.phase-list.concard" },
+        "3": { "name": "comment.line.inline.concard" },
+        "4": { "name": "comment.line.card-member.concard" },
+        "5": { "name": "comment.line.sequence-number.concard" },
+        "6": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "bank-directive": {
+      "name": "meta.bank.concard",
+      "match": "^\\s+(BANK)\\s+([0-9]+)(.*?)(?:([A-Z][A-Z0-9]{2,7})\\s+)?([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.bank.concard" },
+        "2": { "name": "constant.numeric.bank.concard" },
+        "3": { "name": "comment.line.inline.concard" },
+        "4": { "name": "comment.line.card-member.concard" },
+        "5": { "name": "comment.line.sequence-number.concard" },
+        "6": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "map-directive": {
+      "name": "meta.map.concard",
+      "match": "^\\s+(MAP)\\s+([0-9]+)\\s*,\\s*(\\*|[A-Za-z0-9#$@_,]+)(.*?)(?:([A-Z][A-Z0-9]{2,7})\\s+)?([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.map.concard" },
+        "2": { "name": "constant.numeric.concard" },
+        "3": { "name": "entity.name.function.csect.concard" },
+        "4": { "name": "comment.line.inline.concard" },
+        "5": { "name": "comment.line.card-member.concard" },
+        "6": { "name": "comment.line.sequence-number.concard" },
+        "7": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "overlay-directive": {
+      "name": "meta.overlay.concard",
+      "match": "^\\s+(OVERLAY)\\s+([A-Za-z0-9#$@_]+)(\\s*--+[^0-9]*|.*?)(?:([A-Z][A-Z0-9]{2,7})\\s+)?([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.overlay.concard" },
+        "2": { "name": "entity.name.section.overlay.concard" },
+        "3": { "name": "comment.line.description.concard" },
+        "4": { "name": "comment.line.card-member.concard" },
+        "5": { "name": "comment.line.sequence-number.concard" },
+        "6": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "insert-directive": {
+      "name": "meta.insert.concard",
+      "match": "^\\s+(INSERT)\\s+([A-Za-z0-9#$@_]+)(.*?)(?:([A-Z][A-Z0-9]{2,7})\\s+)?([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.insert.concard" },
+        "2": { "name": "entity.name.function.csect.concard" },
+        "3": { "name": "comment.line.inline.concard" },
+        "4": { "name": "comment.line.card-member.concard" },
+        "5": { "name": "comment.line.sequence-number.concard" },
+        "6": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "stack-directive": {
+      "name": "meta.stack.concard",
+      "match": "^\\s+(STACK)\\s+([A-Za-z0-9#$@_]+)(.*?)(?:([A-Z][A-Z0-9]{2,7})\\s+)?([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.stack.concard" },
+        "2": { "name": "entity.name.function.stack.concard" },
+        "3": { "name": "comment.line.inline.concard" },
+        "4": { "name": "comment.line.card-member.concard" },
+        "5": { "name": "comment.line.sequence-number.concard" },
+        "6": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "include-directive": {
+      "name": "meta.include.concard",
+      "match": "^\\s+(INCLUDE)\\s+(CONCARDS|SYSLIBL1|SYSLIB)\\(([^)]+)\\)(.*?)(?:([A-Z][A-Z0-9]{2,7})\\s+)?([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.include.concard" },
+        "2": { "name": "entity.name.tag.dataset.concard" },
+        "3": { "name": "string.unquoted.member-reference.concard" },
+        "4": { "name": "comment.line.inline.concard" },
+        "5": { "name": "comment.line.card-member.concard" },
+        "6": { "name": "comment.line.sequence-number.concard" },
+        "7": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "library-star-directive": {
+      "comment": "LIBRARY *(member,member,...) syntax",
+      "name": "meta.library.concard",
+      "match": "^\\s+(LIBRARY)\\s+\\*\\(([^)]+)\\)(.*?)(?:([A-Z][A-Z0-9]{2,7})\\s+)?([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.library.concard" },
+        "2": { "name": "string.unquoted.member-reference.concard" },
+        "3": { "name": "comment.line.inline.concard" },
+        "4": { "name": "comment.line.card-member.concard" },
+        "5": { "name": "comment.line.sequence-number.concard" },
+        "6": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "library-directive": {
+      "name": "meta.library.concard",
+      "match": "^\\s+(LIBRARY)\\s+([A-Za-z0-9#$@_]+)\\(([^)]+)\\)(.*?)(?:([A-Z][A-Z0-9]{2,7})\\s+)?([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.library.concard" },
+        "2": { "name": "entity.name.tag.dataset.concard" },
+        "3": { "name": "string.unquoted.member-reference.concard" },
+        "4": { "name": "comment.line.inline.concard" },
+        "5": { "name": "comment.line.card-member.concard" },
+        "6": { "name": "comment.line.sequence-number.concard" },
+        "7": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "clear-set-directive": {
+      "comment": "CLEAR and SET have no arguments",
+      "name": "meta.control.concard",
+      "match": "^\\s+(CLEAR|SET)\\s*(?:([A-Z][A-Z0-9]{2,7})\\s+)?([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.concard" },
+        "2": { "name": "comment.line.card-member.concard" },
+        "3": { "name": "comment.line.sequence-number.concard" },
+        "4": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "control-keywords": {
+      "name": "meta.control.concard",
+      "match": "^\\s+(NOCALLER|REMOTE|RESERVE)\\s*([A-Za-z0-9#$@_]*)?(.*?)(?:([A-Z][A-Z0-9]{2,7})\\s+)?([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.concard" },
+        "2": { "name": "entity.name.function.csect.concard" },
+        "3": { "name": "comment.line.inline.concard" },
+        "4": { "name": "comment.line.card-member.concard" },
+        "5": { "name": "comment.line.sequence-number.concard" },
+        "6": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "mmu-build-directive": {
+      "name": "meta.mmu-build.concard",
+      "match": "^\\s+(BUILD)\\s*;(.*?)([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.mmu.build.concard" },
+        "2": { "name": "comment.line.inline.concard" },
+        "3": { "name": "comment.line.sequence-number.concard" },
+        "4": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "mmu-ipl-directive": {
+      "name": "meta.mmu-ipl.concard",
+      "match": "^\\s+(IPL)\\s*,(.+);(.*?)([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.mmu.ipl.concard" },
+        "2": {
+          "patterns": [
+            { "include": "#mmu-parameter" }
+          ]
+        },
+        "3": { "name": "comment.line.inline.concard" },
+        "4": { "name": "comment.line.sequence-number.concard" },
+        "5": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "mmu-loadmod-directive": {
+      "name": "meta.mmu-loadmod.concard",
+      "match": "^\\s+(LOADMOD)\\s*,(.+);(.*?)([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.mmu.loadmod.concard" },
+        "2": {
+          "patterns": [
+            { "include": "#mmu-parameter" }
+          ]
+        },
+        "3": { "name": "comment.line.inline.concard" },
+        "4": { "name": "comment.line.sequence-number.concard" },
+        "5": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "mmu-alocdesc-directive": {
+      "name": "meta.mmu-alocdesc.concard",
+      "match": "^([A-Za-z0-9#$@_]+)\\s+(ALOCDESC)\\s*,(.+);(.*?)([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "entity.name.type.allocation.concard" },
+        "2": { "name": "keyword.control.mmu.alocdesc.concard" },
+        "3": { "name": "string.unquoted.description.concard" },
+        "4": { "name": "comment.line.inline.concard" },
+        "5": { "name": "comment.line.sequence-number.concard" },
+        "6": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "mmu-alloc-directive": {
+      "name": "meta.mmu-alloc.concard",
+      "match": "^([A-Za-z0-9#$@_]+)\\s+(ALLOC)\\s*,(.+);(.*?)([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "entity.name.type.allocation.concard" },
+        "2": { "name": "keyword.control.mmu.alloc.concard" },
+        "3": {
+          "patterns": [
+            { "include": "#mmu-parameter" }
+          ]
+        },
+        "4": { "name": "comment.line.inline.concard" },
+        "5": { "name": "comment.line.sequence-number.concard" },
+        "6": { "name": "entity.name.tag.revision.concard" }
+      }
+    },
+    "mmu-parameter": {
+      "patterns": [
+        {
+          "name": "variable.parameter.concard",
+          "match": "(ADDR|BLKS|INIT|SYSID|SUBSYS|PH|MMDIR|MEMBER|PHASE)=",
+          "captures": {
+            "1": { "name": "support.type.property-name.concard" }
+          }
+        },
+        {
+          "name": "constant.numeric.hex.concard",
+          "match": "\\b[0-9A-Fa-f]{4,5}\\b"
+        },
+        {
+          "name": "constant.numeric.decimal.concard",
+          "match": "\\b[0-9]+\\b"
+        },
+        {
+          "name": "constant.other.identifier.concard",
+          "match": "[A-Z][A-Z0-9]*"
+        }
+      ]
+    },
+    "inline-comment": {
+      "name": "comment.line.inline.concard",
+      "match": "--+.*"
+    }
+  }
+}

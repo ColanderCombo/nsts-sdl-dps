@@ -1,0 +1,531 @@
+{
+  "name": "HAL/S",
+  "scopeName": "source.hals",
+  "patterns": [
+    { "include": "#block-comment" },
+    { "include": "#change-history-comment" },
+    { "include": "#section-comment" },
+    { "include": "#line-comment" },
+    { "include": "#directive-line" },
+    { "include": "#code-line" }
+  ],
+  "repository": {
+    "block-comment": {
+      "name": "comment.block.hals",
+      "begin": "/\\*",
+      "end": "\\*/",
+      "captures": {
+        "0": { "name": "punctuation.definition.comment.hals" }
+      }
+    },
+    "macro-call": {
+      "patterns": [
+        {
+          "name": "meta.macro.call.hals",
+          "begin": "(%[A-Za-z_][A-Za-z0-9_]*)(\\()",
+          "end": "\\)",
+          "beginCaptures": {
+            "1": { "name": "entity.name.function.macro.hals" },
+            "2": { "name": "punctuation.section.arguments.begin.hals" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.section.arguments.end.hals" }
+          },
+          "patterns": [
+            { "include": "#code-content" }
+          ]
+        },
+        {
+          "name": "entity.name.function.macro.hals",
+          "match": "%[A-Za-z_][A-Za-z0-9_]*"
+        }
+      ]
+    },
+    "bit-string-literal": {
+      "patterns": [
+        {
+          "name": "constant.numeric.bit-string.hals",
+          "match": "\\b(BIN|OCT|HEX|DEC)('[^']*')",
+          "captures": {
+            "1": { "name": "storage.type.number-base.hals" },
+            "2": { "name": "constant.numeric.hals" }
+          }
+        }
+      ]
+    },
+    "repeat-initializer": {
+      "patterns": [
+        {
+          "match": "\\b(\\d+)(#)",
+          "captures": {
+            "1": { "name": "constant.numeric.repeat-count.hals" },
+            "2": { "name": "keyword.operator.repeat.hals" }
+          }
+        }
+      ]
+    },
+    "storage-modifier": {
+      "patterns": [
+        {
+          "name": "storage.modifier.hals",
+          "match": "\\b(EXTERNAL|DENSE|RIGID|TEMPORARY|STATIC|AUTOMATIC|REMOTE|ALIGNED|LATCHED|REENTRANT)\\b"
+        }
+      ]
+    },
+    "change-history-comment": {
+      "name": "comment.line.change-history.hals",
+      "match": "^(C@)\\s*(.+?)\\s*([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.hals" },
+        "2": { 
+          "name": "comment.line.metadata.hals",
+          "patterns": [
+            {
+              "name": "storage.type.cr.hals",
+              "match": "(CR|PCR|DR|DSSP)[0-9A-Z]+"
+            },
+            {
+              "name": "comment.line.metadata.action.hals",
+              "match": "\\b(ADD|CHANGE|DELETE)\\s*="
+            }
+          ]
+        },
+        "3": { "name": "comment.line.sequence-number.hals" },
+        "4": { "name": "entity.name.tag.revision.hals" }
+      }
+    },
+    "section-comment": {
+      "name": "comment.block.section.hals",
+      "match": "^(C\\*{2,})(.*)([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.hals" },
+        "2": { "name": "comment.block.section.hals" },
+        "3": { "name": "comment.line.sequence-number.hals" },
+        "4": { "name": "entity.name.tag.revision.hals" }
+      }
+    },
+    "line-comment": {
+      "name": "comment.line.hals",
+      "match": "^(C)(?![A-Za-z0-9_$])(.*)([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.hals" },
+        "2": { "name": "comment.line.hals" },
+        "3": { "name": "comment.line.sequence-number.hals" },
+        "4": { "name": "entity.name.tag.revision.hals" }
+      }
+    },
+    "trailing-sequence": {
+      "patterns": [
+        {
+          "match": "\\s*([0-9]{6})([A-Z]{2})\\s*$",
+          "captures": {
+            "1": { "name": "comment.line.sequence-number.hals" },
+            "2": { "name": "entity.name.tag.revision.hals" }
+          }
+        }
+      ]
+    },
+    "directive-content": {
+      "patterns": [
+        { "include": "#block-comment" },
+        { "include": "#directive-keywords" },
+        { "include": "#trailing-sequence" }
+      ]
+    },
+    "directive-line": {
+      "name": "meta.directive.hals",
+      "begin": "^([DF])",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.directive.hals" }
+      },
+      "end": "$",
+      "patterns": [
+        { "include": "#directive-content" }
+      ]
+    },
+    "code-line": {
+      "name": "meta.code.hals",
+      "begin": "^([^CDF])",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.card-type.hals" }
+      },
+      "end": "$",
+      "patterns": [
+        { "include": "#code-content" },
+        { "include": "#trailing-sequence" }
+      ]
+    },
+    "directive-keywords": {
+      "patterns": [
+        {
+          "match": "\\b(INCLUDE)\\s+(TEMPLATE)\\s+([A-Z][A-Z0-9_#]*)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.directive.hals" },
+            "2": { "name": "keyword.control.directive.hals" },
+            "3": { "name": "entity.name.type.include-filename.hals" }
+          }
+        },
+        {
+          "match": "\\b(INCLUDE)\\s+([A-Z][A-Z0-9_#]*)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.directive.hals" },
+            "2": { "name": "entity.name.type.include-filename.hals" }
+          }
+        },
+        {
+          "name": "keyword.control.directive.include.hals",
+          "match": "\\b(INCLUDE|TEMPLATE)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.directive.hals" }
+          }
+        },
+        {
+          "name": "entity.name.type.include-filename.hals",
+          "match": "(?<=(INCLUDE|TEMPLATE)\\s)[A-Z][A-Z0-9_#]*(?=\\s|$)"
+        },
+        {
+          "name": "keyword.control.directive.hals",
+          "match": "\\b(NOLIST|LIST|EJECT|SPACE|TITLE|OPTIONS)\\b"
+        },
+        {
+          "name": "entity.name.type.hals",
+          "match": "\\b[A-Z][A-Z0-9]+\\b"
+        }
+      ]
+    },
+    "code-content": {
+      "patterns": [
+        { "include": "#replace-definition" },
+        { "include": "#replace-body-continuation" },
+        { "include": "#replace-header" },
+        { "include": "#subscript-group" },
+        { "include": "#labels" },
+        { "include": "#close-statement" },
+        { "include": "#macro-call" },
+        { "include": "#block-comment" },
+        { "include": "#bit-string-literal" },
+        { "include": "#strings" },
+        { "include": "#repeat-initializer" },
+        { "include": "#numbers" },
+        { "include": "#storage-modifier" },
+        { "include": "#types" },
+        { "include": "#keywords" },
+        { "include": "#builtins" },
+        { "include": "#operators" },
+        { "include": "#identifiers" }
+      ]
+    },
+    "replace-header": {
+      "patterns": [
+        {
+          "match": "\\b(REPLACE)\\s+([A-Z_][A-Z0-9_]*)(\\s*\\(([^)]*)\\))?\\s+\\b(BY)\\b",
+          "captures": {
+            "1": { "name": "keyword.other.declaration.hals" },
+            "2": { "name": "entity.name.function.macro.hals" },
+            "3": { "name": "meta.parameters.hals" },
+            "4": { "name": "variable.parameter.hals" },
+            "5": { "name": "keyword.other.declaration.hals" }
+          }
+        }
+      ]
+    },
+    "replace-definition": {
+      "name": "meta.replace.definition.hals",
+      "begin": "\\b(REPLACE)\\s+([A-Z_][A-Z0-9_]*)(\\s*\\(([^)]*)\\))?\\s+\\b(BY)\\b\\s*(\")",
+      "beginCaptures": {
+        "1": { "name": "keyword.other.declaration.hals" },
+        "2": { "name": "entity.name.function.macro.hals" },
+        "3": { "name": "meta.parameters.hals" },
+        "4": { "name": "variable.parameter.hals" },
+        "5": { "name": "keyword.other.declaration.hals" },
+        "6": { "name": "punctuation.definition.replace-string.begin.hals" }
+      },
+      "end": "(?<!\")\"(?!\")",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.replace-string.end.hals" }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.hals",
+          "match": "\"\""
+        },
+        { "include": "#replace-code-content" }
+      ]
+    },
+    "replace-body-continuation": {
+      "name": "meta.replace.definition.hals",
+      "begin": "\\G\\s*(\")",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.replace-string.begin.hals" }
+      },
+      "end": "(?<!\")\"(?!\")",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.replace-string.end.hals" }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.hals",
+          "match": "\"\""
+        },
+        { "include": "#replace-code-content" }
+      ]
+    },
+    "replace-code-content": {
+      "patterns": [
+        { "include": "#subscript-group" },
+        { "include": "#replace-argument-paste" },
+        { "include": "#labels" },
+        { "include": "#close-statement" },
+        { "include": "#macro-call" },
+        { "include": "#block-comment" },
+        { "include": "#bit-string-literal" },
+        { "include": "#replace-single-quoted-strings" },
+        { "include": "#repeat-initializer" },
+        { "include": "#numbers" },
+        { "include": "#storage-modifier" },
+        { "include": "#types" },
+        { "include": "#keywords" },
+        { "include": "#builtins" },
+        { "include": "#operators" },
+        { "include": "#identifiers" }
+      ]
+    },
+    "replace-argument-paste": {
+      "patterns": [
+        {
+          "match": "(`)([A-Za-z_][A-Za-z0-9_]*)(`)",
+          "captures": {
+            "1": { "name": "punctuation.definition.token-paste.hals" },
+            "2": { "name": "variable.parameter.hals" },
+            "3": { "name": "punctuation.definition.token-paste.hals" }
+          }
+        }
+      ]
+    },
+    "replace-single-quoted-strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.single.hals",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.hals",
+              "match": "''"
+            }
+          ]
+        }
+      ]
+    },
+    "subscript-group": {
+      "name": "meta.subscript.hals",
+      "begin": "(\\$)(\\()",
+      "beginCaptures": {
+        "1": { "name": "keyword.operator.subscript.hals" },
+        "2": { "name": "punctuation.section.group.begin.hals" }
+      },
+      "end": "\\)",
+      "endCaptures": {
+        "0": { "name": "punctuation.section.group.end.hals" }
+      },
+      "patterns": [
+        { "include": "#subscript-content" }
+      ]
+    },
+    "subscript-content": {
+      "patterns": [
+        { "include": "#subscript-group" },
+        { "include": "#subscript-range-operators" },
+        { "include": "#macro-call" },
+        { "include": "#block-comment" },
+        { "include": "#bit-string-literal" },
+        { "include": "#strings" },
+        { "include": "#repeat-initializer" },
+        { "include": "#numbers" },
+        { "include": "#storage-modifier" },
+        { "include": "#types" },
+        { "include": "#keywords" },
+        { "include": "#builtins" },
+        { "include": "#operators" },
+        { "include": "#subscript-identifiers" }
+      ]
+    },
+    "subscript-range-operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.range.hals",
+          "match": ":"
+        }
+      ]
+    },
+    "subscript-identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.hals",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "close-statement": {
+      "patterns": [
+        {
+          "match": "\\b(CLOSE)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.program.hals" },
+            "2": { "name": "entity.name.label.hals" }
+          }
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.single.hals",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.hals",
+              "match": "''"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.double.hals",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.hals",
+              "match": "\"\""
+            }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.hals",
+          "match": "\\b\\d+\\.\\d+([Ee][+-]?\\d+)?\\b"
+        },
+        {
+          "name": "constant.numeric.exponential.hals",
+          "match": "\\b\\d+[Ee][+-]?\\d+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.hals",
+          "match": "\\b\\d+\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.program.hals",
+          "match": "\\b(PROGRAM|PROCEDURE|FUNCTION|TASK|COMPOOL|PROCESS|BLOCK|UPDATE|CLOSE|RETURN|CALL|ENTRY|INLINE|STRUCTURE)\\b"
+        },
+        {
+          "name": "keyword.control.flow.hals",
+          "match": "\\b(IF|THEN|ELSE|DO|END|FOR|TO|BY|WHILE|UNTIL|REPEAT|EXIT|GO|GOTO|CASE)\\b"
+        },
+        {
+          "name": "keyword.control.realtime.hals",
+          "match": "\\b(SCHEDULE|WAIT|SIGNAL|PRIORITY|TERMINATE|CANCEL|SET|RESET|ERROR|DEPENDENT|IGNORE)\\b"
+        },
+        {
+          "name": "keyword.other.declaration.hals",
+          "match": "\\b(DECLARE|CONSTANT|INITIAL|ACCESS|ASSIGN|NAME|LOCK|EXCLUSIVE|REPLACE|ARRAY)\\b"
+        },
+        {
+          "name": "keyword.other.io.hals",
+          "match": "\\b(READ|READALL|WRITE|FILE)\\b"
+        },
+        {
+          "name": "keyword.operator.logical.hals",
+          "match": "\\b(NOT|AND|OR|CAT|MOD)\\b"
+        },
+        {
+          "name": "constant.language.boolean.hals",
+          "match": "\\b(TRUE|FALSE|ON|OFF)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.structure.hals",
+          "match": "\\b(INTEGER|SCALAR|VECTOR|MATRIX|BIT|CHARACTER|BOOLEAN)-STRUCTURE\\b"
+        },
+        {
+          "name": "storage.type.hals",
+          "match": "\\b(INTEGER|SCALAR|VECTOR|MATRIX|BOOLEAN|CHARACTER|BIT|EVENT|SINGLE|DOUBLE)\\b"
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.hals",
+          "match": "\\b(ABS|CEILING|FLOOR|TRUNCATE|ROUND|ODD|SIGN|MAX|MIN|SUM|PROD|SHL|SHR|SIZE|LENGTH|INDEX|MIDVAL|RANDOM|RANDOMG|DATE|RUNTIME|CLOCKTIME|PRIO|NEXTIME|DIV|REMAINDER|INTEGER|MOD|SUBBIT)\\b"
+        },
+        {
+          "name": "support.function.math.hals",
+          "match": "\\b(SIN|COS|TAN|ARCSIN|ARCCOS|ARCTAN|ARCTAN2|SINH|COSH|TANH|EXP|LOG|SQRT)\\b"
+        },
+        {
+          "name": "support.function.vector.hals",
+          "match": "\\b(TRANSPOSE|TRACE|DET|INVERSE|IDENTITY|UNIT|ABVAL|DOT|CROSS)\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.cast.hals",
+          "match": "@"
+        },
+        {
+          "name": "keyword.operator.subscript.hals",
+          "match": "\\$"
+        },
+        {
+          "name": "keyword.operator.assignment.hals",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.arithmetic.hals",
+          "match": "\\*\\*|\\*|/|\\+|-"
+        },
+        {
+          "name": "keyword.operator.dot.hals",
+          "match": "(?<!\\d)\\.(?!\\d)"
+        },
+        {
+          "name": "keyword.operator.comparison.hals",
+          "match": "<=|>=|<|>|¬=|~=|\\^="
+        },
+        {
+          "name": "keyword.operator.logical.hals",
+          "match": "¬|~|\\^|&|\\|\\||\\|"
+        }
+      ]
+    },
+    "labels": {
+      "patterns": [
+        {
+          "name": "entity.name.label.hals",
+          "match": "\\G\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*:"
+        }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.hals",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?!\\s*:)"
+        }
+      ]
+    }
+  }
+}

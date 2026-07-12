@@ -1,0 +1,106 @@
+{
+  "name": "Display Format Generator",
+  "scopeName": "source.dfg",
+  "patterns": [
+    { "include": "#change-history-comment" },
+    { "include": "#comment-line" },
+    { "include": "#command-assignment" },
+    { "include": "#command-line" },
+    { "include": "#trailing-sequence" }
+  ],
+  "repository": {
+    "change-history-comment": {
+      "name": "comment.line.change-history.dfg",
+      "match": "^(\\s*\\*@)(.*?)(\\s*,?\\s*)([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.dfg" },
+        "2": {
+          "name": "comment.line.metadata.dfg",
+          "patterns": [
+            { "name": "storage.type.cr.dfg", "match": "\\b(CR|PCR|DR|DSSP)[0-9A-Z]+\\b" },
+            { "name": "comment.line.metadata.oi-version.dfg", "match": "\\bOI[0-9]+\\.[0-9]+\\b" },
+            { "name": "comment.line.metadata.action.dfg", "match": "\\b(ADD|CHANGE|DELETE)\\s*=\\s*(\\([^)]*\\)|[^,;\\s]+)" }
+          ]
+        },
+        "3": { "name": "comment.line.dfg" },
+        "4": { "name": "comment.line.sequence-number.dfg" },
+        "5": { "name": "entity.name.tag.revision.dfg" }
+      }
+    },
+    "comment-line": {
+      "name": "comment.line.dfg",
+      "match": "^(\\s*\\*)(.*?)(\\s*,?\\s*)([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.dfg" },
+        "2": { "name": "comment.line.dfg" },
+        "3": { "name": "comment.line.dfg" },
+        "4": { "name": "comment.line.sequence-number.dfg" },
+        "5": { "name": "entity.name.tag.revision.dfg" }
+      }
+    },
+    "command-assignment": {
+      "name": "meta.command.assignment.dfg",
+      "begin": "^\\s*([A-Z][A-Z0-9_]*)(\\s*=)",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.command.dfg" },
+        "2": { "name": "keyword.operator.assignment.dfg" }
+      },
+      "end": "(?=\\s*(?:,)?\\s*([0-9]{6})([A-Z]{2})\\s*$)|$",
+      "patterns": [
+        { "include": "#inline-comment" },
+        { "include": "#property-assignment" },
+        { "include": "#hal-content" },
+        { "name": "punctuation.separator.comma.dfg", "match": "," }
+      ]
+    },
+    "command-line": {
+      "name": "meta.command.statement.dfg",
+      "begin": "^\\s*([A-Z][A-Z0-9_]*)\\b",
+      "beginCaptures": {
+        "1": { "name": "keyword.control.command.dfg" }
+      },
+      "end": "(?=\\s*(?:,)?\\s*([0-9]{6})([A-Z]{2})\\s*$)|$",
+      "patterns": [
+        { "include": "#inline-comment" },
+        { "include": "#property-assignment" },
+        { "include": "#hal-content" },
+        { "name": "punctuation.separator.comma.dfg", "match": "," }
+      ]
+    },
+    "property-assignment": {
+      "patterns": [
+        {
+          "match": "\\b([A-Z][A-Z0-9_]*)\\s*(=)",
+          "captures": {
+            "1": { "name": "support.type.property-name.dfg" },
+            "2": { "name": "keyword.operator.assignment.dfg" }
+          }
+        }
+      ]
+    },
+    "inline-comment": {
+      "name": "comment.line.inline.dfg",
+      "match": "\\*/[^\\r\\n]*"
+    },
+    "trailing-sequence": {
+      "match": "\\s*([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "comment.line.sequence-number.dfg" },
+        "2": { "name": "entity.name.tag.revision.dfg" }
+      }
+    },
+    "hal-content": {
+      "patterns": [
+        { "include": "source.hals#subscript-group" },
+        { "include": "source.hals#macro-call" },
+        { "include": "source.hals#bit-string-literal" },
+        { "include": "source.hals#strings" },
+        { "include": "source.hals#numbers" },
+        { "include": "source.hals#keywords" },
+        { "include": "source.hals#builtins" },
+        { "include": "source.hals#operators" },
+        { "name": "variable.other.symbol.dfg", "match": "\\b[A-Z_][A-Z0-9_]*\\b" }
+      ]
+    }
+  }
+}

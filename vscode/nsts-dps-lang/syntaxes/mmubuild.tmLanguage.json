@@ -1,0 +1,169 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "MMU Build",
+  "scopeName": "source.mmubuild",
+  "patterns": [
+    { "include": "#change-history-comment" },
+    { "include": "#section-comment" },
+    { "include": "#full-line-comment" },
+    { "include": "#directive-with-label" },
+    { "include": "#directive-no-label" },
+    { "include": "#continuation-line" },
+    { "include": "#simple-trailer" }
+  ],
+  "repository": {
+    "change-history-comment": {
+      "name": "comment.line.change-history.mmubuild",
+      "match": "^(\\*@)([^;]*)(;)?(.*)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.mmubuild" },
+        "2": { 
+          "name": "comment.line.metadata.mmubuild",
+          "patterns": [
+            {
+              "name": "storage.type.cr.mmubuild",
+              "match": "(CR|PCR|DR)[=]?[0-9A-Z]+"
+            },
+            {
+              "name": "comment.line.metadata.oi-version.mmubuild",
+              "match": "OI[0-9]+\\.[0-9]+"
+            },
+            {
+              "name": "comment.line.metadata.action.mmubuild",
+              "match": "\\b[ACD]=\\([^)]+\\)|\\b[ACDR]=\\d+"
+            }
+          ]
+        },
+        "3": { "name": "punctuation.separator.mmubuild" },
+        "4": { 
+          "name": "comment.line.description.mmubuild",
+          "patterns": [
+            { "include": "#any-trailer" }
+          ]
+        }
+      }
+    },
+    "section-comment": {
+      "name": "comment.block.section.mmubuild",
+      "match": "^(\\*{2,})(.*)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.mmubuild" },
+        "2": { 
+          "name": "comment.block.section.mmubuild",
+          "patterns": [
+            { "include": "#any-trailer" }
+          ]
+        }
+      }
+    },
+    "full-line-comment": {
+      "name": "comment.line.mmubuild",
+      "match": "^(\\*)(.*)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.mmubuild" },
+        "2": { 
+          "name": "comment.line.mmubuild",
+          "patterns": [
+            { "include": "#any-trailer" }
+          ]
+        }
+      }
+    },
+    "directive-with-label": {
+      "comment": "Directive with label: LABEL DIRECTIVE,params; [comment] trailer OR params X trailer",
+      "name": "meta.directive.mmubuild",
+      "match": "^([A-Za-z#][A-Za-z0-9#$@_]*)\\s+(ALLOC|ALOCDESC|DIRECTRY|DATA|PHASE|COPY|DATASET|SYSTEM|DMMD)\\s*,(.+?)(;.*|X\\s+)([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "entity.name.type.label.mmubuild" },
+        "2": { "name": "keyword.control.directive.mmubuild" },
+        "3": {
+          "patterns": [
+            { "include": "#parameters" }
+          ]
+        },
+        "4": { "name": "comment.line.inline.mmubuild" },
+        "5": { "name": "comment.line.sequence-number.mmubuild" },
+        "6": { "name": "entity.name.tag.revision.mmubuild" }
+      }
+    },
+    "directive-no-label": {
+      "comment": "Directive without label: DIRECTIVE,params; [comment] trailer OR params X trailer",
+      "name": "meta.directive.mmubuild",
+      "match": "^\\s+(BUILD|IPL|LOADMOD)\\s*[,;](.*?)(;.*|X\\s+)([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.directive.mmubuild" },
+        "2": {
+          "patterns": [
+            { "include": "#parameters" }
+          ]
+        },
+        "3": { "name": "comment.line.inline.mmubuild" },
+        "4": { "name": "comment.line.sequence-number.mmubuild" },
+        "5": { "name": "entity.name.tag.revision.mmubuild" }
+      }
+    },
+    "continuation-line": {
+      "comment": "Continuation line: starts with space, ends with ; [comment] trailer OR X trailer",
+      "name": "meta.continuation.mmubuild",
+      "match": "^ (.+?)(;.*|X\\s+)([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": {
+          "patterns": [
+            { "include": "#parameters" }
+          ]
+        },
+        "2": { "name": "comment.line.inline.mmubuild" },
+        "3": { "name": "comment.line.sequence-number.mmubuild" },
+        "4": { "name": "entity.name.tag.revision.mmubuild" }
+      }
+    },
+    "simple-trailer": {
+      "comment": "Card trailer: sequence number + revision",
+      "match": "\\s+([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "comment.line.sequence-number.mmubuild" },
+        "2": { "name": "entity.name.tag.revision.mmubuild" }
+      }
+    },
+    "any-trailer": {
+      "comment": "Match trailer with optional *** prefix",
+      "match": "(\\*{3})?\\s*([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "comment.line.mmubuild" },
+        "2": { "name": "comment.line.sequence-number.mmubuild" },
+        "3": { "name": "entity.name.tag.revision.mmubuild" }
+      }
+    },
+    "parameters": {
+      "patterns": [
+        {
+          "name": "string.quoted.single.mmubuild",
+          "match": "'[^']+'"
+        },
+        {
+          "match": "(ADDR|BLKS|INIT|SYSID|SUBSYS|PH|MMDIR|MEMBER|PHASE|MC|IPL|GPF|TFL|MOVE|LBLN|LBNO|SIZE|ENTRIES|DMMD|ENTRY|HDATA|PHTAB|LOADBLK|DDNAME|CHKSUM|NUMCOPY|HWDS|CSECT|OFFSET|ID|FMTS|PN|LNG|RPL)(=)",
+          "captures": {
+            "1": { "name": "support.type.property-name.mmubuild" },
+            "2": { "name": "keyword.operator.assignment.mmubuild" }
+          }
+        },
+        {
+          "name": "constant.numeric.hex.mmubuild",
+          "match": "\\b[0-9A-Fa-f]{4,5}\\b"
+        },
+        {
+          "name": "constant.numeric.decimal.mmubuild",
+          "match": "\\b[0-9]+\\b"
+        },
+        {
+          "name": "constant.language.boolean.mmubuild",
+          "match": "\\b(YES|NO|Y|N|NONE)\\b"
+        },
+        {
+          "name": "constant.other.identifier.mmubuild",
+          "match": "#?[A-Z][A-Z0-9]*"
+        }
+      ]
+    }
+  }
+}

@@ -22,7 +22,7 @@ app = typer.Typer(
 class LinkerOpts:
     # inputs / outputs
     input_files:      list[str]        = field(default_factory=list)
-    output:           str              = 'a.out.fcm'  # always set by the CLI (see link())
+    output:           str              = 'out.fcm'
     map:              Optional[str]    = None
     json_symbols:     Optional[str]    = None
     save_external_syms: Optional[str] = None

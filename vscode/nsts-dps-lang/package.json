@@ -1,0 +1,212 @@
+{
+  "name": "nsts-dps-lang",
+  "displayName": "NSTS DPS Languages",
+  "description": "Language support for Space Shuttle flight software: AP-101 assembly, HAL/S and various input data formats and preprocessors",
+  "version": "0.1.0",
+  "publisher": "nsts",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ColanderCombo/nsts-sdl-dps.git"
+  },
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "keywords": [
+    "ap-101",
+    "hal/s"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "hals",
+        "aliases": ["HAL/S", "HALS", "HAL-S", "hal/s"],
+        "extensions": [".hal", ".hals"],
+        "filenamePatterns": ["**/SSSRC/CDAP02","**/APPLSRC/*", "**/INCL80/*"],
+        "configuration": "./language-configuration/hals.json"
+      },
+      {
+        "id": "dfg",
+        "aliases": ["DFG", "Display Format Generator", "display format generator"],
+        "filenamePatterns": ["**/SSSRC/CD*", "**/APPLSRC/CG[0-9]*"],
+        "configuration": "./language-configuration/hals.json"
+      },
+      {
+        "id": "ap101asm",
+        "aliases": ["AP-101S Assembler", "ap101asm", "IBM Assembler (AP-101S)"],
+        "filenamePatterns": ["**/MLIB80/*", "**/SSSRC/*"],
+        "firstLine": "^[A-Z@#$_][A-Z0-9@#$_]*\\s+|^\\*",
+        "configuration": "./language-configuration/ap101asm.json"
+      },
+      {
+        "id": "concard",
+        "aliases": ["CONCARD", "concard", "IBM Link Editor Control Cards"],
+        "filenamePatterns": ["**/CON80/*", "**/CONCARDS/*"],
+        "firstLine": "^\\*(@|\\s|\\*|P|$|  )",
+        "configuration": "./language-configuration/concard.json"
+      },
+      {
+        "id": "mmubuild",
+        "aliases": ["MMU Build", "mmubuild", "MMU Build Cards"],
+        "filenamePatterns": ["**/CON80/MM*"],
+        "firstLine": "^\\*(@|\\s|\\*|P|$|  )",
+        "configuration": "./language-configuration/concard.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "hals",
+        "scopeName": "source.hals",
+        "path": "./syntaxes/hals.tmLanguage.json"
+      },
+      {
+        "language": "dfg",
+        "scopeName": "source.dfg",
+        "path": "./syntaxes/dfg.tmLanguage.json"
+      },
+      {
+        "language": "ap101asm",
+        "scopeName": "source.ap101asm",
+        "path": "./syntaxes/ap101asm.tmLanguage.json"
+      },
+      {
+        "language": "concard",
+        "scopeName": "source.concard",
+        "path": "./syntaxes/concard.tmLanguage.json"
+      },
+      {
+        "language": "mmubuild",
+        "scopeName": "source.mmubuild",
+        "path": "./syntaxes/mmubuild.tmLanguage.json"
+      }
+    ],
+    "themes": [
+      {
+        "label": "AP-101 Assembler Colors (inject into current theme)",
+        "uiTheme": "vs-dark",
+        "path": "./themes/ap101asm-colors.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "hals.restartServer",
+        "title": "HAL/S: Restart Language Server"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "NSTS DPS Languages",
+      "properties": {
+        "hals.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the Python 3 interpreter for the HAL/S LSP server. Leave empty to auto-detect (python3 / python, or py on Windows)."
+        },
+        "hals.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to hals_lsp_server.py (leave empty to use the bundled server)"
+        },
+        "hals.trace.server": {
+          "type": "string",
+          "enum": ["off", "messages", "verbose"],
+          "default": "off",
+          "description": "Trace communication between VS Code and the HAL/S language server"
+        },
+        "hals.definition.enableWorkspaceIndex": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable workspace/OI definition index used for INCLUDE member navigation and cross-file symbol lookup"
+        },
+        "hals.definition.searchSubdirs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["SSSRC", "APPLSRC", "INCL80"],
+          "description": "Subdirectories under an OI root to scan for INCLUDE member files and symbol definitions"
+        },
+        "hals.legacyCharDecorations.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "HAL/S: simulate EBCDIC: render ~ as ¬ and ` as ¢)" 
+        },
+        "hals.legacyCharDecorations.notSymbol": {
+          "type": "string",
+          "default": "¬",
+          "description": "Symbol shown for ~ when EBCDIC decorations are enabled"
+        },
+        "hals.legacyCharDecorations.centSymbol": {
+          "type": "string",
+          "default": "¢",
+          "description": "Symbol shown for ` when EBCDIC decorations are enabled"
+        },
+        "ap101asm.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to an external AP-101S assembler LSP binary (e.g. the OCaml HLASM server with diagnostics). Leave empty to use the bundled pure-Python browse server (outline, go-to-definition, references, COPY/macro navigation)."
+        },
+        "ap101asm.macroLibraries": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Paths to directories containing AP-101S macro definitions (.mac files). Used only by an external serverPath binary."
+        },
+        "ap101asm.definition.enableWorkspaceIndex": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the cross-file workspace index used for COPY-member navigation and global-symbol (CSECT/ENTRY/macro) go-to-definition and references."
+        },
+        "ap101asm.definition.searchSubdirs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["SSSRC", "MLIB80", "APPLSRC", "INCL80"],
+          "description": "Subdirectories under an OI root to scan for COPY members and global symbol definitions."
+        }
+      }
+    },
+    "configurationDefaults": {
+      "editor.tokenColorCustomizations": {
+        "textMateRules": [
+          { "scope": "meta.directive.ap101asm", "settings": { "foreground": "#f85149", "fontStyle": "" } },
+          { "scope": "meta.instruction.cpu.ap101asm", "settings": { "foreground": "#5fb3ff", "fontStyle": "bold" } },
+          { "scope": "meta.instruction.msc.ap101asm", "settings": { "foreground": "#ff79c6", "fontStyle": "bold" } },
+          { "scope": "meta.instruction.bce.ap101asm", "settings": { "foreground": "#2ee6a5", "fontStyle": "bold" } },
+          { "scope": "meta.macro.pass.ap101asm", "settings": { "foreground": "#9cdcfe", "fontStyle": "" } },
+          { "scope": "meta.macro.fcos.ap101asm", "settings": { "foreground": "#ce9178", "fontStyle": "" } },
+          { "scope": "meta.macro.structured.ap101asm", "settings": { "foreground": "#c586c0", "fontStyle": "" } },
+          { "scope": "comment.line.metadata.ap101asm", "settings": { "foreground": "#6a737d", "fontStyle": "" } },
+          { "scope": "storage.type.cr.ap101asm", "settings": { "foreground": "#8b949e", "fontStyle": "" } },
+          { "scope": "comment.line.sequence-number.ap101asm", "settings": { "foreground": "#484f58", "fontStyle": "" } },
+          { "scope": "entity.name.tag.revision.ap101asm", "settings": { "foreground": "#7d8590", "fontStyle": "bold" } },
+          { "scope": "comment.line.metadata.concard", "settings": { "foreground": "#6a737d", "fontStyle": "" } },
+          { "scope": "comment.line.metadata.oi-version.concard", "settings": { "foreground": "#6a737d", "fontStyle": "" } },
+          { "scope": "comment.line.metadata.action.concard", "settings": { "foreground": "#6a737d", "fontStyle": "" } },
+          { "scope": "storage.type.cr.concard", "settings": { "foreground": "#8b949e", "fontStyle": "" } },
+          { "scope": "comment.line.sequence-number.concard", "settings": { "foreground": "#484f58", "fontStyle": "" } },
+          { "scope": "comment.line.card-member.concard", "settings": { "foreground": "#484f58", "fontStyle": "" } },
+          { "scope": "entity.name.tag.revision.concard", "settings": { "foreground": "#7d8590", "fontStyle": "bold" } },
+          { "scope": "comment.line.metadata.mmubuild", "settings": { "foreground": "#6a737d", "fontStyle": "" } },
+          { "scope": "comment.line.sequence-number.mmubuild", "settings": { "foreground": "#484f58", "fontStyle": "" } },
+          { "scope": "entity.name.tag.revision.mmubuild", "settings": { "foreground": "#7d8590", "fontStyle": "bold" } }
+        ]
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.82.0",
+    "typescript": "^5.0.0"
+  }
+}

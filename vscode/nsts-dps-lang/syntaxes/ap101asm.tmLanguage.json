@@ -1,0 +1,245 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "AP-101 Assembler",
+  "scopeName": "source.ap101asm",
+  "patterns": [
+    { "include": "#change-history-comment" },
+    { "include": "#full-line-comment" },
+    { "include": "#continued-statement" },
+    { "include": "#final-continuation" },
+    { "include": "#statement-line" },
+    { "include": "#fallback-line" }
+  ],
+  "repository": {
+    "change-history-comment": {
+      "comment": "Change history comment starting with *@",
+      "name": "comment.line.change-history.ap101asm",
+      "match": "^(\\*@)(.{0,70})([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.ap101asm" },
+        "2": { 
+          "name": "comment.line.metadata.ap101asm",
+          "patterns": [
+            {
+              "name": "storage.type.cr.ap101asm",
+              "match": "(CR|PCR|DR)[=]?[0-9A-Z]+"
+            },
+            {
+              "name": "comment.line.metadata.oi-version.ap101asm",
+              "match": "OI[0-9]+\\.[0-9]+"
+            },
+            {
+              "name": "comment.line.metadata.action.ap101asm",
+              "match": "\\b[ACD]=\\([^)]+\\)|\\b[ACDR]=\\d+"
+            }
+          ]
+        },
+        "3": { "name": "comment.line.sequence-number.ap101asm" },
+        "4": { "name": "entity.name.tag.revision.ap101asm" }
+      }
+    },
+    "full-line-comment": {
+      "comment": "Full line comment starting with *",
+      "name": "comment.line.ap101asm",
+      "match": "^(\\*+)(.*)([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.ap101asm" },
+        "2": { "name": "comment.line.ap101asm" },
+        "3": { "name": "comment.line.sequence-number.ap101asm" },
+        "4": { "name": "entity.name.tag.revision.ap101asm" }
+      }
+    },
+    "continued-statement": {
+      "comment": "Statement line with continuation marker (non-space before trailer)",
+      "match": "^([^*].{0,70})(\\S)([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { 
+          "patterns": [
+            { "include": "#line-content" }
+          ]
+        },
+        "2": { "name": "keyword.operator.continuation.ap101asm" },
+        "3": { "name": "comment.line.sequence-number.ap101asm" },
+        "4": { "name": "entity.name.tag.revision.ap101asm" }
+      }
+    },
+    "final-continuation": {
+      "comment": "Continuation line ending statement (space before trailer)",
+      "match": "^( {15,})(.{0,56})\\s([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "meta.whitespace.ap101asm" },
+        "2": { "name": "comment.line.inline.ap101asm" },
+        "3": { "name": "comment.line.sequence-number.ap101asm" },
+        "4": { "name": "entity.name.tag.revision.ap101asm" }
+      }
+    },
+    "statement-line": {
+      "comment": "Normal statement line. Name and operation fields allow a leading & for macro variable symbols (e.g. '&LHS  &OP  ...').",
+      "match": "^([&A-Z@#$\\.][A-Z0-9@#$_]*)?(\\s+)(&?[A-Z@#$][A-Z0-9@#$_]*)(\\s+)?((?:'[^']*'|[^ ])+)?(.*)\\s([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { "name": "entity.name.function.label.ap101asm" },
+        "2": { "name": "meta.whitespace.ap101asm" },
+        "3": { 
+          "patterns": [
+            { "include": "#opcodes" }
+          ]
+        },
+        "4": { "name": "meta.whitespace.ap101asm" },
+        "5": { 
+          "patterns": [
+            { "include": "#operands" }
+          ]
+        },
+        "6": { "name": "comment.line.inline.ap101asm" },
+        "7": { "name": "comment.line.sequence-number.ap101asm" },
+        "8": { "name": "entity.name.tag.revision.ap101asm" }
+      }
+    },
+    "fallback-line": {
+      "comment": "Catch-all for lines with trailer",
+      "match": "^(.*)([0-9]{6})([A-Z]{2})\\s*$",
+      "captures": {
+        "1": { 
+          "patterns": [
+            { "include": "#line-content" }
+          ]
+        },
+        "2": { "name": "comment.line.sequence-number.ap101asm" },
+        "3": { "name": "entity.name.tag.revision.ap101asm" }
+      }
+    },
+    "line-content": {
+      "patterns": [
+        { "include": "#label-start" },
+        { "include": "#opcodes" },
+        { "include": "#operands" },
+        { "include": "#inline-comment-text" }
+      ]
+    },
+    "label-start": {
+      "match": "^([A-Z@#$\\.][A-Z0-9@#$_]*)",
+      "captures": {
+        "1": { "name": "entity.name.function.label.ap101asm" }
+      }
+    },
+    "inline-comment-text": {
+      "comment": "Trailing comment after the operand: 2+ spaces preceded by non-space content (so leading indentation is never treated as a comment).",
+      "match": "(?<=\\S)\\s{2,}([^']+)$",
+      "captures": {
+        "1": { "name": "comment.line.inline.ap101asm" }
+      }
+    },
+    "opcodes": {
+      "patterns": [
+        { "include": "#pass-macros" },
+        { "include": "#fcos-macros" },
+        { "include": "#directives" },
+        { "include": "#cpu-instructions" },
+        { "include": "#msc-instructions" },
+        { "include": "#bce-instructions" },
+        { "include": "#structured-macros" }
+      ]
+    },
+    "operands": {
+      "patterns": [
+        { "include": "#strings" },
+        { "include": "#macro-variable" },
+        { "include": "#registers" },
+        { "include": "#dc-constants" },
+        { "include": "#numbers" }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.single.ap101asm",
+      "match": "'[^']*'"
+    },
+    "macro-variable": {
+      "match": "&[A-Za-z@#$][A-Za-z0-9@#$_]*",
+      "name": "variable.other.macro.ap101asm"
+    },
+    "registers": {
+      "match": "\\bR(1[0-5]|[0-9])\\b",
+      "name": "variable.language.register.ap101asm"
+    },
+    "dc-constants": {
+      "comment": "DC/DS constants: X H F E D C B A Y S P Z V Q with optional repeat count and length modifier",
+      "patterns": [
+        {
+          "comment": "Hex constant X'...'",
+          "match": "([0-9]*)X'[0-9A-Fa-f]+'",
+          "name": "constant.numeric.hex.ap101asm"
+        },
+        {
+          "comment": "Binary constant with length BL.n'...'",
+          "match": "([0-9]*)BL\\.[0-9]+'[01&A-Za-z]+'",
+          "name": "constant.numeric.binary.ap101asm"
+        },
+        {
+          "comment": "Address/length constant AL.n(...) or AL.n'...'",
+          "match": "([0-9]*)AL\\.[0-9]+('[^']*'|\\([^)]+\\))",
+          "name": "constant.numeric.address.ap101asm"
+        },
+        {
+          "comment": "Floating point E'...' or D'...' with optional repeat",
+          "match": "([0-9]*)[ED]'[^']+'",
+          "name": "constant.numeric.float.ap101asm"
+        },
+        {
+          "comment": "Fixed point F'...' or H'...' with optional repeat",
+          "match": "([0-9]*)[FH]'[^']+'",
+          "name": "constant.numeric.fixed.ap101asm"
+        },
+        {
+          "comment": "Character constant C'...'",
+          "match": "([0-9]*)C'[^']*'",
+          "name": "string.quoted.single.character.ap101asm"
+        },
+        {
+          "comment": "Address constant Y(...) A(...) V(...) S(...) Q(...)",
+          "match": "([0-9]*)[YAVSQ]\\([^)]+\\)",
+          "name": "constant.numeric.address.ap101asm"
+        },
+        {
+          "comment": "Packed/Zoned decimal P'...' Z'...'",
+          "match": "([0-9]*)[PZ]'[^']+'",
+          "name": "constant.numeric.decimal.ap101asm"
+        }
+      ]
+    },
+    "numbers": {
+      "match": "\\b[0-9]+\\b",
+      "name": "constant.numeric.decimal.ap101asm"
+    },
+    "directives": {
+      "match": "(?<=\\s)(CSECT|DSECT|RSECT|COM|DC|DS|EQU|USING|DROP|ENTRY|EXTRN|WXTRN|LTORG|ORG|END|COPY|PRINT|TITLE|SPACE|EJECT|MACRO|MEND|MEXIT|MNOTE|ANOP|ACTR|AGO|AIF|GBLA|GBLB|GBLC|LCLA|LCLB|LCLC|SETA|SETB|SETC|AMODE|RMODE|OPSYN|PUSH|POP|CCW|CCW0|CCW1|CNOP|CXD|DXD|LOCTR|AREAD|REPRO)(?=\\s|,|$)",
+      "name": "meta.directive.ap101asm"
+    },
+    "pass-macros": {
+      "match": "(?<=\\s)(PROGRAM|RETURN|EXECUTE|CALLSUB|ERRTN|REGSAVE|REGLOAD|COMPOOL|INCLUDE|SYSCTL|SVCREQ|MONITOR|SYSTRACE|SETPRINT|CALL)(?=\\s|,|$)",
+      "name": "meta.macro.pass.ap101asm"
+    },
+    "fcos-macros": {
+      "match": "(?<=\\s)(GETMAIN|FREEMAIN|WAIT|POST|ENQ|DEQ|ABEND|SNAP|WTO|WTOR|OPEN|CLOSE|GET|PUT|READ|WRITE|CHECK|DCB|DCBE|SYNAD|EODAD|ATTACH|DETACH|STIMER|TTIMER|TIME|STAE|ESTAE|SPIE|ESPIE)(?=\\s|,|$)",
+      "name": "meta.macro.fcos.ap101asm"
+    },
+    "structured-macros": {
+      "match": "(?<=\\s)(IF|ELSE|ELSEIF|ENDIF|DO|ENDDO|WHILE|UNTIL|LEAVE|ITERATE|SELECT|WHEN|ENDSEL|CASE|ENDCASE|INF)(?=\\s|,|\\(|$)",
+      "name": "meta.macro.structured.ap101asm"
+    },
+    "cpu-instructions": {
+      "comment": "AP-101 CPU instructions from cpu_instr.coffee. Modifiers: @ indirect, # index, $ long format",
+      "match": "(?<=\\s)(PC|AR|A|AH|AHI|AST|CR|C|CBL|CH|CHI|CIST|DR|D|XUL|IAL|IHL|LR|L|LA|LHI|LCR|LFXI|LH|LM|LXA|MSTH|MR|M|MH|MHI|MIH|ST|STH|STM|SR|S|SST|SH|SHI|TD|BALR|BAL|BIX|BCR|BC|BCB|BCRE|BCF|BCTR|BCT|BCTB|BVCR|BVC|BVCF|NCT|SLL|SLDL|SRA|SRDA|SRDL|SRL|SRR|SRDR|NR|N|NHI|NIST|NST|XR|X|XHI|XIST|XST|OR|O|OHI|OST|SUM|SB|SHW|TB|TRB|TH|ZB|ZRB|ZH|AEDR|AED|AER|AE|CER|CE|CEDR|CED|CVFX|CVFL|DEDR|DED|DER|DE|LED|LER|LE|LECR|LFXR|LFLI|LFLR|MVS|MEDR|MED|MER|ME|SEDR|SED|SER|SE|STED|STE|DIAG|ISPB|LPS|MVH|SPM|SSM|SCAL|SRET|SVC|ICR)[@#$]*(?=\\s|,|$)",
+      "name": "meta.instruction.cpu.ap101asm"
+    },
+    "msc-instructions": {
+      "comment": "AP-101 MSC (Master Sequence Controller) instructions from iop_msc_instr.coffee",
+      "match": "(?<=\\s)(@L|@A|@N|@X|@ST|@LF|@LH|@STF|@STH|@BC|@BXC|@BU@|@BU|@CALL@|@CALL|@REC|@TSZ|@CI|@C|@TMI|@TM|@LBB@|@LBB|@LBP@|@LBP|@LAR|@SFD|@RFD|@LMS|@SIO|@XAX|@SEC|@RBI|@NIX|@TAX|@TXI|@LXI|@TXA|@TI|@SAI|@LI|@RAI|@RAW|@RNI|@RNW|@WAT|@DLY|@INT|@STP|@CNOP)(?=\\s|,|$)",
+      "name": "meta.instruction.msc.ap101asm"
+    },
+    "bce-instructions": {
+      "comment": "AP-101 BCE (Bus Control Element) instructions from iop_bce_instr.coffee",
+      "match": "(?<=\\s)(#LTOI|#LTO|#RIB|#SIB|#SSC|#SST|#LBR@|#LBR|#BU@|#BU|#WIX|#CMDI|#CMD|#TDS|#TDLI|#TDL|#MOUT@|#MOUTC|#MOUT|#RDS|#RDLI|#RDL|#MIN@|#MINC|#MIN|#DLYI|#DLY|#WAT|#STP)(?=\\s|,|$)",
+      "name": "meta.instruction.bce.ap101asm"
+    }
+  }
+}

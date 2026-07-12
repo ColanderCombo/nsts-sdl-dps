@@ -1,0 +1,21 @@
+# Source & build inputs — only the compiled out/ ships.
+src/**
+tsconfig.json
+**/*.ts
+**/*.map
+
+# Python servers: ship the runtime modules, drop dev/test scaffolding.
+server/__pycache__/**
+server/profile_lsp.py
+server/test_parser_positions.py
+server/test_ap101asm_lsp.py
+
+# Repo / tooling cruft.
+.gitignore
+.vscode/**
+.vscode-test/**
+**/.DS_Store
+node_modules/.bin/**
+
+# Keep: README.md, LICENSE*, THIRD-PARTY.md (license attribution for the
+# vendored HAL/S server) — required for redistribution.

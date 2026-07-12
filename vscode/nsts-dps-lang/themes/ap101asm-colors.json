@@ -1,0 +1,130 @@
+{
+  "name": "AP-101S Assembler Colors",
+  "type": "dark",
+  "colors": {},
+  "tokenColors": [
+    {
+      "name": "Assembler Directives",
+      "scope": "meta.directive.ap101asm",
+      "settings": {
+        "foreground": "#F85149"
+      }
+    },
+    {
+      "name": "CPU Instructions",
+      "scope": "meta.instruction.cpu.ap101asm",
+      "settings": {
+        "foreground": "#5FB3FF",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "MSC Instructions",
+      "scope": "meta.instruction.msc.ap101asm",
+      "settings": {
+        "foreground": "#FF79C6",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "BCE Instructions",
+      "scope": "meta.instruction.bce.ap101asm",
+      "settings": {
+        "foreground": "#2EE6A5",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "PASS Macros",
+      "scope": "meta.macro.pass.ap101asm",
+      "settings": {
+        "foreground": "#9CDCFE"
+      }
+    },
+    {
+      "name": "FCOS Macros",
+      "scope": "meta.macro.fcos.ap101asm",
+      "settings": {
+        "foreground": "#CE9178"
+      }
+    },
+    {
+      "name": "Structured Macros",
+      "scope": "meta.macro.structured.ap101asm",
+      "settings": {
+        "foreground": "#FF79C6"
+      }
+    },
+    {
+      "name": "Labels",
+      "scope": "entity.name.function.label.ap101asm",
+      "settings": {
+        "foreground": "#4FC1FF"
+      }
+    },
+    {
+      "name": "Registers",
+      "scope": "variable.language.register.ap101asm",
+      "settings": {
+        "foreground": "#9CDCFE"
+      }
+    },
+    {
+      "name": "Macro Variables",
+      "scope": "variable.other.macro.ap101asm",
+      "settings": {
+        "foreground": "#9CDCFE"
+      }
+    },
+    {
+      "name": "Strings",
+      "scope": "string.quoted.single.ap101asm",
+      "settings": {
+        "foreground": "#CE9178"
+      }
+    },
+    {
+      "name": "Hex Constants",
+      "scope": "constant.numeric.hex.ap101asm",
+      "settings": {
+        "foreground": "#B5CEA8"
+      }
+    },
+    {
+      "name": "Numbers",
+      "scope": "constant.numeric.decimal.ap101asm",
+      "settings": {
+        "foreground": "#B5CEA8"
+      }
+    },
+    {
+      "name": "Comments",
+      "scope": "comment.line.ap101asm",
+      "settings": {
+        "foreground": "#6A9955"
+      }
+    },
+    {
+      "name": "Sequence Numbers",
+      "scope": "comment.line.sequence-number.ap101asm",
+      "settings": {
+        "foreground": "#484F58"
+      }
+    },
+    {
+      "name": "Revision Tags",
+      "scope": "entity.name.tag.revision.ap101asm",
+      "settings": {
+        "foreground": "#7D8590",
+        "fontStyle": "bold"
+      }
+    },
+    {
+      "name": "Continuation Marker",
+      "scope": "keyword.operator.continuation.ap101asm",
+      "settings": {
+        "foreground": "#D4D4D4"
+      }
+    }
+  ]
+}

@@ -12,16 +12,12 @@ project(SDL
 set(SDL_INSTALL_BINDIR "${CMAKE_INSTALL_PREFIX}/bin" CACHE PATH "Binary install dir")
 set(SDL_INSTALL_LIBDIR "${CMAKE_INSTALL_PREFIX}/lib" CACHE PATH "Library install dir")
 
-# When ON, generate only the unified `gpc` wrapper and have tests invoke it
-# directly as `gpc run ...`.  When OFF (default), additionally generate
-# compatibility wrappers (gpc-batch, gpc-dbg, gpc-dump) that delegate to
-# `gpc run/debug/dump`, preserving the prior external interface.
 option(SDL_UNIFIED_GPC "Use only the unified 'gpc' command (no gpc-batch/gpc-dbg/gpc-dump aliases)" ON)
 
 # Paths to toolchain source (via symlinks into ext/virtualagc)
 set(XCOM_I_DIR "${CMAKE_SOURCE_DIR}/src/XCOM-I" CACHE PATH "Path to XCOM-I")
 set(HALSFC_SRC_DIR "${CMAKE_SOURCE_DIR}/code/PASS.REL32V0" CACHE PATH "Path to HAL/S-FC source")
-set(SDL_SRC_DIR "${CMAKE_SOURCE_DIR}/src" CACHE PATH "Path to Python package sources (asm101, lnk101, ap101Utils, tools)")
+set(SDL_SRC_DIR "${CMAKE_SOURCE_DIR}/src" CACHE PATH "Path to python toolchain sources")
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
 include(BuildHALSFC)
@@ -39,8 +35,7 @@ else()
 endif()
 
 #-----------------------------------------------------------------------------
-# Python venv via uv workspace (installs the unified 'ap101' distribution:
-# asm101, lnk101, ap101Utils, tools)
+# Python venv via uv workspace (asm101, lnk101, ap101Utils, tools)
 #-----------------------------------------------------------------------------
 set(SDL_VENV_DIR "${CMAKE_BINARY_DIR}/venv")
 set(SDL_VENV_PYTHON "${SDL_VENV_DIR}/bin/python")

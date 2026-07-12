@@ -1,10 +1,89 @@
 {
     "folders": [
         {
+            "name": "sdl",
             "path": ".."
         },
         {
+            "name": "nsts",
             "path": "../../../../spec/nsts"
+        },
+        {
+            "name": "pass",
+            "path": "../../pass"
+        },
+        {
+            "name": "libibmhexfp",
+            "path": "../../../../../../../../../../proj/libibmhexfp"
         }
     ],
+    "settings": {
+        "workbench.colorTheme": "Brogrammer Plus",
+        "workbench.iconTheme": "material-icon-theme",
+        "files.associations": {
+            "**/*.COBOL*{,/*}": "cobol",
+            "**/*.COB*{,/*}": "cobol",
+            "**/*.COBCOPY*{,/*}": "cobol",
+            "**/*.COPYBOOK*{,/*}": "cobol",
+            "**/*.COPY*{,/*}": "cobol",
+            "**/*.PL1*{,/*}": "pl1",
+            "**/*.PLI*{,/*}": "pl1",
+            "**/*.INC*{,/*}": "pl1",
+            "**/*.INCLUDE*{,/*}": "pl1",
+            "**/*.JCL*{,/*}": "jcl",
+            "**/*.CNTL*{,/*}": "jcl",
+            "**/*.PROC*{,/*}": "jcl",
+            "**/*.ASM*{,/*}": "ap101asm",
+            "**/*.ASSEMBLE*{,/*}": "ap101asm",
+            "**/*.ap101asm*{,/*}": "ap101asm",
+            "**/*.HLA*{,/*}": "ap101asm",
+            "**/*.MACLIB*{,/*}": "ap101asm",
+            "**/*.DBD*{,/*}": "ap101asm",
+            "**/*.MFS*{,/*}": "ap101asm",
+            "**/*.PCB*{,/*}": "ap101asm",
+            "**/*.EXEC*{,/*}": "rexx",
+            "**/*.REXX*{,/*}": "rexx",
+            "**/*.REXXINC*{,/*}": "rexx",
+            "*.rex": "rexx",
+            "**/.ap101asmplugin/proc_grps.json": "jsonc",
+            "**/.ap101asmplugin/pgm_conf.json": "jsonc",
+            "*.pdl": "pdl",
+            "*.h": "cpp",
+            "**/APPLSRC/**": "hals",
+            "**/CON80/**": "concard",
+            "**/CON80/MM*": "mmubuild",
+            "**/INCL80/**": "hals",
+            "**/MLIB80/**": "ap101asm",
+            "**/SSSRC/A**": "hals",
+            "**/SSSRC/QEDITDIR/**/CDG1**": "hals",
+            "**/SSSRC/CD0**": "dfg",
+            "**/SSSRC/CDAP02": "hals",
+            "**/SSSRC/CDA**": "dfg",
+            "**/SSSRC/C**": "hals",
+            "**/SSSRC/DC**": "ap101asm",
+            "**/SSSRC/D**": "hals",
+            "**/SSSRC/FCMCOM": "hals",
+            "**/SSSRC/FCMGPT": "hals",
+            "**/SSSRC/FIOCTR": "hals",
+            "**/SSSRC/XD0000": "hals",
+            "**/SSSRC/XD*": "dfg",
+            "**/SSSRC/**": "ap101asm"
+        },
+        "material-icon-theme.files.associations": {
+            "*.dsl": "console"
+        },
+        "material-icon-theme.languages.associations": {
+            "hals": "rocket",
+            "ap101asm": "assembly",
+            "concard": "console"
+        },
+        "material-icon-theme.hidesExplorerArrows": false
+
+    },
+    "extensions": {
+        "recommendations": [
+            "nsts.nsts-dps-lang",
+            "pkief.material-icon-theme"
+        ]
+    }
 }

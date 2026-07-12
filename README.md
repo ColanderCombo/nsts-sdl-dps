@@ -14,7 +14,7 @@ repositories:
     - HAL/S runtime library assembler source
     - HAL/S example/test/benchmark programs
     - XCOM-I XPL->C translator package
-    - Original ASM101S assembler (modified version in src/asm101)
+    - Original ASM101S assembler (heavily modified version in src/asm101)
   - nsts-sim-gpc
     - gpc-batch: AP-101 batch emulator
     - gpc-dbu: AP-101 debugger
@@ -105,14 +105,17 @@ these trees, symlinks elsewhere in the tree point into the `ext/` tree.
       - virtualagc
       - nsts-sim-gpc
     - src/: 'modern' source code
-      -  `ASM101S`: adapted version of virtualagc/ASM101S
-      - `LNK101`: AP-101 relocating linker
+      -  `asm101`: adapted version of virtualagc/ASM101S
+      - `lnk101`: AP-101 relocating linker
+      - `dfg`: Display Format Generator
+      - `ap101Utils`: modules used by asm101/lnk101/dfg
+      - `tools`: smaller scripts
       - `XCOM-I`: XPL->C translator, for compiling HALSFC
     - test/: automatic testing files
       - baselines/
       - halTests/
       - regress/
     - vscode/
-      - nsts-dps-lang/: unified VS Code extension for the DPS languages
-        (HAL/S, DFG, AP-101S assembler, CONCARD, MMU build cards, TatSu EBNF).
+      - nsts-dps-lang/: VS Code extension for:
+          HAL/S, DFG, AP-101S assembler, CONCARD, MMUBUILD
   
