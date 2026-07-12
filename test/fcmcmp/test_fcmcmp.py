@@ -19,7 +19,7 @@ FCM_UNRELOCATED = TESTDIR / "test_simple_do.unrelocated.fcm"
 
 def run_fcmcmp(*args):
     result = subprocess.run(
-        [sys.executable, "-m", "lnk101.fcmcmp", *[str(a) for a in args]],
+        [sys.executable, "-m", "tools.fcmcmp", *[str(a) for a in args]],
         capture_output=True, text=True,
     )
     return result
@@ -238,7 +238,7 @@ def test_csect_table_size_match_no_annotation(tmp_path):
 
 def test_extract_fcmcmp_diffs():
     """Test the extraction script against the issue_13 log."""
-    from lnk101.extract_fcmcmp_diffs import extract_diffs
+    from tools.extract_fcmcmp_diffs import extract_diffs
     log = (TESTDIR.parent.parent / "testCases" / "issue_13" / "log.txt")
     if not log.exists():
         import pytest
