@@ -3,7 +3,7 @@ import copy
 import logging
 import yaml
 
-from .addr import Addr
+from ap101Utils.addr import Addr
 
 log = logging.getLogger("LNK101S")
 
@@ -15,13 +15,13 @@ class LinkConfig:
     _HEX_FIELDS = frozenset({'address'})
 
     def __init__(self):
-        self.version = self.CONFIG_VERSION
-        self.imageBase = Addr(0)
-        self.entryPoint = None
-        self.sections = []
-        self.definedSymbols = []
-        self.generatedStacks = []
-        self.modules = []
+        self.version: int = self.CONFIG_VERSION
+        self.imageBase: Addr = Addr(0)
+        self.entryPoint: 'str | int | None' = None
+        self.sections: 'list[dict]' = []
+        self.definedSymbols: 'list[dict]' = []
+        self.generatedStacks: 'list[dict]' = []
+        self.modules: 'list[str]' = []
 
     @staticmethod
     def _intsToHex(entries, fields=_HEX_FIELDS):

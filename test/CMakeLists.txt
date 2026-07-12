@@ -27,7 +27,7 @@ hal_test(NAME bench11 MAX_STEPS 1000000)
 foreach(_prog bench02 bench08)
     add_test(NAME "external-syms.${_prog}"
         COMMAND "${SDL_VENV_PYTHON}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/test_external_syms.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/srcTest/lnk101/test_external_syms.py"
             "${_prog}"
             "${CMAKE_BINARY_DIR}"
             "${SDL_VENV_PYTHON}"

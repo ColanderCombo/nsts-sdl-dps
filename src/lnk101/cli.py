@@ -22,7 +22,7 @@ app = typer.Typer(
 class LinkerOpts:
     # inputs / outputs
     input_files:      list[str]        = field(default_factory=list)
-    output:           Optional[str]    = None
+    output:           str              = 'a.out.fcm'  # always set by the CLI (see link())
     map:              Optional[str]    = None
     json_symbols:     Optional[str]    = None
     save_external_syms: Optional[str] = None
@@ -32,6 +32,8 @@ class LinkerOpts:
     save_config:      Optional[str]    = None
     load_config:      Optional[str]    = None
     external_syms:    Optional[str]    = None
+    concard:          Optional[str]    = None
+    concard_root:     str              = "OFTMP"
     entry:            Optional[str]    = None
     base_address:     int              = 0
     generate_stacks:  int              = 0
@@ -71,6 +73,8 @@ def link(
     save_config: Annotated[Optional[str], typer.Option("--save-config", help="Save link configuration to .lnk file")] = None,
     load_config: Annotated[Optional[str], typer.Option("--load-config", help="Load link configuration from .lnk file")] = None,
     external_syms: Annotated[Optional[str], typer.Option("--external-syms", help="JSON file with external symbol addresses for single-module relocation")] = None,
+    concard: Annotated[Optional[str], typer.Option("--concard", help="CON80 deck directory; place csects from its BANK/OVERLAY/INSERT layout program")] = None,
+    concard_root: Annotated[str, typer.Option("--concard-root", help="Top-level CON80 card to lay out (default: OFTMP)")] = "OFTMP",
 
     # Linking options
     entry: Annotated[Optional[str], typer.Option("-e", "--entry", help="Set entry point symbol or address")] = None,
@@ -187,6 +191,8 @@ def link(
         save_config=save_config,
         load_config=load_config,
         external_syms=external_syms,
+        concard=concard,
+        concard_root=concard_root,
         entry=entry,
         base_address=int(base_address, 0),
         generate_stacks=int(generate_stacks, 0),
@@ -208,6 +214,8 @@ def link(
         error(f"Config file not found: {opts.load_config}")
     if opts.external_syms and not os.path.exists(opts.external_syms):
         error(f"External symbols file not found: {opts.external_syms}")
+    if opts.concard and not os.path.isdir(opts.concard):
+        error(f"CON80 deck directory not found: {opts.concard}")
 
     linker = Linker(opts)
     linker.loadInputFiles()

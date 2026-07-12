@@ -13,11 +13,15 @@ import sys
 import os
 import json
 from dataclasses import dataclass, field
+from typing import NamedTuple
 from pathlib import Path
 from collections import OrderedDict, defaultdict
-from .readObject101S import readObject101S, bytearrayToAscii, bytearrayToInteger
-from .addr import Addr, AddrDisp, AddressMap
-from .addrcon import AddrCon, ZCon, sector_decode
+from ap101Utils import objModule
+from ap101Utils.addr import Addr, AddrDisp, AddressMap
+from ap101Utils.addrcon import (
+    AddrCon, ZCon, sector_decode,
+    RLD_ZCON_CODE, RLD_ZCON_ADDR, RLD_ZCON_DATA, RLD_BSR_ONLY, RLD_DSR_ONLY,
+)
 from .linkconfig import LinkConfig
 
 
@@ -99,7 +103,7 @@ class Section:
     type: str = 'SD'
     address: 'AddrDisp' = field(default_factory=AddrDisp)  # LD: byte offset within owning SD
     length: 'AddrDisp' = field(default_factory=AddrDisp)
-    module: 'ObjectModule | None' = None
+    module: 'LoadModule | None' = None
     baseAddress: 'Addr | None' = None            # assigned during linking
     data: bytearray = field(default_factory=bytearray)
     ldId: int | None = None                      # LD only: ESD ID of owning SD
@@ -120,7 +124,7 @@ class External:
     name: str
     esdId: int
     weak: bool = False
-    module: 'ObjectModule | None' = None
+    module: 'LoadModule | None' = None
     resolved: bool = False
     resolvedSection: 'Section | None' = None
 
@@ -136,44 +140,36 @@ class Relocation:
     posId: int            # P pointer — ESD ID of containing section
     flags: int
     address: 'AddrDisp'   # BYTE offset within P section
-    module: 'ObjectModule | None' = None
-
-    # Derived from flags
-    sign: int = field(init=False)
-    direction: int = field(init=False)
+    module: 'LoadModule | None' = None
     length: int = field(init=False)
-    continuation: int = field(init=False)
 
     def __post_init__(self):
-        self.sign = (self.flags >> 7) & 1
-        self.direction = (self.flags >> 1) & 1
         self.length = ((self.flags >> 2) & 0x03) + 1
-        self.continuation = self.flags & 1
 
 
 @dataclass
-class ObjectModule:
+class LoadModule:
     filename: str
     name: str = ''
-    sections: dict = field(default_factory=dict)          # esdId -> Section
-    sectionsByName: dict = field(default_factory=dict)     # name -> Section
-    externals: dict = field(default_factory=dict)          # esdId -> External
-    externalsByName: dict = field(default_factory=dict)    # name -> External
-    relocations: list = field(default_factory=list)
-    entryPoint: tuple | None = None                        # (esdId, byteOffset)
+    sections: 'dict[int, Section]' = field(default_factory=dict)        # esdId -> Section
+    sectionsByName: 'dict[str, Section]' = field(default_factory=dict)  # name -> Section
+    externals: 'dict[int, External]' = field(default_factory=dict)      # esdId -> External
+    externalsByName: 'dict[str, External]' = field(default_factory=dict)  # name -> External
+    relocations: 'list[Relocation]' = field(default_factory=list)
+    entryPoint: 'tuple[int, AddrDisp] | None' = None       # (esdId, byteOffset)
     entryName: str | None = None
-    stackSizes: dict = field(default_factory=dict)         # csectName -> halfword size
+    stackSizes: dict[str, int] = field(default_factory=dict)  # csectName -> halfword size
     external: bool = False                                 # True = address-only, not in image
 
     def __post_init__(self):
         if not self.name:
             self.name = Path(self.filename).stem
 
-    def addSection(self, section):
+    def addSection(self, section: 'Section') -> None:
         self.sections[section.esdId] = section
         self.sectionsByName[section.name] = section
 
-    def addExternal(self, ext):
+    def addExternal(self, ext: 'External') -> None:
         self.externals[ext.esdId] = ext
         self.externalsByName[ext.name] = ext
 
@@ -199,134 +195,78 @@ class ObjectModule:
 
     @classmethod
     def load(cls, filename, quiet=False):
-        """Parse an object file into ObjectModule(s).
+        """Parse an object file into LoadModule(s).
         Returns (modules, errors, warnings).
         """
-        obj, symbols = readObject101S(filename)
+        objfile = objModule.ObjectFile(filename)
 
-        errors = [f"{filename}: {err}" for err in obj[-1]["errors"] if "Error" in err]
-        warnings = []
-        if not quiet:
-            for cardNum in range(obj["numLines"]):
-                for err in obj[cardNum]["errors"]:
+        errors, warnings = [], []
+        for cmod in objfile.modules:
+            for err in cmod.errors:
+                if "Error" in err:
+                    errors.append(f"{filename}: {err}")
+                elif not quiet:
                     warnings.append(f"{filename}: {err}")
 
         modules = []
-        module = None
-        moduleNum = 0
+        for cmod in objfile.modules:
+            module = cls(filename, name=cmod.name)
 
-        for cardNum in range(obj["numLines"]):
-            line = obj[cardNum]
-            typ = line["type"]
+            for e in cmod.esdEntries:
+                name = e.name.strip()
+                if e.type == objModule.EsdType.SD:
+                    length = AddrDisp(e.length or 0)
+                    module.addSection(Section(name, e.esdId, 'SD',
+                                              AddrDisp(e.address or 0), length,
+                                              module, data=bytearray(length)))
+                elif e.type == objModule.EsdType.LD:
+                    module.addSection(Section(name, e.esdId, 'LD',
+                                              AddrDisp(e.address or 0),
+                                              module=module, ldId=e.ldid or 0))
+                elif e.type in (objModule.EsdType.ER, objModule.EsdType.WX):
+                    module.addExternal(
+                        External(name, e.esdId, e.type == objModule.EsdType.WX, module))
 
-            if typ == "HDR":
-                if module is not None and module.sections:
-                    modules.append(module)
-                moduleNum += 1
-                module = cls(filename, name=f"{Path(filename).stem}#{moduleNum}")
-                continue
-
-            if typ == "ESD":
-                if module is None:
-                    moduleNum += 1
-                    module = cls(filename,
-                                 name=f"{Path(filename).stem}#{moduleNum}" if moduleNum > 1
-                                      else Path(filename).stem)
-
-                firstEsdId = line.get("esdid", 1)
-                for i, symKey in enumerate(["symbol1", "symbol2", "symbol3"]):
-                    if (sym := line.get(symKey)) is None:
-                        continue
-
-                    symType = sym.get("type", "")
-                    name = sym.get("name", "").strip()
-                    addr = AddrDisp(sym.get("address", 0))
-                    length = AddrDisp(sym.get("length", 0))
-                    esdId = firstEsdId + i
-
-                    if symType == "SD":
-                        module.addSection(Section(name, esdId, 'SD', addr, length,
-                                                  module, data=bytearray(length)))
-                    elif symType == "LD":
-                        module.addSection(Section(name, esdId, 'LD', addr,
-                                                  module=module, ldId=sym.get("ldid", 0)))
-                    elif symType in ("ER", "WX"):
-                        module.addExternal(External(name, esdId, symType == "WX", module))
-
-            elif typ == "TXT":
-                if module is None:
-                    continue
-                esdId = line.get("esdid", 1)
-                relAddr = line.get("relativeAddress", 0)
-                size = line.get("size", 0)
-                data = line.get("data", ())
-                sect = module.sections.get(esdId)
+            by_sect = {}
+            for tr in cmod.textRecords:
+                sect = module.sections.get(tr.esdId)
                 if sect and sect.type == 'SD':
-                    for i, b in enumerate(data[:size]):
-                        if relAddr + i < len(sect.data):
-                            sect.data[relAddr + i] = b
+                    by_sect.setdefault(tr.esdId, []).append(tr)
+            for esdId, trs in by_sect.items():
+                sect = module.sections[esdId]
+                try:
+                    sect.data = objModule.scatterText(trs, size=len(sect.data))
+                except ValueError as e:
+                    raise ValueError("%s %s: %s" % (filename, sect.name, e))
 
-            elif typ == "RLD":
-                if module is None:
-                    continue
-                size = line.get("size", 0)
-                lineData = line["lineData"]
-                j = 0
-                prevRelId = prevPosId = 0
-                while j < size:
-                    rec = lineData[16+j : 16+j+8]
-                    if j > 0 and module.relocations and module.relocations[-1].continuation:
-                        flags = rec[0]
-                        addr = AddrDisp(bytearrayToInteger(rec[1:4]))
-                        log.debug(f"RLD card#{cardNum} @{16+j}: SHORT R={prevRelId} P={prevPosId} "
-                                  f"flags=0x{flags:02X} addr=0x{addr:06X}")
-                        module.relocations.append(
-                            Relocation(prevRelId, prevPosId, flags, addr, module))
-                        j += 4
-                        continue
+            for r in cmod.relocations:
+                module.relocations.append(
+                    Relocation(r.relId, r.posId, r.flags, AddrDisp(r.address), module))
 
-                    relId = bytearrayToInteger(rec[:2])
-                    posId = bytearrayToInteger(rec[2:4])
-                    flags = rec[4]
-                    addr = AddrDisp(bytearrayToInteger(rec[5:8]))
-                    log.debug(f"RLD card#{cardNum} @{16+j}: FULL R={relId} P={posId} "
-                              f"flags=0x{flags:02X} addr=0x{addr:06X} (raw: {rec[:8].hex()})")
-                    module.relocations.append(
-                        Relocation(relId, posId, flags, addr, module))
-                    prevRelId, prevPosId = relId, posId
-                    j += 8
-
-            elif typ == "END":
-                if module is None:
-                    continue
-                esdId = line.get("esdid", 0)
-                if (addr := line.get("entryAddress")) is not None:
-                    module.entryPoint = (esdId, AddrDisp(addr))
-                elif esdId > 0 and line.get("idrType") == '2':
+            if (end := cmod.end) is not None:
+                esdId = end.esdId or 0
+                if end.entryAddress is not None:
+                    module.entryPoint = (esdId, AddrDisp(end.entryAddress))
+                elif esdId > 0 and end.idrType == '2':
                     module.entryPoint = (esdId, AddrDisp(0))
-                if (name := line.get("entryName")):
-                    module.entryName = name.strip()
+                if end.entryName:
+                    module.entryName = end.entryName.strip()
 
-                if module.sections:
-                    module.synthesizeMissingExternals()
-                    modules.append(module)
-                module = None
+            if module.sections:
+                module.synthesizeMissingExternals()
+                modules.append(module)
 
-        if module is not None and module.sections:
-            module.synthesizeMissingExternals()
-            modules.append(module)
-
-        # Extract per-CSECT stack sizes from SYM STACKEND entries
-        if modules and symbols:
+        # Extract per-CSECT stack sizes from SYM STACKEND entries. 
+        allSymbols = [s for cmod in objfile.modules for s in cmod.symbols]
+        if modules and allSymbols:
             csectName = None
-            for sym in symbols:
-                name = sym.get('name')
-                if name is None:
+            for sym in allSymbols:
+                if sym.name is None:
                     continue
-                if sym.get('symbolType') == 'CONTROL':
-                    csectName = name
-                elif name == 'STACKEND' and csectName is not None:
-                    stackHW = sym.get('offsetInCSECT', 0)
+                if sym.symType == objModule.SymRefType.CONTROL:
+                    csectName = sym.name
+                elif sym.name == 'STACKEND' and csectName is not None:
+                    stackHW = sym.offsetInCSECT or 0
                     if stackHW > 0:
                         for mod in modules:
                             if csectName in mod.sectionsByName:
@@ -336,25 +276,30 @@ class ObjectModule:
         return modules, errors, warnings
 
 
+class GlobalSymbol(NamedTuple):
+    section: 'Section'
+    module: 'LoadModule'
+    address: 'Addr | None'
 
-class Linker: 
+
+class Linker:
     def __init__(self, args):
         self.args = args
         self.modules = [] 
-        self.globalSymbols = OrderedDict()  # name -> (section, module, byteAddress)
+        self.globalSymbols: 'OrderedDict[str, GlobalSymbol]' = OrderedDict()
         self.undefinedSymbols = defaultdict(set)  # name -> set of (filename, csect_or_None)
         self.stackSizes = {}
         self.generatedStacks = []
-        self.image = None
+        self.image: 'bytearray | None' = None 
         self.imageBase = Addr(args.base_address)
         self.imageSize = AddrDisp(0)
-        self.entryPoint = None
+        self.entryPoint: 'Addr | None' = None
         self.errors = []
         self.warnings = []
-        self.appliedRelocations = []    # populated by applyRelocations()
-        self.unresolvedRelocations = [] # populated by applyRelocations()
-        self.csectTable = {}            # populated by loadExternalSyms()
-        self.deadERsLogged = set()      # (filename, symName) pairs already reported
+        self.appliedRelocations = []   
+        self.unresolvedRelocations = []
+        self.csectTable = {}           
+        self.deadERsLogged = set()     
     
     def loadInputFiles(self):
         """Load all input files and explicit libraries from args."""
@@ -391,7 +336,7 @@ class Linker:
         if not os.path.exists(filename):
             return None
         log.info(f"Loading {filename}...")
-        modules, errors, warnings = ObjectModule.load(filename, quiet=self.args.quiet)
+        modules, errors, warnings = LoadModule.load(filename, quiet=self.args.quiet)
         self.errors.extend(errors)
         self.warnings.extend(warnings)
         self.modules.extend(modules)
@@ -440,15 +385,11 @@ class Linker:
     def _moduleDefinesSymbol(self, filename, symbolName):
         """Check if an object file defines the given symbol."""
         try:
-            obj, _ = readObject101S(filename)
-            for cardNum in range(obj["numLines"]):
-                line = obj[cardNum]
-                if line["type"] == "ESD":
-                    for symKey in ["symbol1", "symbol2", "symbol3"]:
-                        if sym := line.get(symKey):
-                            if sym.get("name", "").strip() == symbolName:
-                                if sym.get("type") in ("SD", "LD"):
-                                    return True
+            for cmod in objModule.ObjectFile(filename).modules:
+                for e in cmod.esdEntries:
+                    if (e.name.strip() == symbolName
+                            and e.type in (objModule.EsdType.SD, objModule.EsdType.LD)):
+                        return True
         except Exception:
             pass
         return False
@@ -466,7 +407,7 @@ class Linker:
                         f"Symbol '{name}' defined in both {existing[1].filename} "
                         f"and {module.filename}")
                 else:
-                    self.globalSymbols[name] = (section, module, None)
+                    self.globalSymbols[name] = GlobalSymbol(section, module, None)
                     detail = f"length=0x{section.length:X}" if section.type == 'SD' \
                              else f"offset=0x{section.address:X}"
                     log.debug(f"Symbol {section.type} '{name}' defined in {module.name} "
@@ -600,7 +541,7 @@ class Linker:
         for name in self.globalSymbols:
             section, module, _ = self.globalSymbols[name]
             if section.baseAddress is not None:
-                self.globalSymbols[name] = (section, module, section.baseAddress)
+                self.globalSymbols[name] = GlobalSymbol(section, module, section.baseAddress)
                 log.debug(f"Global symbol '{name}' -> addr={section.baseAddress.x}")
 
     @staticmethod
@@ -815,6 +756,40 @@ class Linker:
 
         return self._finishAddressAssignment()
 
+    def assignAddressesFromConcard(self):
+        """Assign SD section addresses from a CON80 layout"""
+        from ap101Utils import concard, conlayout
+
+        # Every SD csect name -> its module's ordered (name, size_halfwords) list.
+        module_csects: dict[str, list[tuple[str, int]]] = {}
+        section_by_name: dict[str, object] = {}
+        for module in self.modules:
+            sds = [(s.name, int(s.length) // 2)
+                   for s in module.sections.values() if s.type == 'SD']
+            for name, _ in sds:
+                module_csects.setdefault(name, sds)
+            for s in module.sections.values():
+                if s.type == 'SD':
+                    section_by_name.setdefault(s.name, s)
+
+        deck = concard.ConcardDeck(self.args.concard)
+        program = concard.layout_program(deck, self.args.concard_root)
+        placement = conlayout.LayoutEngine(module_csects).run(program)
+
+        placed = 0
+        for name, hw in placement.addresses.items():
+            s = section_by_name.get(name)
+            if s is not None and s.baseAddress is None:
+                s.baseAddress = Addr.from_hw(hw)
+                placed += 1
+        log.info(f"Placed {placed} section(s) from CON80 layout "
+                 f"(root {self.args.concard_root}); "
+                 f"{len(placement.unknown_inserts)} INSERT(s) had no loaded module")
+
+        # Auto-place anything the deck did not name, after the highest occupied
+        # address, using the sector-based rules (empty config => no overrides).
+        return self.assignAddressesFromConfig(LinkConfig())
+
     def applyRelocations(self):
         """
         Apply all relocations to generate the final image.
@@ -926,7 +901,7 @@ class Linker:
                     self.unresolvedRelocations.append({
                         "symbol": ext.name,
                         "imageOffset": int(imageOffset),
-                        "imageOffsetHW": imageOffset.hw if hasattr(imageOffset, 'hw') else int(imageOffset) // 2,
+                        "imageOffsetHW": imageOffset.hw,
                         "flags": reloc.flags,
                         "length": con.length,
                         "sign": con.sign,
@@ -944,7 +919,8 @@ class Linker:
                 #   YCON / ACON / BSR-only / DSR-only: TXT untouched.
                 if not resolved:
                     flagType = reloc.flags & 0x7F
-                    if flagType in (0x04, 0x10, 0x50) and imageOffset < len(self.image):
+                    if flagType in (RLD_ZCON_CODE, RLD_ZCON_ADDR, RLD_ZCON_DATA) \
+                            and imageOffset < len(self.image):
                         self.image[imageOffset] |= 0x80
                     continue
 
@@ -961,7 +937,8 @@ class Linker:
                 flagType = reloc.flags & 0x7F
                 sector = targetAddr.sector
 
-                if flagType in (0x04, 0x10, 0x50, 0x20, 0x40):
+                if flagType in (RLD_ZCON_CODE, RLD_ZCON_ADDR, RLD_ZCON_DATA,
+                                RLD_BSR_ONLY, RLD_DSR_ONLY):
                     # ZCON relocation: read both halfwords, apply, write back
                     if imageOffset + 3 < len(self.image):
                         zcon = ZCon.from_image(self.image, imageOffset)
@@ -973,7 +950,7 @@ class Linker:
                     self._applyRelocationValue(imageOffset, targetAddr, reloc)
 
                 # Record the applied relocation for diagnostics / JSON output.
-                if flagType not in (0x40, 0x20):  # skip sector-only
+                if flagType not in (RLD_DSR_ONLY, RLD_BSR_ONLY):  # skip sector-only
                     con = AddrCon(reloc.flags, reloc.length)
                     finalVal = int.from_bytes(
                         self.image[imageOffset:imageOffset + con.length], 'big')
@@ -990,6 +967,7 @@ class Linker:
     def _applyRelocationValue(self, imageOffset, targetAddr, reloc):
         """Apply a standard (non-sector-only) relocation to the image.
         targetAddr is an Addr. Caller handles 0x40/0x20 sector-only types."""
+        assert self.image is not None
         con = AddrCon(reloc.flags, reloc.length)
 
         existing = int.from_bytes(
@@ -1035,24 +1013,24 @@ class Linker:
 
         self.entryPoint = self.imageBase
     
-    def _getOrCreateSyntheticModule(self, filename, displayName):
+    def _getOrCreateSyntheticModule(self, filename: str,
+                                    displayName: str) -> 'LoadModule':
         """Get or create a synthetic module for generated sections."""
         for m in self.modules:
             if m.filename == filename:
                 return m
-        module = ObjectModule(filename)
+        module = LoadModule(filename)
         module.name = displayName
         self.modules.append(module)
         return module
 
-    def _addSyntheticSection(self, module, name, length, baseAddress=None):
+    def _addSyntheticSection(self, module: 'LoadModule', name: str,
+                             length: AddrDisp,
+                             baseAddress: 'Addr | None' = None) -> 'Section':
         """Add an SD section to a synthetic module. Returns the new Section."""
-        length = AddrDisp(length) if not isinstance(length, AddrDisp) else length
         nextEsdId = max((s.esdId for s in module.sections.values()), default=0) + 1
         section = Section(name, nextEsdId, 'SD', AddrDisp(0), length, module,
-                          data=bytearray(length),
-                          baseAddress=baseAddress if isinstance(baseAddress, Addr) else
-                                      Addr(baseAddress) if baseAddress is not None else None)
+                          data=bytearray(length), baseAddress=baseAddress)
         module.addSection(section)
         return section
 
@@ -1112,7 +1090,8 @@ class Linker:
                 continue
 
             module = self._getOrCreateSyntheticModule("<defined-symbols>", "<defined>")
-            self._addSyntheticSection(module, symName, 0, baseAddress=value)
+            self._addSyntheticSection(module, symName, AddrDisp(0),
+                                      baseAddress=Addr(value))
             added = True
             log.info(f"Defined symbol '{symName}' = 0x{value:06X}")
 
@@ -1303,14 +1282,18 @@ class Linker:
         #
         # Place Sections
         #
-        if self.args.load_config:
+        if self.args.concard:
+            log.info("Assigning addresses from CON80 layout...")
+            self.assignAddressesFromConcard()
+        elif self.args.load_config:
             log.info("Loading link config...")
             baseConfig = self.generateConfig(includeAddresses=False)
             overlayConfig = LinkConfig.load(self.args.load_config)
             try:
                 mergedConfig = baseConfig.merge(overlayConfig)
             except ValueError as e:
-                error(str(e))
+                error(str(e))  
+                return False
             configErrors = mergedConfig.validate()
             if configErrors:
                 for e in configErrors:
@@ -1461,8 +1444,70 @@ class Linker:
         
         log.info(f"Wrote listing to {outputPath}")
     
+    def _loadDebugSymbols(self):
+        """Load the per-module `<obj>.asmg.json` debug sidecars emitted by
+        asm101 and resolve their LOCAL labels to final linked addresses.
+        """
+        parsed = {} 
+        
+        def load(fn):
+            if fn in parsed:
+                return parsed[fn]
+            p = Path(fn).with_name(Path(fn).stem + ".asmg.json")
+            d = None
+            if p.exists():
+                try:
+                    d = json.loads(p.read_text())
+                except (OSError, ValueError) as e:
+                    self.warnings.append(f"Could not read debug symbols {p}: {e}")
+            parsed[fn] = d
+            return d
+
+        localSymbols = []
+        kindByName = {}
+        seen = set()
+        for module in self.modules:
+            if not module.filename:
+                continue
+            asmg = load(module.filename)
+            if not asmg:
+                continue
+            modName = Path(module.filename).stem
+            for sym in asmg.get("symbols", []):
+                name = sym.get("name")
+                kind = sym.get("kind")
+                if name and kind:
+                    kindByName.setdefault(name, kind)
+                # Globals already come from the linker's own ESD-based table;
+                # only fold in the locals (and only those with an address).
+                if sym.get("scope") != "local":
+                    continue
+                sectName = sym.get("section")
+                offset = sym.get("offset")
+                if sectName is None or offset is None:
+                    continue  # absolute EQU and the like -- nothing to place
+                section = module.sectionsByName.get(sectName)
+                if section is None or section.baseAddress is None:
+                    continue
+                addrHW = section.baseAddress.hw + offset  # base is hw + hw offset
+                key = (modName, name, addrHW)
+                if key in seen:
+                    continue
+                seen.add(key)
+                localSymbols.append({
+                    "name": name,
+                    "address": addrHW,
+                    "type": "local",
+                    "kind": kind,
+                    "scope": "local",
+                    "section": sectName,
+                    "module": modName,
+                })
+        return localSymbols, kindByName
+
     def saveJsonSymbols(self, outputPath):
-        # gen .sym.json, read by gpc simulator for debugging
+        # gen .sym.json
+        assert self.entryPoint is not None
         data = {
             "version": version,
             "imageSize": self.imageSize.hw,  # halfwords
@@ -1491,7 +1536,9 @@ class Linker:
         
         # Sort sections by address
         data["sections"].sort(key=lambda x: x["address"])
-        
+
+        localSymbols, kindByName = self._loadDebugSymbols()
+
         # Global symbols with resolved addresses
         for name in sorted(self.globalSymbols.keys()):
             section, module, byteAddr = self.globalSymbols[name]
@@ -1504,14 +1551,27 @@ class Linker:
                     if parent:
                         parentName = parent.name
 
+                if symType == "section":
+                    kind = "section"
+                else:  # LD entry
+                    kind = kindByName.get(name, "code")
+
                 data["symbols"].append({
                     "name": name,
                     "address": byteAddr.hw,
                     "type": symType,
+                    "kind": kind,
+                    "scope": "global",
                     "section": parentName,
                     "module": Path(module.filename).stem if module.filename else module.name
                 })
-        
+
+        # Fold in the local labels
+        globalNames = {s["name"] for s in data["symbols"]}
+        for sym in localSymbols:
+            if sym["name"] not in globalNames:
+                data["symbols"].append(sym)
+
         # Sort symbols by address
         data["symbols"].sort(key=lambda x: x["address"])
 
@@ -1649,7 +1709,3 @@ class Linker:
         
         if self.errors:
             print(f"  Errors:      {len(self.errors)}")
-
-
-if __name__ == '__main__':
-    main()

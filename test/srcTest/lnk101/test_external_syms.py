@@ -8,7 +8,7 @@
 #   3. Compares section bytes using fcmcmp
 #
 # Usage:
-#     python test_external_syms.py <program_name> <build_dir> <venv_python>
+#     python test/srcTest/lnk101/test_external_syms.py <program_name> <build_dir> <venv_python>
 #
 
 import subprocess
@@ -67,7 +67,7 @@ def main():
 
         # Compare using fcmcmp (auto-detects real modules from sym.json)
         result = subprocess.run([
-            venv_python, "-m", "lnk101.fcmcmp",
+            venv_python, "-m", "tools.fcmcmp",
             str(single_sym), str(full_fcm), str(single_fcm),
         ], capture_output=True, text=True)
         print(result.stdout, end="")
