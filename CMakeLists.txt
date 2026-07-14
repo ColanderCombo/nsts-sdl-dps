@@ -205,7 +205,13 @@ add_dependencies(gpc-pkg gpc-sim)
 #   make gpc-pkg      the simulator + electron-builder package
 #-----------------------------------------------------------------------------
 add_custom_target(world COMMENT "Build everything")
-add_dependencies(world halsfc runtime proghal bench unit regress gpc-sim)
+# proghal/bench are only created when their HAL/S source trees exist
+# (build_hal_programs skips missing directories with a warning).
+foreach(_dep halsfc runtime proghal bench unit regress gpc-sim)
+    if(TARGET ${_dep})
+        add_dependencies(world ${_dep})
+    endif()
+endforeach()
 
 #-----------------------------------------------------------------------------
 # Clean target — remove build artifacts but preserve venv and CMake state
