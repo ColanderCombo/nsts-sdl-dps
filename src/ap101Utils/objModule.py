@@ -692,8 +692,42 @@ class RldRecord(Record):
     return f"{super().__str__()}\n{' ' * 16}rld {len(self.payload)} byte(s)"
 
 
+def _symRefBytes(symType: int, name: str, offset: int) -> bytes:
+  """A reference-item packed SYM symbol (CONTROL/DUMMY/...): org byte
+  (isData=0, type in bits 6-4, name-length-1 in bits 2-0), a 24-bit CSECT
+  offset, then the EBCDIC name.  Inverse of SymEntry.parse_stream."""
+  org = (symType << 4) | (len(name) - 1)
+  return bytes([org]) + offset.to_bytes(3, "big") + name.encode("ebcdicvagc")
+
+
+def stackFrameSym(csect: str, frameBytes: int) -> bytes:
+  """The `CONTROL <csect>` / `DUMMY STACK` / `DATA STACKEND` SYM triple for one
+  code CSECT's runtime stack frame, matching the HAL/S-FC compiler's per-CSECT
+  emission (OBJECTGE.xpl EMIT_SYM_CARDS) so the linker sizes an assembler
+  routine's stack the same way it sizes the compiler's.  `frameBytes` is the
+  frame size in BYTES (STACKEND-STACK), carried as STACKEND's CSECT offset."""
+  stackend = (bytes([0x80 | (len("STACKEND") - 1)])          # isData, name len 8
+              + frameBytes.to_bytes(3, "big")
+              + "STACKEND".encode("ebcdicvagc")
+              + bytes([int(SymDataType.HALFWORD), 2 - 1]))    # type H, length 2
+  return (_symRefBytes(int(SymRefType.CONTROL), csect, 0)
+          + _symRefBytes(int(SymRefType.DUMMY), "STACK", 0)
+          + stackend)
+
+
 class SymRecord(Record):
   CARD_TYPE = "SYM"
+  MAX_BYTES = 56                   # packed-symbol payload bytes per card
+
+  @classmethod
+  def encode(cls, payload: bytes, seqNum: int) -> bytes:
+    """Build one SYM card carrying up to MAX_BYTES of packed-symbol payload.
+    A symbol may span card boundaries; the reader concatenates all SYM payloads
+    before decoding (Module.from_records), so callers chunk purely by length."""
+    card = blankCard(cls.CARD_TYPE, seqNum)
+    card[10:12] = len(payload).to_bytes(2, "big")
+    card[16:16 + len(payload)] = payload
+    return bytes(card)
 
   @property
   def payload(self) -> bytes:
@@ -758,6 +792,7 @@ class Module:
   textRecords: list = field(default_factory=list)     # TextRecord
   relocations: list = field(default_factory=list)     # RldEntry (expanded)
   symbols: list = field(default_factory=list)         # SymEntry
+  sym_payload: bytes = b""                            # raw packed-SYM bytes to emit
   end: EndInfo | None = None
   errors: list = field(default_factory=list)
 
@@ -793,7 +828,7 @@ class Module:
 
   @classmethod
   def from_assembly(cls, sections, externs, entries, end=None,
-                    relocations=()) -> "Module":
+                    relocations=(), stack_frames=()) -> "Module":
     """Build a writable Module from an assembler's resolved output.
 
     This assigns ESD IDs, orders the ESD, resolves and sorts the RLD, 
@@ -838,12 +873,21 @@ class Module:
         esdItems.append(EsdEntry.er(nextId, name))
       nextId += 1
 
+    # SD/ER bindings, immune to LD-name shadowing below: an `ENTRY FOO`
+    # matching `FOO CSECT` would otherwise take over FOO's id and mispoint
+    # every RLD position, TXT record, and the END card at the LD.
+    sectIdMap = dict(esdIdMap)
+
     # Entry points (LD) last, in source order, each carrying its section's
     # ID; an entry whose section is unknown defaults to the first SD.
+    # Resolve the owning-section ID BEFORE binding this LD's own name: when a
+    # symbol is both an ENTRY and a CSECT of the same name (`ENTRY FOO` +
+    # `FOO CSECT`), overwriting esdIdMap[name] first would make the owning
+    # lookup return the LD itself, yielding a self-referential ldid.
     for name, address, section in entries:
+      ownerId = esdIdMap.get(section, 1)
       esdIdMap[name] = nextId
-      esdItems.append(EsdEntry.ld(nextId, name, address,
-                                  esdIdMap.get(section, 1)))
+      esdItems.append(EsdEntry.ld(nextId, name, address, ownerId))
       nextId += 1
 
     # RLD entries, dropping any whose symbol or section is unresolved, then
@@ -852,17 +896,18 @@ class Module:
     # position-ESDID, then relocation-ESDID, then address, then flag (IEUFPP
     # ESORT over [posId, relId, addr, flag]).  Deterministic and Assembler-F-true.
     rldEntries = [
-      RldEntry(relId=esdIdMap[symbol], posId=esdIdMap[section],
+      RldEntry(relId=sectIdMap.get(symbol) or esdIdMap[symbol],
+               posId=sectIdMap[section],
                flags=AddrCon.for_type(type).flags, address=address)
       for symbol, section, type, address in relocations
-      if symbol in esdIdMap and section in esdIdMap
+      if symbol in esdIdMap and section in sectIdMap
     ]
     rldEntries.sort(key=lambda e: (e.posId, e.relId, e.address, e.flags))
 
     # One TXT record per non-empty control section, in definition order; the
     # section's whole image is chunked into cards by to_bytes.
     textRecords = [
-      TextRecord(esdId=esdIdMap.get(name, 1), address=0, data=image)
+      TextRecord(esdId=sectIdMap.get(name, 1), address=0, data=image)
       for name, esdSeq, origin, image in sections
       if image
     ]
@@ -873,20 +918,26 @@ class Module:
       endInfo = EndInfo(entryAddress=address,
                         esdId=esdIdMap.get(section, 1))
 
+    # Stack-frame SYM markers: one CONTROL/DUMMY-STACK/DATA-STACKEND triple per
+    # code CSECT that establishes a runtime stack frame (STACKEND-STACK bytes),
+    # so the linker can size the routine's @0 stack (see stackFrameSym).
+    sym_payload = b"".join(stackFrameSym(name, fb)
+                           for name, fb in stack_frames if name in esdIdMap)
+
     return cls(esdEntries=esdItems, textRecords=textRecords,
-               relocations=rldEntries, end=endInfo)
+               relocations=rldEntries, end=endInfo, sym_payload=sym_payload)
 
   def to_bytes(self, ident: str = "", start_seq: int = 1) -> bytes:
-    """Serialize this module to a card deck in ESD, TXT, RLD, END order,
+    """Serialize this module to a card deck in ESD, TXT, RLD, SYM, END order,
     chunking by each record type's per-card capacity and numbering cards
     sequentially from start_seq.  The inverse of from_records.
 
-    NOTE: SYM cards are not emitted -- this writes the ESD/TXT/RLD/END
-    records only."""
-    if self.symbols:
+    SYM cards are emitted from 'sym_payload' (the packed stack-frame markers
+    built by from_assembly); the parsed 'symbols' list is not re-serialized."""
+    if self.symbols and not self.sym_payload:
       warnings.warn(
-        f"Module {self.name!r} has {len(self.symbols)} SYM symbol(s) that "
-        "to_bytes does not serialize; they will be omitted.",
+        f"Module {self.name!r} has {len(self.symbols)} parsed SYM symbol(s) "
+        "that to_bytes does not re-serialize; they will be omitted.",
         RuntimeWarning)
     out = bytearray()
     seq = start_seq
@@ -901,6 +952,9 @@ class Module:
         seq += 1
     for i in range(0, len(self.relocations), RldRecord.MAX_ENTRIES):
       out += RldRecord.encode(self.relocations[i:i + RldRecord.MAX_ENTRIES], seq)
+      seq += 1
+    for i in range(0, len(self.sym_payload), SymRecord.MAX_BYTES):
+      out += SymRecord.encode(self.sym_payload[i:i + SymRecord.MAX_BYTES], seq)
       seq += 1
     out += EndRecord.encode(self.end or EndInfo(), ident, seq)
     return bytes(out)
@@ -989,40 +1043,3 @@ class ObjectFile:
 
 def read(source) -> ObjectFile:
   return ObjectFile(source)
-
-
-# 
-# Stand-alone dump
-# 
-
-if __name__ == "__main__":
-  import os
-  from typing import Annotated
-
-  os.environ["TYPER_USE_RICH"] = "0"  # disable fancy formatting
-  import typer
-
-  app = typer.Typer(
-    help="Dump an AP-101 object file record by record",
-    add_completion=False,
-    no_args_is_help=True,
-    rich_markup_mode=None,
-    pretty_exceptions_enable=False,
-  )
-
-  @app.command()
-  def _dump(object_file: Annotated[str, typer.Argument(
-      help="AP-101 object file (.obj)")]) -> None:
-    objfile = ObjectFile(object_file)
-    for index, record in enumerate(objfile):
-      print(f"{index:>4d} {record}")
-    for m in objfile.modules:
-      if m.symbols:
-        print("-" * 72)
-        print(f"SYM summary for module {m.name}:")
-        for s in m.symbols:
-          print(f"\t{s.symbolType:<11} offset={s.offsetInCSECT:06X} "
-                f"name={s.name!r}"
-                + (f" type={s.dataLetter}" if s.isDataType else ""))
-
-  app()

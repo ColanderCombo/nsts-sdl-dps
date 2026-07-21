@@ -50,6 +50,12 @@ _FLAG_FOR_TYPE: dict[str, int] = {
     'Y': RLD_YCON,
     'A': RLD_ACON,
     'Z': RLD_ZCON_CODE,
+    # A Z-con whose relocated address sits in the DATA subfield
+    # ('Z(,sym,flags)' -- code subfield empty) relocates as ZCON/data, so
+    # the linker writes HW0 AND patches the DSR field (flight FCMNINIT
+    # '=Z(,FPMXQETB+2,0)' links 8B6C 0001: target 0x18B6C, sector 1 -> DSR=1;
+    # punching ZCON/code left HW1's DSR unpatched).
+    'ZD': RLD_ZCON_DATA,
 }
 
 

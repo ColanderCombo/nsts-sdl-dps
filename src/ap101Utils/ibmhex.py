@@ -36,6 +36,7 @@ from decimal import Decimal, localcontext, ROUND_HALF_UP
 
 _TWO_TO_56 = Decimal(2 ** 56)
 _TWO_TO_52 = Decimal(2 ** 52)
+_TWO_TO_32 = Decimal(2 ** 32)
 _SIXTEEN = Decimal(16)
 
 
@@ -48,11 +49,19 @@ def hround(x):
         return None
 
 
-def toFloatIBM(x, scale=1):
+def toFloatIBM(x, scale=1, single=False):
     """A Python number (or its string representation — preferred, since a
     value already coerced to float may have lost digits) as an IBM
     double-precision float: the pair (msw, lsw) of 32-bit words, or
-    (0xFF000000, 0) on overflow.  Rounds half up (the assembler's rule)."""
+    (0xFF000000, 0) on overflow.  Rounds half up (the assembler's rule).
+
+    With single=True, an E (single-precision) constant: the fraction is
+    ROUNDED at the 24-bit single-precision boundary — not truncated from
+    the 56-bit conversion — and returned as (msw, 0).  The IBM assembler
+    rounds: flight FPMUPMTU +0295 "DC E'0.015'" is 3F3D70A4 (OI30 listing
+    agrees), where taking the double conversion's msw truncates to
+    3F3D70A3.  A round-up carry out of the 24-bit fraction renormalizes
+    into the exponent (>>4, e+1)."""
     with localcontext() as ctx:
         ctx.prec = 20
         d = Decimal(x) * Decimal(scale)
@@ -76,7 +85,20 @@ def toFloatIBM(x, scale=1):
             e = 0
         if e > 127:
             return 0xFF000000, 0x00000000
+        if single:
+            f = hround(d / _TWO_TO_32)           # round AT the 24-bit fraction
+            if f >= (1 << 24):                   # carry: renormalize
+                f >>= 4
+                e += 1
+                if e > 127:
+                    return 0xFF000000, 0x00000000
+            return (s << 31) | (e << 24) | f, 0x00000000
         f = hround(d)
+        if f >= (1 << 56):                       # carry out of the 56-bit
+            f >>= 4                               # fraction: renormalize
+            e += 1                                # (mirrors the single path)
+            if e > 127:
+                return 0xFF000000, 0x00000000
         msw = (s << 31) | (e << 24) | (f >> 32)
         return msw, f & 0xFFFFFFFF
 
