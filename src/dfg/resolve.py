@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 #
-# Resolve dynamic-field references against the INCLUDEd compools' templates.
+# Resolve dynamic-field references against the INCLUDEd compools' SDFs.
 #
-# Services, all keyed off `compool.allocate()`'s type model:
+# Services, all keyed off `compool.allocate()`'s type model (SdfSymbol-valued;
+# HAL/S BOOLEAN arrives as BIT(1), see compool.py):
 #   * `padr_types(ds, names)` — the HAL `NAME <type>` each PADR must declare
 #     (must match the referent's type, or PASS2 rejects the INITIAL list).
 #   * `w0_resolver(ds)` — the RTC/TEST/BLT condition word: a discrete's
@@ -16,8 +17,9 @@ from . import compool as ca
 
 
 # ---- NAME <type> for a PADR pointer ----------------------------------------
-def name_type(info):
-    """The HAL `NAME <type>` string for a PADR referent, or None if unresolved.
+def name_type(sym):
+    """The HAL `NAME <type>` string for a PADR referent (an SdfSymbol), or
+    None if unresolved.
     A PADR points at ONE element, so VECTOR/MATRIX/untyped all reduce to SCALAR
     (HAL's untyped default) — the type must match the referent's or PASS2
     rejects the INITIAL with DI108.  A STRUCTURE-instance referent (the MDT
@@ -25,29 +27,48 @@ def name_type(info):
     referent we add the copy count (`-STRUCTURE(2)`) — PASS2 rejects the
     copyless form with DI110 (copiness mismatch), and the copy-qualified
     pointer is object-identical (same base address, same RLD)."""
-    if info is None:
+    if sym is None:
         return None
-    if info.get("struct") and not info.get("type"):
-        n = info.get("array") or 1
-        return ("%s-STRUCTURE(%d)" % (info["struct"], n) if n > 1
-                else "%s-STRUCTURE" % info["struct"])
-    t = info.get("type")
-    if t == "BIT":
-        return "BIT(%d)" % info.get("n", 16)
-    if t == "BOOLEAN":
-        return "BOOLEAN"
-    if t == "CHARACTER":
-        return "CHARACTER(%d)" % info.get("n", 1)
-    if t in ("SCALAR", "VECTOR", "MATRIX", None):
-        return "SCALAR DOUBLE" if info.get("prec") == "DOUBLE" else "SCALAR"
-    if t == "INTEGER":
-        return "INTEGER DOUBLE" if info.get("prec") == "DOUBLE" else "INTEGER"
-    return t
+    kind = sym.kind
+    if kind == "STRUCTURE" and sym.template:
+        n = sym.copies
+        return ("%s-STRUCTURE(%d)" % (sym.template, n) if n > 1
+                else "%s-STRUCTURE" % sym.template)
+    if kind == "BIT":
+        return "BIT(%d)" % (sym.width or 16)
+    if kind == "CHARACTER":
+        return "CHARACTER(%d)" % (sym.width or 1)
+    if kind in ("SCALAR", "VECTOR", "MATRIX", "STRUCTURE", None):
+        # a template-less STRUCTURE reduces to HAL's untyped default too
+        return "SCALAR DOUBLE" if sym.precision == "DOUBLE" else "SCALAR"
+    if kind == "INTEGER":
+        return "INTEGER DOUBLE" if sym.precision == "DOUBLE" else "INTEGER"
+    return kind
+
+
+def _type_width(sym):
+    """(kind, effective width) — the referent identity used to test whether
+    several candidate struct-field instances agree."""
+    if sym.kind == "BIT":
+        return "BIT", sym.width or 16
+    if sym.kind == "CHARACTER":
+        return "CHARACTER", sym.width or 1
+    if sym.kind in ("INTEGER", "SCALAR", "VECTOR", "MATRIX", "EVENT"):
+        return sym.kind, None
+    return None, None
 
 
 def includes(ds):
     """The deck's INCLUDE'd compool names, in deck order."""
     return [v.strip() for k, v in ds if k == "INCLUDE" and v]
+
+
+def missing_sdf_includes(ds):
+    """The deck's INCLUDE'd compools that have NO member in the SDF library,
+    in deck order.  Diagnostic only: a missing SDF is the usual root cause of
+    a w0 / rate-count refusal (the build must compile the compool — display
+    INCLUDEs are not part of the link's own template closure)."""
+    return [cp for cp in includes(ds) if not ca.has_sdf(cp)]
 
 
 def _models_and_fields(ds):
@@ -60,7 +81,7 @@ def _models_and_fields(ds):
 
 
 def _find_info(base, compools, models, fidx):
-    """The compool info dict for a referent base name: a top-level var first,
+    """The referent SdfSymbol for a base name: a top-level var first,
     then a unique struct-field instance."""
     for cp in compools:                          # (1) top-level declared var
         m = models.get(cp)
@@ -77,7 +98,7 @@ def _find_info(base, compools, models, fidx):
 
 
 def alias_body(name, compools):
-    """The REPLACE-macro body for `name`, or None.  Templates carry the
+    """The REPLACE-macro body for `name`, or None.  The SDFs carry the
     REPLACE macros; the declaration exists only under the body name."""
     for cp in compools:
         b = ca.replace_aliases(cp).get(name)
@@ -87,7 +108,8 @@ def alias_body(name, compools):
 
 
 def _find_member_info(name, compools, models, fidx):
-    """Field info for a `struct.member` reference (else `_find_info` of the base).
+    """The referent SdfSymbol for a `struct.member` reference (else
+    `_find_info` of the base).
 
     A qualified `INST.MEMBER` names the struct instance `INST` and its member; the
     member lives in `fidx` under every instance of that struct type, so we pick the
@@ -104,8 +126,8 @@ def _find_member_info(name, compools, models, fidx):
     for ivar, fi in cands:                        # exact: the named instance
         if ivar == inst:
             return fi
-    if cands and all((fi.get("type"), fi.get("n")) ==
-                     (cands[0][1].get("type"), cands[0][1].get("n")) for _, fi in cands):
+    if cands and all(_type_width(fi) == _type_width(cands[0][1])
+                     for _, fi in cands):
         return cands[0][1]                        # all instances agree on type/width
     return None
 
@@ -118,18 +140,12 @@ def base_of(name):
 
 
 def char_inits(ds):
-    """{char-var: INITIAL string} from the INCLUDEd compool templates —
+    """{char-var: INITIAL string} from the INCLUDEd compools —
     the RTC string tables whose INITIAL text sizes their draw."""
     out = {}
     for cp in includes(ds):
-        text = ca.read_template_text(cp)
-        if not text:
-            continue
-        # no DECLARE anchor: factored declares list continuation names bare
-        # (`DECLARE A CHARACTER(2) INITIAL('* '), B CHARACTER(2) INITIAL('-+');`)
-        for m in re.finditer(r"(\w+)\s+CHARACTER\s*\(\s*\d+\s*\)"
-                             r"\s+INITIAL\s*\(\s*'([^']*)'\s*\)", text):
-            out.setdefault(m.group(1), m.group(2))
+        for name, text in ca.char_initial_strings(cp).items():
+            out.setdefault(name, text)
     return out
 
 
@@ -142,8 +158,8 @@ def padr_types(ds, names):
     compools, models, fidx = _models_and_fields(ds)
     out = []
     for name in names:
-        info = _find_member_info(name, compools, models, fidx)
-        ty = name_type(info)
+        sym = _find_member_info(name, compools, models, fidx)
+        ty = name_type(sym)
         # A `$k`-subscripted referent names ONE copy of a multi-copy
         # structure: the pointer is copyless (`-STRUCTURE`), or PASS2 raises
         # the DI110 copiness conflict.
@@ -172,15 +188,10 @@ def w0_resolver(ds):
     compools, models, fidx = _models_and_fields(ds)
 
     def bitpos(name, bit):
-        info = _find_member_info(name, compools, models, fidx)
-        if info is None:
-            return None
-        if info.get("type") == "BIT":
-            n = info.get("n", 16)
-        elif info.get("type") == "BOOLEAN":
-            n = 1
-        else:
+        sym = _find_member_info(name, compools, models, fidx)
+        if sym is None or sym.kind != "BIT":
             return None                          # only bit discretes use this w0
+        n = sym.width or 16                      # BOOLEAN is BIT(1) in the SDF
         return (-n) % 16 + (bit - 1)
 
     def w0fn(op):

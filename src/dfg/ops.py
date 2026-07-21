@@ -28,6 +28,13 @@ from .fcw import FCW
 from .model import Error, Padr
 
 
+def _oneline(v):
+    """A directive value collapsed to one line for an error message — a
+    continuation-card value keeps its embedded newline in `value` (the
+    comment echo is verbatim), which would wrap the diagnostic."""
+    return " ".join(str(v).split())
+
+
 def immed(*payload):
     """An inline IMMED UPDATE instruction: the 0x5000|n header word followed
     by its n FCWs of payload — the GPC copies the payload verbatim to the
@@ -533,7 +540,7 @@ class BltOp(DDTOp):
         w0 = deu.w0fn(self) if deu.w0fn else None
         if w0 is None:
             raise Error("cannot derive condition word: BLT = %s"
-                        % (self.value,))
+                        % _oneline(self.value))
         ml = [p for p in (self.len1, self.len2) if p is not None] or [16, 16]
         ml1, ml2 = (ml + ml)[:2]
         attr = 0x6000 | (((ml1 - 1) & 0x7F) << 5) | ((ml2 - 1) & 0x1F)
@@ -564,7 +571,7 @@ class RtcOp(DDTOp):
         w0 = deu.w0fn(self) if deu.w0fn else None
         if w0 is None:
             raise Error("cannot derive condition word: RTC = %s"
-                        % (self.value,))
+                        % _oneline(self.value))
         maxlen = next((p for p in (self.sign, self.width)
                        if isinstance(p, int)), 16)
         attr = 0x6000 | (((maxlen - 1) & 0x7F) << 5)
@@ -588,7 +595,7 @@ class TestOp(DDTOp):
         w0 = deu.w0fn(self) if deu.w0fn else None
         if w0 is None:
             raise Error("cannot derive condition word: TEST = %s"
-                        % (self.value,))
+                        % _oneline(self.value))
         self.comments = ["-- TEST = %s" % (self.value or "")]
         self.words = [w0, 0, Padr(self.var)]
 
@@ -686,7 +693,7 @@ class IfOp(DDTOp):
         w0 = deu.w0fn(self) if deu.w0fn else None
         if w0 is None:
             raise Error("cannot derive condition word: %s = %s"
-                        % (self.key, self.value))
+                        % (self.key, _oneline(self.value)))
         self.comments = ["-- %s = %s" % (self.key, self._vs())]
         self.words = [w0, 0, Padr(self.var)]
         if self.if_on:                           # =ON: TEST + inline BRANCH

@@ -24,7 +24,7 @@
 #
 # Modules:
 #   deck      — read a display deck into ordered directives
-#   compool   — resolve a compool variable's type from its binary TEMPLATE
+#   compool   — resolve a compool variable's type from its PASS3 SDF
 #   fcw       — Function Control Word primitives (coordinates, glyphs, vectors)
 #   kvt       — the keyboard/value table (item entries + limit tables)
 #   static    — the static (background) FCW section
@@ -44,21 +44,63 @@ from .encode import encode, Error
 from .emit import to_hal, n_untyped
 
 
+def _sdf_hint(name):
+    """' [no SDF member for INCLUDE(s): ...]' when the deck INCLUDEs
+    compool(s) absent from the SDF library, else ''.  Kept on the refusal's
+    own line: a missing SDF is the usual root cause of a w0 / rate-count
+    refusal, and the build harness surfaces only the last stderr line."""
+    try:
+        from .deck import encodable_directives
+        from .resolve import missing_sdf_includes
+        missing = missing_sdf_includes(encodable_directives(name))
+    except Exception:
+        return ""
+    if not missing:
+        return ""
+    return " [no SDF member for INCLUDE(s): %s]" % ", ".join(missing)
+
+
 def generate(
     name: str = typer.Argument(..., help="Display name (e.g. CG3011) or deck path."),
     output: Optional[Path] = typer.Option(None, "--output", "-o",
                                           help="Write output here instead of stdout."),
-    templib: Optional[Path] = typer.Option(None, "--templib",
-                                           help="Compiler TEMPLIB directory."),
+    sdflib: Optional[Path] = typer.Option(None, "--sdflib",
+                                          help="PASS3 SDF library directory "
+                                          "(compool type resolution) "
+                                          "[default: $DFG_SDFLIB or the "
+                                          "OI340600 build's gen/SDFLIB]."),
     deck_root: Optional[Path] = typer.Option(None, "--deck-root",
                                              help="OI root holding SSSRC/APPLSRC."),
+    amt: bool = typer.Option(False, "--amt",
+                             help="Treat NAME as an AMT-mode deck (PMF=/AMTx= "
+                             "cards -> CDA_Pnn_AMT moding-table compool). "
+                             "Auto-detected from the deck when omitted."),
 ) -> None:
     """Translate display NAME into HAL/S COMPOOL source."""
-    if templib:
-        compool.set_templib(str(templib))
+    if sdflib:
+        compool.set_sdflib(str(sdflib))
     if deck_root:
         import os
         os.environ["DFG_DECK_ROOT"] = str(deck_root)
+
+    # AMT mode: the CDAPnn decks are moding-table inputs, not display decks.
+    # Purely syntactic (no SDF), so it branches before display encoding.
+    from .deck import resolve_deck
+    from . import amt as amtmod
+    path = resolve_deck(name)
+    if path is not None and (amt or amtmod.is_amt_deck(path)):
+        try:
+            text = amtmod.generate(path)
+        except amtmod.AmtError as e:
+            typer.echo("error: cannot generate AMT %s — %s" % (name, e),
+                       err=True)
+            raise typer.Exit(1)
+        if output is None:
+            sys.stdout.write(text)
+        else:
+            Path(output).write_text(text)
+        return
+
     try:
         enc = encode(name)
         text = to_hal(enc)
@@ -66,12 +108,17 @@ def generate(
         typer.echo("error: %s" % e, err=True)
         raise typer.Exit(2)
     except Error as e:
-        typer.echo("error: cannot generate %s — %s" % (name, e), err=True)
+        typer.echo("error: cannot generate %s — %s%s"
+                   % (name, e, _sdf_hint(name)), err=True)
         raise typer.Exit(1)
     u = n_untyped(enc)
     if u:
-        typer.echo("warning: %d PADR pointer(s) fell back to NAME BIT(16) "
-                   "(missing template)" % u, err=True)
+        # A BIT(16) PADR against a typed referent is PASS2-fatal
+        # (DI108/DI109) — refusing here beats emitting broken HAL.
+        typer.echo("error: cannot generate %s — %d PADR pointer(s) have no "
+                   "SDF-resolvable referent type%s"
+                   % (name, u, _sdf_hint(name)), err=True)
+        raise typer.Exit(1)
     if output is None:
         sys.stdout.write(text)
     else:

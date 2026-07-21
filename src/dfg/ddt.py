@@ -487,9 +487,10 @@ def _content_draw(ops, j, gi, char_inits):
 
 
 def _rate_count(ops, gi, end, starts, char_inits=None):
-    """The rate-group FCW draw count (rate_count) for the structures in
-    `ops[gi+1:end]`, or None if the group uses any non-whitelisted / anomalous
-    directive (the caller raises `Error`).  This is the DEU worst-case
+    """(rate_count, None) — the rate-group FCW draw count for the structures
+    in `ops[gi+1:end]` — or (None, blocker-op) if the group uses any
+    non-whitelisted / anomalous directive (the caller raises `Error`,
+    naming the blocker).  The count is the DEU worst-case
     = the longest single valid path: a `TEST=(var,bit,N)` conditionally skips
     N structures (`max(skip, fall-through)`), a `BR` is unconditional;
     TEST/BR draw 0.  Content draws come from the emitted IMMED counts and the
@@ -523,7 +524,7 @@ def _rate_count(ops, gi, end, starts, char_inits=None):
             nodes.append([off, n, "C", None]); continue
         draw = _content_draw(ops, j, gi, char_inits)
         if draw is None:
-            return None
+            return None, ops[j]
         nodes.append([off, draw, "C", None]); j += 1
 
     # Deep-switch cascade: the generator's scan cannot skip the trailing default
@@ -553,7 +554,7 @@ def _rate_count(ops, gi, end, starts, char_inits=None):
         else:
             memo[i] = draw + dp(i + 1)
         return memo[i]
-    return dp(0) + extra
+    return dp(0) + extra, None
 
 
 def resolve_rate_count(ops, char_inits=None, hal=None):
@@ -566,12 +567,19 @@ def resolve_rate_count(ops, char_inits=None, hal=None):
     name = hal.replace("\\", "/").rsplit("/", 1)[-1] if hal else None
     for r, gi in enumerate(rate_gis):
         end = rate_gis[r + 1] if r + 1 < len(rate_gis) else len(ops)
-        val = _rate_count(ops, gi, end, starts, char_inits)
+        val, blocker = _rate_count(ops, gi, end, starts, char_inits)
         if val is not None:
             val += _RC_GROUP_ALLOWANCE.get((name, r), 0)
         if val is None or not 0 <= val <= 0xFFFF:
-            raise Error("cannot derive rate count: %s"
-                        % (ops[gi].comments or ["rate group %d" % r])[0])
+            why = (ops[gi].comments or ["rate group %d" % r])[0]
+            if blocker is not None:
+                # Name the structure whose draw was refused — the group
+                # header alone reads like a RATE-card problem when the
+                # actual blocker is (say) an RTC whose string table has
+                # no SDF-carried INITIAL.
+                btxt = " ".join(((blocker.comments or [blocker.kind])[0]).split())
+                why = "%s (draw not derivable for: %s)" % (why, btxt)
+            raise Error("cannot derive rate count: %s" % why)
         ops[gi].words[1] = val
 
 
