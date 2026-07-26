@@ -25,7 +25,8 @@ class Descriptor:
 
   A descriptor may carry a trailing "/I", marking a CPU instruction that is 
   followed by a separate immediate-data halfword (the RI/SI forms)."""
-  __slots__ = ("name", "raw", "bits", "nbits", "mask", "val", "fields", "immediate")
+  __slots__ = ("name", "raw", "bits", "nbits", "mask", "val", "fields",
+               "flags", "immediate")
 
   def __init__(self, name, raw):
     bits, _, flags = raw.partition("/")
@@ -34,6 +35,7 @@ class Descriptor:
     self.name = name
     self.raw = raw                  # the full descriptor incl. any "/flags"
     self.bits = bits                # just the bit string
+    self.flags = flags              # the post-"/" string ("" if none)
     self.immediate = "I" in flags   # trailing immediate-data halfword (RI/SI)
     self.nbits = len(bits)
     mask = 0

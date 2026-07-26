@@ -109,7 +109,11 @@ BCE_DESC = {
     # --- BCE receive data ---
     "#RDS":   "011cccccdddddddd",   # receive data short
     "#RDLI":  "11110011000000cccccccccccccccccc",   # receive data long immediate
-    "#RDL":   "11111011000000cccccccccccccccccc",   # receive data long
+    # receive data long: the 18-bit operand is a main-store ADDRESS (the
+    # count lives in memory at addr + 2*BCE#), so it is an 'a' field like
+    # #TDL/#MIN@ -- the flight image relocates it (FIODEUPG '#RDL FIOWCE'
+    # links to FB00 8C94); it was first transcribed 'c' by analogy to #RDLI.
+    "#RDL":   "11111011000000aaaaaaaaaaaaaaaaaa",
     "#MIN":   "11110001ddddddddcccccccccccccccc",   # message in (d=disp, c=count)
     "#MINC":  "________uuuuuccccccccccccccccccc",   # message-in command word
     "#MIN@":  "11111001000000aaaaaaaaaaaaaaaaaa",   # message in indexed

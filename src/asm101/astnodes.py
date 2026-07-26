@@ -70,10 +70,19 @@ class Reloc:
     self.terms = {k: v for k, v in (terms or {}).items() if v}
 
   @staticmethod
+  def _make(num, terms):
+    # Internal constructor for a terms dict already free of zero
+    # coefficients; skips __init__'s filter copy.
+    r = object.__new__(Reloc)
+    r.num = num
+    r.terms = terms
+    return r
+
+  @staticmethod
   def _wrap(num, terms):
     # Collapse to a plain int when no relocation term survives (absolute).
     live = {k: v for k, v in terms.items() if v}
-    return Reloc(num, live) if live else num
+    return Reloc._make(num, live) if live else num
 
   def __add__(self, o):
     if isinstance(o, Reloc):
@@ -96,7 +105,7 @@ class Reloc:
     return Reloc._wrap(o - self.num, {k: -v for k, v in self.terms.items()})
 
   def __neg__(self):
-    return Reloc(-self.num, {k: -v for k, v in self.terms.items()})
+    return Reloc._make(-self.num, {k: -v for k, v in self.terms.items()})
 
   def __mul__(self, o):
     if isinstance(o, Reloc):
@@ -111,9 +120,6 @@ class Reloc:
     if isinstance(o, Reloc):
       return self.num == o.num and self.terms == o.terms
     return False
-
-  def __ne__(self, o):
-    return not self.__eq__(o)
 
   def __hash__(self):
     return hash((self.num, frozenset(self.terms.items())))
@@ -138,6 +144,12 @@ def isSelfDefiningTerm(s):
     return True
   return len(s) >= 3 and s[0] in "XBC" and s[1] == "'" and s[-1] == "'"
 
+# Pack a C'..' string body big-endian as EBCDIC bytes into an integer,
+# un-doubling the '' apostrophe escape.
+def ebcdicValue(body):
+  return int.from_bytes(body.replace("''", "'").encode("ebcdicvagc"), "big")
+
+
 # Evaluate a self-defining-term string -- X'..' hex, B'..' binary, C'..' EBCDIC
 # character, or a bare decimal -- to its integer value.
 def selfDefiningValue(s):
@@ -148,8 +160,7 @@ def selfDefiningValue(s):
     return int(body, 16)
   if kind == "B":
     return int(body, 2)
-  # C'..' : pack big-endian as EBCDIC, un-doubling the '' apostrophe escape.
-  return int.from_bytes(body.replace("''", "'").encode("ebcdicvagc"), "big")
+  return ebcdicValue(body)
 
 
 # Coerce 'value' to an int: pass a real int through, parse a signed-int string,
@@ -256,7 +267,15 @@ class Var:
       ctx.error(f"Cannot find {self.name}")
       return None
     value, ok = ctx.applySubscripts(stored.value, self.idxs, self.name)
-    return None if not ok else coerceInt(value, self.name, ctx)
+    if not ok:
+      return None
+    # A macro parameter whose operand was omitted (or explicitly empty, e.g.
+    # the `,,` in `BMTENT ...,10,,,,`) has the null string value; in arithmetic
+    # context IBM treats it as 0.  Only parameters carry an 'omitted' flag, so
+    # a null SETC used arithmetically still errors below.
+    if value == "" and stored.omitted is not None:
+      return 0
+    return coerceInt(value, self.name, ctx)
 
   def evalBool(self, ctx):
     stored = ctx.svLocals.lookup(self.name)
@@ -319,7 +338,7 @@ class Attr:
       if operand.name != "&SYSLIST" and omitted:
         return 0
       if not isinstance(var, (tuple, list)):
-        return 1
+        return ctx.sublistCount(var)
       return len(var)
     if op == "K":
       if isinstance(var, str):
@@ -366,6 +385,7 @@ class Lcon:
   scale: object = None
   raw: object = None
   flags: object = None      # =Z(...) flags operand (an arith node), else None
+  zdata: bool = False       # =Z(,tgt...): target is the DATA address subfield
 
   def evalArith(self, ctx):
     # The numeric value of an RS literal.  C has no arithmetic value; a =Z

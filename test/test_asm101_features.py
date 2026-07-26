@@ -115,13 +115,12 @@ def unit_tests():
   # --- grammar: ZCON DC forms.  The real decks use Z(,sym,flags) (leading
   # comma) as well as Z(sym,,flags); the dcOperand rule had no Z alternative
   # at all (stale generated parser), so every `DC Z(...)` failed to parse.
-  from asm101.expressions import astFlattenList as _flat
   from asm101.larkparse import Sym, BinOp
   def zcon(text):
     ast = parse(text, "dc")
     if ast is None:
       return None
-    return _flat(ast)[-1]
+    return ast[-1]     # Lark dc yields a flat list of DcSuboperands
   # The reloc target is now an arith node (zexpr): a bare Sym, or Sym +/- a
   # constant addend.  `zname` pulls the symbol name out for the simple cases.
   def zname(s):
@@ -504,8 +503,8 @@ def unit_tests():
   # matching flagged that as "Literal has changed value" and never converged.
   from asm101.model101 import literalIndex, LiteralPool, Literal
   _pool = LiteralPool()
-  _pool.literals.append(Literal(operand="=Y(LATE)", value=4, T="Y", L=2,
-                                assembled=bytearray(b"\x00\x04")))
+  _pool.add(Literal(operand="=Y(LATE)", value=4, T="Y", L=2,
+                    assembled=bytearray(b"\x00\x04")))
   _same_op_diff_val = Literal(operand="=Y(LATE)", value=2, T="Y", L=2,
                               assembled=bytearray(b"\x00\x02"))
   check("literal_index_matches_by_operand",
@@ -787,6 +786,23 @@ def integration_tests():
       rc, out = asm(fx)
       check(label, rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
 
+    # --march gates the AP-101S-only instructions (LXA/LXAR, STXA/STXAR,
+    # LDM, STDM, DIAG, CED/CEDR -- see instrdefs.AP101S_ONLY for provenance).
+    # The default target (ap101s) accepts them; --march ap101b must reject
+    # each with a diagnostic, not a traceback, and must not disturb ops
+    # common to both machines.
+    rc, out = asm("feat_march_s_only.asm")
+    check("march_default_accepts_s_only", rc == 0,
+          f"rc={rc}\n{out.strip()[-400:]}")
+    rc, out = asm("feat_march_s_only.asm", extra=["--march", "ap101b"])
+    check("march_ap101b_rejects_s_only",
+          rc != 0 and "Traceback" not in out
+          and "AP-101S-only" in out,
+          f"rc={rc}\n{out.strip()[-400:]}")
+    rc, out = asm("feat_dc_dup.asm", extra=["--march", "ap101b"])
+    check("march_ap101b_accepts_common_ops", rc == 0,
+          f"rc={rc}\n{out.strip()[-400:]}")
+
     # A section-scoped pseudo-op (ORG, LTORG) ahead of the first CSECT has
     # no control section to act on.  A *labeled* one used to crash in
     # commonProcessing (KeyError on the label, registering it in a section
@@ -824,6 +840,475 @@ def integration_tests():
     check("ltorg_dump_emits_literal", _pbytes == "0004",
           f"=Y(LATE) pool dump -> bytes {_pbytes!r} at {_paddr!r}, want 0004")
 
+    # USING with a forward-referenced base symbol: the collect-pass snapshot
+    # holds the pre-pass 'preliminary' estimate (4 bytes per labeled
+    # statement), which disagrees with the settled layout whenever unlabeled
+    # statements precede the base.  optimizeScratch must re-resolve the base
+    # (refreshUsing) or the displacement computes negative and the
+    # instruction wrongly stays RS -- RUNASM SQRT's 'USING A,R1'/'A R6,A'
+    # assembled 06F1 0000 where the flight assembler emits SRS 0601.
+    ulst = td / "ufwd.lst"
+    rc, out = assemble(
+        ["-o", str(td / "ufwd.obj"), "-l", str(ulst),
+         str(FIX / "feat_using_fwd_srs.asm")])
+    check("using_fwd_srs_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
+    _utxt = ulst.read_text()
+    check("using_fwd_srs_condenses",
+          re.search(r"^0000[0-9A-F] 0601 .*A     R6,AA", _utxt, re.M)
+          is not None,
+          "'A R6,AA' under forward USING must condense to SRS 0601:\n"
+          + "\n".join(l for l in _utxt.splitlines() if "R6,AA" in l))
+
+    # An explicitly-coded base register with an expression displacement must
+    # encode RS AM=1, matching the flight CASEN computed-goto idiom
+    # 'LH R2,#@LBn-*-3(,R2)' -> 9AF6 (every OI30-listing instance; the
+    # USING-resolved-base AM=0 rule must NOT swallow it -- it used to emit
+    # 9AF2, caught by the DASS/OI30-listing fidelity comparison).
+    eblst = td / "eb.lst"
+    rc, out = assemble(
+        ["-o", str(td / "eb.obj"), "-l", str(eblst),
+         str(FIX / "feat_explicit_base_am1.asm")])
+    check("explicit_base_am1_assembles", rc == 0,
+          f"rc={rc}\n{out.strip()[-400:]}")
+    _ebtxt = eblst.read_text()
+    check("explicit_base_am1_encodes_9AF6",
+          re.search(r"^00000 9AF6 .*LH    R2,TBL", _ebtxt, re.M) is not None,
+          "'LH R2,expr(,R2)' must encode AM=1 9AF6:\n"
+          + "\n".join(l for l in _ebtxt.splitlines() if "LH" in l))
+    # ... and an IN-SRS-RANGE expression displacement must STILL be RS AM=1,
+    # not the 1-hw SRS form (flight: FCMSVC 99F5 000C, FIOPDISP+1A7
+    # 9AF6 000A -- SRS condensation of explicit-base displacements is for
+    # number displacements only).
+    check("explicit_base_am1_no_srs_condense",
+          re.search(r"^00002 9AF6 0003 .*LH    R2,NEAR", _ebtxt, re.M)
+          is not None,
+          "in-SRS-range 'LH R2,expr(,R2)' must stay RS AM=1:\n"
+          + "\n".join(l for l in _ebtxt.splitlines() if "LH" in l))
+
+    # R3 coded as an explicit base carries the ABSOLUTE displacement (flight
+    # FCMISYNC 'L R4,TPSAE2OP-TPSASTRT(R3)' -> 1CF3 0088); the
+    # b2==3-as-PC-sentinel conflation used to PC-relativize it (1CF7).
+    r3lst = td / "r3b.lst"
+    rc, out = assemble(
+        ["-o", str(td / "r3b.obj"), "-l", str(r3lst),
+         str(FIX / "feat_r3_base_absolute.asm")])
+    check("r3_base_absolute_assembles", rc == 0,
+          f"rc={rc}\n{out.strip()[-400:]}")
+    check("r3_base_absolute_encodes_1CF3_0088",
+          re.search(r"^00000 1CF3 0088 ", r3lst.read_text(), re.M) is not None,
+          "'L R4,expr(R3)' must encode AM=0 with the absolute value:\n"
+          + "\n".join(l for l in r3lst.read_text().splitlines() if " L " in l))
+    check("la_r3_base_encodes_E9F3_00B0",
+          re.search(r"^00002 E9F3 00B0 ", r3lst.read_text(), re.M) is not None,
+          "'LA R1,expr(R3)' must take the AM=0 based form (flight "
+          "FPMIHPC2+157 E9F3 00B0):\n"
+          + "\n".join(l for l in r3lst.read_text().splitlines() if "LA" in l))
+
+    # A $-forced branch to a label strictly inside the csect encodes RS AM=0
+    # with an absolute target -- the 16-bit field MUST carry a Y-type RLD
+    # naming the csect (flight links FCMISYNC 'BNZ$ FCMNOIOS' as C3F3 8EFE =
+    # base+offset; our linked images branched to the unrelocated offset).
+    # The end-of-csect label case rode a different, always-relocated path.
+    dbrobj = td / "dbr.obj"
+    rc, out = assemble(
+        ["-o", str(dbrobj), str(FIX / "feat_dollar_branch_rld.asm")])
+    check("dollar_branch_rld_assembles", rc == 0,
+          f"rc={rc}\n{out.strip()[-400:]}")
+    _rlds = []
+    _data = dbrobj.read_bytes()
+    for _i in range(0, len(_data), 80):
+        _card = _data[_i:_i + 80]
+        if _card[1:4].decode("cp037", errors="replace") == "RLD":
+            _n = int.from_bytes(_card[10:12], "big")
+            _b = _card[16:16 + _n]
+            _rlds += [(int.from_bytes(_b[j:j+2], "big"),
+                       int.from_bytes(_b[j+5:j+8], "big"))
+                      for j in range(0, _n, 8)]
+    check("dollar_branch_rld_emitted", (1, 2) in _rlds,
+          f"B$ INSIDE displacement (byte 2) must be relocated by ESD 1; "
+          f"RLDs={_rlds}")
+
+    # A self-relative RS target at ZERO displacement takes the subtractive
+    # I-bit form like backward ones: 'BAL R3,*+2' = E3F7 0800 (i=1, d=0),
+    # never the additive E3F7 0000 (FPMRES+30, 3/3 OI30 instances).
+    srzlst = td / "srz.lst"
+    rc, out = assemble(
+        ["-o", str(td / "srz.obj"), "-l", str(srzlst),
+         str(FIX / "feat_self_rel_zero_ibit.asm")])
+    check("self_rel_zero_ibit_assembles", rc == 0,
+          f"rc={rc}\n{out.strip()[-400:]}")
+    check("self_rel_zero_ibit_encodes_0800",
+          re.search(r"^00000 E3F7 0800 ", srzlst.read_text(), re.M)
+          is not None,
+          "'BAL R3,*+2' must encode the subtractive form E3F7 0800:\n"
+          + "\n".join(l for l in srzlst.read_text().splitlines()
+                      if "BAL" in l))
+    # A real R3 base with an index (not self-relative) keeps zero
+    # displacement ADDITIVE: RUNLST ITOC 'STH R4,0(R5,3)' = BCF7 A000,
+    # not the subtractive A800 (the fold must gate on selfRelB2).
+    check("zero_disp_indexed_base_stays_additive",
+          re.search(r"^00003 BCF7 A000 ", srzlst.read_text(), re.M)
+          is not None,
+          "'STH R4,0(R5,3)' must stay additive BCF7 A000:\n"
+          + "\n".join(l for l in srzlst.read_text().splitlines()
+                      if "STH" in l))
+
+    # The comma form 'expr(,Rn)' on an @/# op names the BASE (index slot
+    # explicitly empty); the atStar bare-paren heuristic must not move it
+    # into X2 (flight FPMDISP 'STDM@ 0,...(,R3)' = 90FF 10B3, ours 70B3).
+    atclst = td / "atc.lst"
+    rc, out = assemble(
+        ["-o", str(td / "atc.obj"), "-l", str(atclst),
+         str(FIX / "feat_at_comma_base.asm")])
+    check("at_comma_base_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
+    _atctxt = atclst.read_text()
+    check("at_comma_base_stdm",
+          re.search(r"^00000 90FF 10B3 ", _atctxt, re.M) is not None,
+          "'STDM@ 0,expr(,R3)' must keep R3 as base (x2=0):\n"
+          + "\n".join(l for l in _atctxt.splitlines() if "STDM@" in l))
+    check("at_comma_base_lps",
+          re.search(r"^00002 CDFF 10B2 ", _atctxt, re.M) is not None,
+          "'LPS@ expr(,R3)' must keep R3 as base (x2=0):\n"
+          + "\n".join(l for l in _atctxt.splitlines() if "LPS@" in l))
+
+    # An F/H constant with a decimal exponent is an INTEGER (mantissa x
+    # 10^exp) -- the fraction path clamped FCMCBLKS 'DC F'900E6'' to
+    # 7FFFFFFF (IBM OI30: 35A4E900); pure fractions keep the scaled path.
+    felst = td / "fe.lst"
+    rc, out = assemble(
+        ["-o", str(td / "fe.obj"), "-l", str(felst),
+         str(FIX / "feat_dc_f_exponent.asm")])
+    check("dc_f_exponent_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
+    _fetxt = felst.read_text()
+    for _pat, _label in [
+        (r"^00000 35A4E900 ", "dc_f_exponent_900e6"),
+        (r"^00002 6B49D200 ", "dc_f_exponent_1800e6"),
+        (r"^00004 07D0 ", "dc_h_exponent_2e3"),
+        (r"^00006 FFFFFA24 ", "dc_f_exponent_negative"),
+        (r"^00008 40000000 ", "dc_f_fraction_path_kept"),
+    ]:
+      check(_label, re.search(_pat, _fetxt, re.M) is not None,
+            "F/H decimal-exponent values:\n"
+            + "\n".join(l for l in _fetxt.splitlines() if " DC " in l))
+
+    # A multi-suboperand DC must emit each suboperand once: the DC buffer
+    # reset per STATEMENT + handlers emitting dcBuffer[:dcBufferPtr] laid
+    # down Y,Y,H for 'DC Y(X),H'130'' (FCMCBLKS FCMHTABL +6 hw) and skewed
+    # the RLD position of an adcon following another suboperand.
+    dcmobj = td / "dcm.obj"
+    rc, out = assemble(
+        ["-o", str(dcmobj), str(FIX / "feat_dc_multi_suboperand.asm")])
+    check("dc_multi_suboperand_assembles", rc == 0,
+          f"rc={rc}\n{out.strip()[-400:]}")
+    _dtxt = b""
+    _drlds = []
+    _ddata = dcmobj.read_bytes()
+    for _i in range(0, len(_ddata), 80):
+        _card = _ddata[_i:_i + 80]
+        _kind = _card[1:4].decode("cp037", errors="replace")
+        if _kind == "TXT":
+            _dtxt += _card[16:16 + int.from_bytes(_card[10:12], "big")]
+        elif _kind == "RLD":
+            _n = int.from_bytes(_card[10:12], "big")
+            _b = _card[16:16 + _n]
+            _drlds += [(_b[j + 4], int.from_bytes(_b[j+5:j+8], "big"))
+                       for j in range(0, _n, 8)]
+    check("dc_multi_suboperand_bytes",
+          _dtxt.hex() == "00010082000000020007000000010005",
+          f"Y,H | A,H | Y | H,Y must emit once each; TXT={_dtxt.hex()}")
+    check("dc_multi_suboperand_rld_pos", (0x00, 0x0E) in _drlds,
+          f"Y(LOC) after H'1' relocates at byte 0xE; RLDs={_drlds}")
+
+    # A comma-separated nominal-value list in ONE F/H constant emits one field
+    # per value (as E/D already did).  Emitting only the first value left flight
+    # DCI#DATA's `DC H'0,1,160,37,0,0,0'` (CLOCMSGL) 6 hw short, so #DDCICYC was
+    # 670 not 676 and the whole bank-0 tail cascaded off by -6.
+    mvlst = td / "mv.lst"
+    rc, out = assemble(
+        ["-o", str(td / "mv.obj"), "-l", str(mvlst),
+         str(FIX / "feat_dc_multivalue.asm")])
+    check("dc_multivalue_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
+    check("dc_multivalue_h_list_7hw", _xref_value(mvlst, "HAFTER") == 7,
+          f"H'0,1,160,37,0,0,0' -> 7 hw; HAFTER at "
+          f"{_xref_value(mvlst, 'HAFTER')}, expected 7")
+    check("dc_multivalue_f_list_3fw", _xref_value(mvlst, "FAFTER") == 14,
+          f"F'1,2,3' -> 3 fullwords after align; FAFTER at "
+          f"{_xref_value(mvlst, 'FAFTER')}, expected 14")
+    # Byte-exact (catches a wrong-VALUE variant, not just a wrong count): the
+    # H list's 7 halfwords are 0,1,160,37,0,0,0.
+    _mvtxt = b""
+    for _i in range(0, len(_mv := (td / "mv.obj").read_bytes()), 80):
+        _c = _mv[_i:_i + 80]
+        if _c[1:4].decode("cp037", errors="replace") == "TXT":
+            _mvtxt += _c[16:16 + int.from_bytes(_c[10:12], "big")]
+    check("dc_multivalue_h_bytes",
+          _mvtxt[:14].hex() == "0000000100a00025000000000000",
+          f"H'0,1,160,37,0,0,0' bytes = {_mvtxt[:14].hex()}")
+
+    # An IOP long-format 'a' (18-bit) field spans both halfwords (a[17:16]
+    # in hw1's low bits), so its reloc must be a fullword ACON (flag 0x1C)
+    # over the whole instruction -- the old 2-byte Y RLD on hw2 dropped
+    # address bit 16 at link (flight FIOCBLKS '#BU FIOBADFA' = F001 D91A,
+    # target 1D91A; ours branched to 0D902).
+    iopaobj = td / "iopa.obj"
+    rc, out = assemble(
+        ["-o", str(iopaobj), str(FIX / "feat_iop_a_field_acon.asm")])
+    check("iop_a_field_acon_assembles", rc == 0,
+          f"rc={rc}\n{out.strip()[-400:]}")
+    _iorlds = []
+    _iodata = iopaobj.read_bytes()
+    for _i in range(0, len(_iodata), 80):
+        _card = _iodata[_i:_i + 80]
+        if _card[1:4].decode("cp037", errors="replace") == "RLD":
+            _n = int.from_bytes(_card[10:12], "big")
+            _b = _card[16:16 + _n]
+            _iorlds += [(_b[j + 4], int.from_bytes(_b[j+5:j+8], "big"))
+                        for j in range(0, _n, 8)]
+    check("iop_a_field_acon_rld", (0x1C, 2) in _iorlds,
+          f"IOP 'a' field needs a fullword ACON RLD (flag 0x1C) at the "
+          f"instruction start (byte 2); RLDs={_iorlds}")
+    # ... and #RDL's 18-bit address is an 'a' field too -- its descriptor
+    # mislabel ('c') dropped the RLD entirely (FIODEUPG '#RDL FIOWCE').
+    check("iop_rdl_address_rld", (0x1C, 6) in _iorlds,
+          f"#RDL's address field must relocate like #TDL's; RLDs={_iorlds}")
+
+    # N' of a nested-sublist argument counts the sublist's elements: a nested
+    # sublist subscripted out of &SYSLIST re-renders to its "(a,b,...)" source
+    # text, and N' used to answer 1 for it -- MLIB80 TFBCD's .BCELOOP then set
+    # only the first bus bit of every multi-bus FIOBCD mask (flight/OI30
+    # TBCD0079 = 00000E00 vs our 00000800, FIOCBLKS fidelity trace).
+    nplst = td / "np.lst"
+    rc, out = assemble(
+        ["-o", str(td / "np.obj"), "-l", str(nplst),
+         str(FIX / "feat_nprime_nested_sublist.asm")])
+    check("nprime_nested_sublist_assembles", rc == 0,
+          f"rc={rc}\n{out.strip()[-400:]}")
+    _nptxt = nplst.read_text()
+    for _pat, _label in [
+        (r"^00000 00000004 .*AL1\(4\)", "nprime_whole_arg_counts_4"),
+        (r"^00002 00000003 .*AL1\(3\)", "nprime_nested_sublist_counts_3"),
+        (r"^00004 00000001 .*AL1\(1\)", "nprime_scalar_element_counts_1"),
+    ]:
+      check(_label, re.search(_pat, _nptxt, re.M) is not None,
+            "N' sublist counts (4,3,1) expected:\n"
+            + "\n".join(l for l in _nptxt.splitlines() if "AL1" in l))
+
+    # An AIF branch taken FROM a continued statement must not eat the
+    # branch-target card: the pending continuation-card skip (skip_count and
+    # the source[-2].continues guard both assume linear flow) silently
+    # swallowed the labeled target -- MLIB80 STKINS '.SGLOPR GETCC &P1(1)',
+    # reached from its two-card AIF, never ran, so every IF (cond) compiled
+    # with a stale/zero &CCVAL mask (flight DC24 vs our DB24, FCMISYNC+A6).
+    cbrlst = td / "cbr.lst"
+    rc, out = assemble(
+        ["-o", str(td / "cbr.obj"), "-l", str(cbrlst),
+         str(FIX / "feat_branch_over_continuation.asm")])
+    check("branch_over_continuation_assembles", rc == 0,
+          f"rc={rc}\n{out.strip()[-400:]}")
+    check("branch_over_continuation_target_runs",
+          "GG=[9]" in cbrlst.read_text(),
+          "the branched-to SETTER must execute (GG=[9]):\n"
+          + "\n".join(l for l in cbrlst.read_text().splitlines()
+                      if "GG=" in l or "FALLTHROUGH" in l))
+
+    # A bare paren register over a RELOCATABLE displacement is an INDEX
+    # (base comes from the covering USING) for ANY register, R0-R3
+    # included: flight FCMDSCRM 'LH R5,TDWASBT(R3)' under 'USING TFDWA,R0'
+    # is 9DF4 6004 (AM=1, x2=R3, b=R0) where R3-as-base encoded 9DF3 0004
+    # (wrong runtime EA; same-deck (R5)/(R7) already converted).  With no
+    # covering USING the reference is current-section self-relative; the
+    # $-forced AM=0 form has no index field, so the register is dropped
+    # but the 16-bit displacement keeps its Y RLD (FCMTRACE 'BL$
+    # FCMWRAP(R3)' = C2F3 001C, linked 98BC; R3-as-base suppressed it).
+    pxlst = td / "px.lst"
+    pxobj = td / "px.obj"
+    rc, out = assemble(
+        ["-o", str(pxobj), "-l", str(pxlst),
+         str(FIX / "feat_paren_index_reloc.asm")])
+    check("paren_index_reloc_assembles", rc == 0,
+          f"rc={rc}\n{out.strip()[-400:]}")
+    _pxtxt = pxlst.read_text()
+    check("paren_index_reloc_lh_9DF4_6004",
+          re.search(r"^00000 9DF4 6004 ", _pxtxt, re.M) is not None,
+          "'LH R5,TDWASBT(R3)' under USING TFDWA,R0 must take the index "
+          "form 9DF4 6004:\n"
+          + "\n".join(l for l in _pxtxt.splitlines() if "LH " in l))
+    check("paren_index_reloc_st_37F4_6004",
+          re.search(r"^00002 37F4 6004 ", _pxtxt, re.M) is not None,
+          "'ST R7,TDWASBT(R3)' under USING TFDWA,R0 must take the index "
+          "form 37F4 6004 (FPMERLOG/FPMEVENQ analogue):\n"
+          + "\n".join(l for l in _pxtxt.splitlines() if "ST " in l))
+    check("paren_index_reloc_dollar_bytes",
+          re.search(r"^00004 C2F3 0006 ", _pxtxt, re.M) is not None,
+          "'BL$ TARG(R3)' (no USING) must keep the AM=0 self-relative "
+          "bytes C2F3 0006:\n"
+          + "\n".join(l for l in _pxtxt.splitlines() if "BL" in l))
+    _pxrlds = _rld_entries(pxobj)
+    check("paren_index_reloc_dollar_rld",
+          any(e[0] == 1 and e[3] == 10 for e in _pxrlds),
+          f"'BL$ TARG(R3)' displacement halfword (byte 10) must carry a "
+          f"Y RLD against the csect (ESD 1); RLDs={_pxrlds!r}")
+    check("paren_index_reloc_la_exempt",
+          re.search(r"^00007 EDF3 0006 ", _pxtxt, re.M) is not None,
+          "LA is exempt from the index conversion -- its paren register "
+          "is the BASE (IBM BILDNEW5 'LA$ B1,STM4(Z3)' E9F3 14DA):\n"
+          + "\n".join(l for l in _pxtxt.splitlines() if "LA " in l))
+
+    # Forward branches condense only when the SELF-CONDENSED displacement
+    # is under 54 (not the full 56-hw field): flight FCMBMAN+95 keeps
+    # 'BC 07,#@LB27' RS at exactly 54 (C7F7 0036) while its 8 twins
+    # condense; FPMOPSCN+C condenses at 53 (DCD4), FIOPDHF+13 at 48.
+    stklst = td / "stk.lst"
+    rc, out = assemble(
+        ["-o", str(td / "stk.obj"), "-l", str(stklst),
+         str(FIX / "feat_srs_estimate_sticky.asm")])
+    check("srs_fwd54_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
+    _stktxt = stklst.read_text()
+    check("srs_fwd54_boundary_stays_rs",
+          re.search(r"^00000 C7F7 0036 ", _stktxt, re.M) is not None,
+          "first branch (self-condensed displacement exactly 54) must "
+          "stay RS C7F7 0036 (flight FCMBMAN bytes):\n"
+          + "\n".join(l for l in _stktxt.splitlines() if "BC " in l))
+    check("srs_fwd54_under_condense",
+          re.search(r"^00002 DF", _stktxt, re.M) is not None
+          and re.search(r"^00009 DF", _stktxt, re.M) is not None,
+          "the 8 later branches (under the window) condense:\n"
+          + "\n".join(l for l in _stktxt.splitlines() if "BC " in l))
+
+    # The @/# indirect form over a NUMERIC displacement keeps the bare
+    # paren register as the BASE alone -- the bare-paren index swap must
+    # not duplicate it into hw2's X2 field (flight FCMTRACE +0019
+    # 'ST@# R4,0(R2)' = 34F6 1800, x2=0; ours emitted 34F6 5800).
+    anblst = td / "anb.lst"
+    rc, out = assemble(
+        ["-o", str(td / "anb.obj"), "-l", str(anblst),
+         str(FIX / "feat_atpound_numeric_base.asm")])
+    check("atpound_numeric_base_assembles", rc == 0,
+          f"rc={rc}\n{out.strip()[-400:]}")
+    check("atpound_numeric_base_encodes_34F6_1800",
+          re.search(r"^00000 34F6 1800 ", anblst.read_text(), re.M)
+          is not None,
+          "'ST@# R4,0(R2)' must keep R2 as base only (x2=0):\n"
+          + "\n".join(l for l in anblst.read_text().splitlines()
+                      if "ST@#" in l))
+
+    # DC E rounds at the 24-bit single-precision fraction -- not the
+    # truncated msw of the 56-bit double conversion (flight FPMUPMTU
+    # 'DC E'0.015'' = 3F3D70A4, ours 3F3D70A3; OI30 FCMLINIT FCM26P04
+    # 'E'26.041667'' = 421A0AAB confirms).  D stays bit-identical; the
+    # =E literal path shares the rule.
+    erlst = td / "er.lst"
+    rc, out = assemble(
+        ["-o", str(td / "er.obj"), "-l", str(erlst),
+         str(FIX / "feat_dc_e_round.asm")])
+    check("dc_e_round_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
+    for _label, _want, _desc in [
+        ("E15", "3F3D70A4", "E'0.015' rounds up at 24 bits"),
+        ("E26", "421A0AAB", "E'26.041667' rounds up at 24 bits"),
+        ("D15", "3F3D70A3D70A3D71", "D'0.015' unchanged (56-bit round)"),
+    ]:
+      _got = _listing_code(erlst, _label)
+      check(f"dc_e_round_{_label}", _got == _want, f"{_desc}: {_got!r}")
+    _eaddr, _ebytes = _pool_literal(erlst, "=E'0.1'")
+    check("dc_e_round_literal", _ebytes == "4019999A",
+          f"=E'0.1' pool slot must round at 24 bits -> 4019999A; "
+          f"got {_ebytes!r} at {_eaddr!r}")
+
+    # Literal-pool mechanics (three flight-traced fixes): (a) a mid-csect
+    # LTORG occupies its pool's size so following statements start past it
+    # (IBM FIOLGERR: pool 0x86, trailing ZCONs 0x88/0x8A, csect 140 hw;
+    # ours overlapped and sized 136); (b) the end-of-source pool origin is
+    # FULLWORD-aligned (IBM FPMRES pool at hw 0x44, FPMWAIT at 0x56, one
+    # gap halfword); (c) a relocatable =Y literal gets a pool-slot Y RLD
+    # (FPMREL =Y(FPMXQELE) 0000+RLD; FIOERRLC =Y(FIOADBST+8) 0008+RLD).
+    lplst = td / "lp.lst"
+    lpobj = td / "lp.obj"
+    rc, out = assemble(
+        ["-o", str(lpobj), "-l", str(lplst),
+         str(FIX / "feat_ltorg_pool.asm")])
+    check("ltorg_pool_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
+    _lptxt = lplst.read_text()
+    check("ltorg_pool_advances_lc",
+          re.search(r"^00004 00000000 .*ZC1      DC", _lptxt, re.M)
+          is not None,
+          "the DC after a 2-hw LTORG pool at hw 2 must land at hw 4:\n"
+          + "\n".join(l for l in _lptxt.splitlines() if "ZC1" in l))
+    check("ltorg_pool_csect_size",
+          re.search(r"^LP        SD 0001 000000 00000E$", _lptxt, re.M)
+          is not None,
+          "csect must size 0xE hw (code 0xB + gap + 2-hw end pool):\n"
+          + "\n".join(l for l in _lptxt.splitlines() if " SD " in l))
+    check("ltorg_pool_end_pool_fullword",
+          re.search(r"^00006 91F7 0004      000C ", _lptxt, re.M)
+          is not None,
+          "=Y(LOCLBL) must sit at hw 0xC (fullword origin, gap at 0xB):\n"
+          + "\n".join(l for l in _lptxt.splitlines() if "91F7" in l))
+    _lprlds = _rld_entries(lpobj)
+    check("ltorg_pool_y_local_rld",
+          (1, 1, 0x00, 24) in _lprlds,
+          f"=Y(LOCLBL) pool slot (byte 0x18) needs a Y RLD against the "
+          f"csect; RLDs={_lprlds!r}")
+    check("ltorg_pool_y_extrn_rld",
+          (2, 1, 0x00, 26) in _lprlds,
+          f"=Y(EXTV+8) pool slot (byte 0x1A) needs a Y RLD against the "
+          f"EXTRN; RLDs={_lprlds!r}")
+    # ... slot images: local = its halfword address (000B), EXTRN = the
+    # bare addend (0008).
+    _lptxtb = b""
+    _lpdata = lpobj.read_bytes()
+    for _i in range(0, len(_lpdata), 80):
+        _card = _lpdata[_i:_i + 80]
+        if _card[1:4] == b"\xe3\xe7\xe3":      # EBCDIC 'TXT'
+            _lptxtb += _card[16:16 + int.from_bytes(_card[10:12], "big")]
+    check("ltorg_pool_slot_images",
+          _lptxtb[24:28].hex() == "000b0008",
+          f"pool slots at 0x18 must be 000B 0008; TXT={_lptxtb.hex()}")
+
+    # sects[].used must not ratchet across compile passes: a pass that
+    # converges SMALLER must not keep the previous pass's high-water mark
+    # (flight FIOPDHF = 294 hw, ours sized 295 with a phantom trailing
+    # 0000).  The fixture's first branch condenses RS->SRS only on the
+    # pass AFTER the second one does, so the stale 'used' kept the longer
+    # layout's size.
+    nrlst = td / "nr.lst"
+    rc, out = assemble(
+        ["-o", str(td / "nr.obj"), "-l", str(nrlst),
+         str(FIX / "feat_used_no_ratchet.asm")])
+    check("used_no_ratchet_assembles", rc == 0,
+          f"rc={rc}\n{out.strip()[-400:]}")
+    _nrtxt = nrlst.read_text()
+    check("used_no_ratchet_size_54",
+          re.search(r"^TC        SD 0001 000000 000036$", _nrtxt, re.M)
+          is not None,
+          "csect must size 0x36 hw (both branches SRS), not the stale "
+          "0x37:\n" + "\n".join(l for l in _nrtxt.splitlines()
+                                if " SD " in l))
+    check("used_no_ratchet_first_branch_srs",
+          re.search(r"^00000 DFD4 ", _nrtxt, re.M) is not None,
+          "first branch must condense to SRS DFD4 (self-condensed "
+          "displacement 53, inside the 54 forward window):\n"
+          + "\n".join(l for l in _nrtxt.splitlines() if " B " in l))
+
+    # CPU-csect alignment gaps fill with C9FB (the SVC opcode halfword),
+    # covered by TXT -- RUNLST STBYTE '0000D C9FB' (DS 0F), CASV/IREM/
+    # CPASP (LTORG), ITOC (DC F); DASS FPMRES +0043 'C9FB *** ALIGNMENT
+    # GAP ***'.  CNOP keeps its own executable-NOP fill (D800/C000).
+    gfobj = td / "gf.obj"
+    rc, out = assemble(
+        ["-o", str(gfobj), str(FIX / "feat_gap_fill.asm")])
+    check("gap_fill_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
+    _gftxt = b""
+    _gfdata = gfobj.read_bytes()
+    for _i in range(0, len(_gfdata), 80):
+        _card = _gfdata[_i:_i + 80]
+        if _card[1:4] == b"\xe3\xe7\xe3":      # EBCDIC 'TXT'
+            _gftxt += _card[16:16 + int.from_bytes(_card[10:12], "big")]
+    check("gap_fill_c9fb",
+          _gftxt.hex() ==
+          "9af700020005c9fb00010007000bc9fb00000009000dd800c7e2",
+          "LTORG gap (hw 3) and DC F gap (hw 7) must fill C9FB, the "
+          f"CNOP gap must keep D800; TXT={_gftxt.hex()}")
+
     # DC A(symbol) address constant.  Before the fix the A-type DC branch
     # only handled the self-defining A'hex' form; the A(expr) form fell
     # through to 4 zero bytes with NO relocation, so an A(EXTRN)/A(label)
@@ -854,16 +1339,28 @@ def integration_tests():
           any(e[0] == 2 and e[2] == 0x1C for e in rld),
           f"expected a 4-byte RLD against ESDID 2 (EXTSYM); got {rld!r}")
 
-    # DC Z(,sym,flags) ZCON: emits a Z-type RLD (flag 0x04) against the
-    # external symbol, with the ZCON flags byte in the data image at byte 2
-    # ([0, 0, flags, 0]).  This full assemble->object path had no fixture.
+    # DC Z(...) / =Z(...) ZCON relocation subfields: 'Z(,sym...)' (code
+    # subfield EMPTY) relocates the DATA address subfield -> ZCON/data RLD
+    # (flag 0x50, linker patches DSR: flight FCMNINIT '=Z(,FPMXQETB+2,0)'
+    # links 8B6C 0001); 'Z(sym...)' relocates the CODE subfield -> ZCON/code
+    # (0x04) exactly as before.  The =Z literal's pool slot carries the same
+    # data-subfield flag.
     zobj = td / "zcon.obj"
     rc, out = assemble(["-o", str(zobj), str(FIX / "feat_dc_z_zcon.asm")])
     check("dc_z_zcon_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
     zrld = _rld_entries(zobj)
-    check("dc_z_emits_ztype_rld",
-          any(e[0] == 2 and e[2] == 0x04 for e in zrld),
-          f"expected a Z-type RLD (flag 0x04) against ESDID 2; got {zrld!r}")
+    check("dc_z_data_subfield_rld_0x50",
+          any(e[0] == 2 and e[2] == 0x50 and e[3] == 0 for e in zrld),
+          f"'Z(,EXTSYM,flags)' at byte 0 must punch ZCON/data (0x50) "
+          f"against ESDID 2; got {zrld!r}")
+    check("dc_z_code_subfield_rld_0x04",
+          any(e[0] == 2 and e[2] == 0x04 and e[3] == 4 for e in zrld),
+          f"'Z(EXTSYM,,flags)' at byte 4 must keep ZCON/code (0x04); "
+          f"got {zrld!r}")
+    check("dc_z_literal_data_subfield_rld_0x50",
+          any(e[0] == 2 and e[2] == 0x50 and e[3] > 8 for e in zrld),
+          f"the '=Z(,EXTSYM+2,0)' literal-pool slot must punch ZCON/data "
+          f"(0x50); got {zrld!r}")
 
     # ESD ordering: SD (control sections) and ER (external refs) are
     # assigned IDs in SOURCE-APPEARANCE order, interleaved; LD (ENTRY)
@@ -1071,6 +1568,29 @@ def integration_tests():
     check("undefined_symbol_still_errors",
           rc != 0 and "intolerable" in out,
           f"genuinely-undefined symbol must abort; rc={rc}\n{out.strip()[-300:]}")
+
+    # Compiler-style diagnostics: an aborting assembly reports each
+    # intolerable line as 'file:line: error: message' with a source excerpt --
+    # NOT a dump of the whole expanded deck.  A macro-generated line points at
+    # the macro-definition card, shows the substituted operand, and traces the
+    # invocation back to the primary source (fixture: DC Y(&SYM) at line 4,
+    # invoked as 'GENBAD NOSUCH' at line 6).
+    rc, out = asm("feat_diag_format.asm")
+    check("diag_file_line_prefix",
+          rc != 0 and re.search(r"feat_diag_format\.asm:4: error: ", out),
+          f"expected 'feat_diag_format.asm:4: error: ...'; rc={rc}\n"
+          f"{out.strip()[-400:]}")
+    check("diag_expands_to",
+          "expands to:" in out and "Y(NOSUCH)" in out,
+          f"expected substituted-operand note 'expands to: ... Y(NOSUCH)':\n"
+          f"{out.strip()[-400:]}")
+    check("diag_invocation_note",
+          re.search(r"in expansion of macro GENBAD, invoked from .*"
+                    r"feat_diag_format\.asm:6", out),
+          f"expected invocation-chain note pointing at line 6:\n"
+          f"{out.strip()[-400:]}")
+    check("diag_no_full_dump", "DIAGT    CSECT" not in out,
+          "error report must not echo non-erroring source lines")
 
     # Overflow/carry branches (BOV/BOC/BVC).  Object code pinned to the
     # OI301700 ground-truth listing: all encode in the BVCF family (SRS
@@ -1604,6 +2124,87 @@ def maclib_tests():
           f"expected 4 return-register MNOTEs (2 omitted + 2 over-8), got {n_reg}")
     check("proctest_mismatch_diagnostics", n_mism == 2,
           f"expected 2 return-register-mismatch MNOTEs, got {n_mism}")
+
+    # A null macro parameter (omitted operand, or the explicitly-empty `,,`
+    # positional) used in ARITHMETIC context is 0, not an error -- the
+    # MLIB80/BMTENT `AIF (&DLAYFLG NE 0)` shape that aborted FCMBMTPG when
+    # &DLAYFLG was passed empty.  NULLP branches on &B NE 0 and &C EQ 2;
+    # each invocation must take the null-is-zero arm, and a supplied value
+    # must still compare normally.  Expected emission, in order:
+    #   NULLP X,,2 -> 0B0B C2C2   (explicit empty mid-list)
+    #   NULLP X    -> 0B0B 0C0C   (fully omitted)
+    #   NULLP X,1,2-> B1B1 C2C2   (supplied values unaffected)
+    npobj = td / "nullparm.obj"
+    rc, out = assemble(
+        ["-o", str(npobj), str(FIX / "nullparm_arith.asm")], timeout=60)
+    check("nullparm_arith_assembles", rc == 0,
+          f"null macro parameter in AIF arithmetic must be 0, not an error: "
+          f"rc={rc}\n{out.strip()[-400:]}")
+    npb = npobj.read_bytes() if npobj.exists() else b""
+    # SPON/SPOFF -> ' PROT' control-card capture.  Expected halfword ranges
+    # (hex, end-exclusive): PROTA protects hw 1-3 and 4-5 (the SPON at hw 4
+    # runs to end of csect); PROTB opens protected (state persists across the
+    # CSECT switch) for hw 0-1; PROTC is managed with nothing protected
+    # (bare card).  Byte offsets: each DC X'nnnn' is one halfword.
+    spobj = td / "sponprot.obj"
+    rc, out = assemble(["-o", str(spobj), str(FIX / "feat_spon_prot.asm")],
+                       timeout=60)
+    check("spon_prot_assembles", rc == 0, f"rc={rc}\n{out.strip()[-300:]}")
+    from ap101Utils import objModule as _om
+    prots = {}
+    if spobj.exists():
+        for r in _om.ObjectFile(str(spobj)).controlStatements:
+            t = r.text.split()
+            if t and t[0] == "PROT":
+                prots[t[1]] = t[2] if len(t) > 2 else ""
+    check("spon_prot_ranges",
+          prots.get("PROTA") == "1-3,4-5" and prots.get("PROTB") == "0-1"
+          and prots.get("PROTC") == "",
+          f"PROT cards: {prots!r} (want PROTA='1-3,4-5' PROTB='0-1' "
+          f"PROTC='')")
+
+    check("nullparm_arith_branches",
+          b"\x0b\x0b\xc2\xc2" in npb and b"\x0b\x0b\x0c\x0c" in npb
+          and b"\xb1\xb1\xc2\xc2" in npb,
+          "expected 0B0BC2C2 (empty mid-list), 0B0B0C0C (omitted), "
+          "B1B1C2C2 (supplied) in the object text")
+
+    # Subscripted SET symbols with NO LCLC/GBLC declaration -- FCMBMTMC's
+    # comfault-mask tables (`&APLHRM(1) SETC 'E0000000'` ... with no
+    # declaration at all, read back as X'&APLHRM(&AHRINDX)').  `&X(k) SETx`
+    # must implicitly declare a local ARRAY and grow it on write (incl. the
+    # multi-value consecutive-element form).  GENMASK 1 -> E000 (element 1,
+    # implicit declaration); GENMASK 3 -> F800 (multi-value growth).
+    saobj = td / "setcarr.obj"
+    rc, out = assemble(
+        ["-o", str(saobj), str(FIX / "feat_setc_implicit_array.asm")],
+        timeout=60)
+    check("setc_implicit_array_assembles", rc == 0,
+          f"undeclared subscripted SETC must implicitly declare an array: "
+          f"rc={rc}\n{out.strip()[-400:]}")
+    sab = saobj.read_bytes() if saobj.exists() else b""
+    check("setc_implicit_array_values", b"\xe0\x00\xf8\x00" in sab,
+          "expected E000 (element 1) then F800 (multi-value growth to "
+          "element 3) in the object text")
+
+    # A macro argument whose '&' rides ONLY the continuation card (FCMBMTMC's
+    # `BMTENT ...,` / `  0C,&AERRLBL` shape) must still substitute -- the
+    # guard must test the merged fields, not the first card image.  And the
+    # continued invocation's dangling continuation flag must not swallow the
+    # first EXPANDED statement in codegen (the generated DC is the very first
+    # statement of BENT's expansion here).  Expected: X1 DC XL.8'0C',
+    # YL.8(FOO-TAB) -> 0C01.
+    ccobj = td / "contcard.obj"
+    rc, out = assemble(
+        ["-o", str(ccobj), str(FIX / "feat_cont_card_macarg.asm")],
+        timeout=60)
+    check("cont_card_macarg_assembles", rc == 0,
+          f"variable on a continuation card must substitute: "
+          f"rc={rc}\n{out.strip()[-400:]}")
+    ccb = ccobj.read_bytes() if ccobj.exists() else b""
+    check("cont_card_macarg_expansion_emitted", b"\x0c\x01" in ccb,
+          "expected 0C01 (XL.8'0C',YL.8(FOO-TAB)): the expanded DC must not "
+          "be absorbed as a continuation card")
 
 
 def _xref_value(listing_path, symbol):

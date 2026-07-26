@@ -36,6 +36,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "asm101"))
 
 from asm101 import iop_instr as iop
+from asm101.instrset import sign_extend
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 LISTINGS = [
@@ -219,7 +220,7 @@ def check_line(rec, fname, lineno, res):
            % (dec_fields.get("a", 0), rec["adr1"]))
   if base in PC_RELATIVE and rec["adr1"] is not None and "d" in desc.fields:
     bits = desc.fields["d"][2]
-    disp = iop.sign_extend(dec_fields.get("d", 0), bits)
+    disp = sign_extend(dec_fields.get("d", 0), bits)
     want = rec["adr1"] - (rec["loc"] + 1)
     if disp != want:
       fail("pc-rel disp: decoded %d, ADR1 %05X - (loc+1 %05X) = %d"

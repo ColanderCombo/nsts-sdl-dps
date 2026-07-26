@@ -35,7 +35,9 @@
 #     I   a 1-bit mode bit (e.g. @INT OR-with-X); not an operand, defaults to 0
 #
 
-from .instrset import InstructionSet, sign_extend
+from functools import cache
+
+from .instrset import InstructionSet
 from . import instrdefs
 
 MSC_DESC = {name: d["d"] for name, d in instrdefs.MSC_DEFS.items()}
@@ -89,6 +91,7 @@ PC_RELATIVE = frozenset(
 _INDEX_FIELDS = ("i", "m")
 
 
+@cache
 def index_field(name):
   """The name of 'name's 1-bit index-mode field ('i' or 'm'), set by a trailing
   "(1)", or None if the op has none.  Lets the codegen handle the BCE 'm' ops the
@@ -102,12 +105,13 @@ def index_field(name):
   return None
 
 
+@cache
 def value_fields(name):
   desc = IOP.descriptor(name)
   if desc is None:
     return []
   seen = []
-  for ch in desc.raw:
+  for ch in desc.bits:
     if ch in "01_" or ch in seen:
       continue
     seen.append(ch)

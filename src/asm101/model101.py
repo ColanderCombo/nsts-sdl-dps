@@ -27,8 +27,7 @@
   - RS->SRS optimization rework, modeled on AS037F1's operand decomposition
     procedure (IEUF8M DECOMP: resolve USING base+displacement, smallest
     displacement wins, higher register on ties), so the optimizer and codegen
-    resolve identically; new behavior seems to match the original (flight)
-    AP-101 assembler.
+    resolve identically, matching the original AP-101 assembler.
   
   - IOP instruction support added
   
@@ -53,12 +52,14 @@
   - EQU forward references, allow multiple EXTERNS of the same symbol.
 '''
 
+import re
 import sys
 import copy
 from dataclasses import dataclass, field
-from .expressions import error, unroll, astFlattenList, \
+from .expressions import error, \
     evalArithmeticExpression, asmContext, NO_LOCALS, Reloc
-from .larkparse import Int, parse, zRelocTarget
+from .larkparse import parse
+from .astnodes import Int, zRelocTarget
 from .statement import Statement
 from ap101Utils.addr import Addr
 from ap101Utils.addrcon import ZCon
@@ -90,8 +91,8 @@ so it converges).
 entries not yet sized are flagged "ambiguous"); a few corners ('forceAM0',
 the FP-op exclusions) remain empirical, tuned to reproduce the original
 assembler's bytes exactly.  SRS_CEILING=56 matches the POO's register-
-designated shift-count threshold (see 'SHIFT_REG_COUNT_BASE'), applied uniformly
-as the flight assembler evidently did.
+designated shift-count threshold (see 'SHIFT_REG_COUNT_BASE'), applied
+uniformly by the original assembler.
 
 Passes (an initial macro/field pass already ran before generateObjectCode):
     Pass 0  parse each operand to an AST, once, so pass-1 lookahead is cheap;
@@ -133,11 +134,34 @@ assembler and the simulator cannot disagree.
 '''
 # SRS displacement-fit bounds.  The ceiling is 56, not 64: D values 56-63
 # are the POO's register-designated SHIFT-count form (D = 56+n -> count in
-# bits 10-15 of Rn; 6246156B p.78).  The flight assembler applied the 56
-# ceiling to every SRS op.
+# bits 10-15 of Rn; 6246156B p.78).  The original assembler applied the
+# 56 ceiling to every SRS op.
 SRS_FLOOR = 0
 SRS_CEILING = 56
+# FORWARD branches condense to the SRS short form only when the SELF-
+# CONDENSED displacement (the distance after the branch itself shrinks a
+# halfword) is below 54, not the full 56-halfword field: the assembler
+# reserves margin on forward distances (decided before the target
+# settles); backward distances are exact at decision time and use the
+# full window.  Callers subtract 1 from a currently-RS-sized branch's
+# measured distance before this test.
+SRS_FORWARD_BRANCH_CEILING = 54
 SHIFT_REG_COUNT_BASE = 56
+
+
+# SRS branch displacement-fit tests, shared by the pass-1 ambiguity resolver
+# (optimizeScratch) and the codegen (handleSrsOrRs) so both make the same
+# form decision.  'd' is the PC-relative halfword distance (updated-IC
+# convention).
+def fitsForwardSrsBranch(d, stmt):
+  # A branch currently sized RS (4 bytes) shrinks a halfword when condensed,
+  # so its measured distance gets a 1-halfword credit before the ceiling.
+  return d >= SRS_FLOOR and \
+      d - (1 if stmt.length == 4 else 0) < SRS_FORWARD_BRANCH_CEILING
+
+
+def fitsBackwardSrsBranch(d):
+  return d < 0 and d > -SRS_CEILING
 
 # Internal ESD-id <-> symbol/section maps.  Each CSECT/DSECT and each EXTRN
 # symbol gets a unique positive id (the relocation-term key in a 'Reloc'); the
@@ -174,6 +198,7 @@ def unhash(value):
 #                rather than emit a garbage value.
 # Only values that reach a relocation-consuming site (one that calls unhash) get
 # classified; a complex value that never reaches one is not caught.
+# No production caller; kept as documentation of the taxonomy above.
 def classify(value):
   sect, off = unhash(value)
   if sect is not None:
@@ -188,13 +213,22 @@ def classify(value):
 def _num(value):
   return value.num if isinstance(value, Reloc) else value
 
+
+# True when the operand's D2 is a bare numeric displacement (an Int leaf).
+# A numeric D2 condenses to SRS in both the 'expr(,Rn)' and 'expr(Rn)' forms;
+# optimizeScratch and handleSrsOrRs share this test so both make the same
+# form decision.
+def isNumberD2(ast):
+  return isinstance(ast.get("D2"), Int)
+
 # Similar to 'unhash', but uses the 'USING' list, and returns a pair
 # B2,D2 (or None,None in case of error).  This is the AP-101 analogue of
 # AS037F1's IEUF8M DECOMP: same-section USING entries only (the subtraction
-# must cancel to a bare int), smallest displacement wins, highest register on
-# ties ('<=', matching 'findB2D2' -- DECOMP rejects only a strictly-higher
-# displacement).
-def unUsing(using, hashed):
+# must cancel to a bare int), smallest displacement <= 'limit' wins, highest
+# register on ties ('<=' -- DECOMP rejects only a strictly-higher
+# displacement).  Also the body of 'findB2D2', whose limit is the 12-bit
+# displacement field's 4095.
+def unUsing(using, hashed, limit=0xFFFFFF):
   b2 = None
   d2 = None
   for i in range(len(using)):
@@ -205,12 +239,38 @@ def unUsing(using, hashed):
     # are in the same section; a still-relocatable difference (cross-section)
     # is a 'Reloc', never a valid base displacement, so skip it.
     j = hashed - u[0]
-    if not isinstance(j, int) or j < 0 or j > 0xFFFFFF:
+    if not isinstance(j, int) or j < 0 or j > limit:
       continue
     if d2 == None or j <= d2:
       b2 = i
       d2 = j
   return b2,d2
+
+# Re-resolve each USING base of a collect-pass snapshot against the CURRENT
+# symtab.  A pass-1 USING whose base symbol is a forward reference resolves
+# against the pre-pass 'preliminary' symtab entries -- byte-unit position
+# over-estimates -- while optimizeScratch evaluates instruction operands
+# against settled pass-1 values.  Mixing the two skews every displacement
+# under that USING (e.g. RUNASM SQRT's 'USING A,R1' with A defined later in
+# #LSQRT: base A recorded at +4, settled A at +2 -> 'A R6,A' computed d2=-2,
+# SRS wrongly rejected).  The SRS/RS size decision must compare like with
+# like, so recompute the base the same way codegen eventually will.
+def refreshUsing(using):
+  fresh = []
+  for u in using:
+    if u is None or len(u) < 7 or u[3] is None:
+      fresh.append(u)
+      continue
+    h, section, address, locAst, k, ustmt, star = u
+    h2 = evalArithmeticExpression(locAst, NO_LOCALS, ustmt, symtab, star,
+                                  severity=0)
+    if h2 is None:
+      fresh.append(u)
+      continue
+    h2 = h2 + 4096 * k
+    s2, a2 = unhash(h2)
+    fresh.append((h2, s2, a2 if a2 is not None else address))
+  return fresh
 
 # Resolve a combined halfword offset back to the actual CSECT that contains it,
 # for building an RLD relocation.  Returns the name of the (non-DSECT) section
@@ -222,7 +282,10 @@ def resolveCSect(value, sects, default, exclude=None):
     if sd.dsect or sd.offset is None:
       continue
     so = sd.offset.hw
-    if so <= value < so + sd.used.hw and sn != exclude:
+    # Mid-pass, a LATER section's 'used' is still growing (it resets with
+    # pos1 each compile pass); the previous pass's 'usedPrev' is the size
+    # estimate for ranging.
+    if so <= value < so + max(sd.used.hw, sd.usedPrev.hw) and sn != exclude:
       return sn
   return default
 
@@ -290,12 +353,39 @@ def appendReloc(relocations, symbol, section, address, type='Y'):
 # Write 'value' big-endian into buf[ptr : ptr+nbytes] and return the advanced
 # pointer.  Used to lay DC values down into the data buffer.
 def packBE(buf, ptr, value, nbytes):
+  if ptr + nbytes > len(buf):
+    # A DC suboperand list can outgrow the initial allocation; grow it.
+    # Bytes past the final ptr are never emitted.
+    buf.extend(bytearray(ptr + nbytes - len(buf) + 1024))
   j = (nbytes - 1) * 8
   for _ in range(nbytes):
     buf[ptr] = (value >> j) & 0xFF
     ptr += 1
     j -= 8
   return ptr
+
+def decimalExponentInt(fstr):
+  """An IBM fixed-point constant with a decimal exponent whose value is an
+  exact integer -- F'900E6' is 900*10**6 = 900000000 (FCMCBLKS FPM15MIN,
+  IBM 35A4E900), not a fraction of full scale.  Returns None for any other
+  form (no exponent, or a non-integral value), which keeps the existing
+  integer/fraction paths untouched."""
+  m = re.match(r"^([+-]?)(\d+)(?:\.(\d*))?E([+-]?\d+)$", fstr)
+  if not m:
+    return None
+  sign, whole, frac, exp = m.groups()
+  frac = frac or ""
+  e = int(exp) - len(frac)
+  digits = int(whole + frac) if whole + frac else 0
+  if e < 0:
+    p = 10 ** -e
+    if digits % p:
+      return None
+    digits //= p
+  else:
+    digits *= 10 ** e
+  return -digits if sign == "-" else digits
+
 
 def parseDcLength(length):
   """Parse a DC/DS length modifier (the suboperand 'length' field, e.g.
@@ -341,8 +431,16 @@ def parseSignedInt(s):
   v = int(digits)
   return -v if neg else v
 
-from .model101tables import *
-from .instrdefs import CPU, rs_form_bits, rs_hw1, implied_r1, srs_d2_units
+from .model101tables import (
+    APPROPRIATE_RULES, ARGS_BCE, ARGS_MSC, ARGS_RI, ARGS_RR, ARGS_RS_ONLY,
+    ARGS_SI, ARGS_SRS_AND_RS, ARGS_SRS_ONLY, ARGS_SRS_OR_RS, BRANCH_ALIASES,
+    BRANCH_ALIASES_R, BRANCH_AT_POUND_VARIANTS, FP_OPERATIONS_SP,
+    GENERATOR_OPS, KNOWN_INSTRUCTIONS, SHIFT_OPERATIONS, generateRS0,
+    generateRS1, generateSRS,
+)
+from .instrdefs import (
+    AP101S_ONLY, CPU, base_op, rs_form_bits, rs_hw1, implied_r1, srs_d2_units,
+)
 from . import iop_instr
 
 # RR mnemonics whose R1 is implied by the mnemonic itself (so an explicit R1
@@ -358,6 +456,16 @@ class Section:
   esdSeq: int                     # source-appearance position (ESD order key)
   pos1: Addr = Addr(0)            # location counter (a byte address)
   used: Addr = Addr(0)            # high-water mark: live bytes of 'memory'
+  usedPrev: Addr = Addr(0)        # previous compile pass's final 'used' --
+                                  # the size ESTIMATE mid-pass readers (the
+                                  # findB2D2 current-section fallback,
+                                  # resolveCSect) need while this pass's
+                                  # 'used' is still growing.  'used' itself
+                                  # resets with pos1 at each compile pass, so
+                                  # a pass that converges SMALLER doesn't
+                                  # ratchet the csect size (a stale larger
+                                  # size leaves a phantom trailing zero
+                                  # halfword).
   scratch: list = field(default_factory=list)
   dsect: bool = False
   offset: Addr | None = None      # final origin in the contiguous CSECT
@@ -462,7 +570,7 @@ none follows), so literals are forward references until that pool is placed.
 Duplicates are merged within one LTORG-to-LTORG interval but kept per pool
 across intervals; two literals with equal value but different attributes (e.g.
 =X'1234' vs =X'0000001234', different lengths) are not duplicates.  =A(...)
-literals do not occur in Shuttle flight software and are unsupported.
+literals are unsupported.
 
 There are N+1 'LiteralPool's for N 'LTORG's, the last being the default pool.
 A new pool starts assigned to CSECT "" with no offset yet; the real CSECT and
@@ -484,13 +592,17 @@ class Literal:
                doesn't (see 'literalIndex')
     assembled  the encoded bytes (bytearray); refreshed alongside 'value'
     zsym       for a =Z literal, the reloc-target symbol name (the pool slot
-               gets a 'Z' RLD against it at flush time); None otherwise"""
+               gets a 'Z' RLD against it at flush time); None otherwise
+    zdata      for a =Z literal, True when the target is the DATA address
+               subfield ('=Z(,sym...)') -- the pool-slot RLD is ZCON/data
+               ('ZD', 0x50) so the linker patches DSR, not ZCON/code"""
   value: object
   T: str
   L: int
   operand: str
   assembled: bytearray
   zsym: object = None
+  zdata: bool = False
 
 @dataclass
 class LiteralPool:
@@ -505,20 +617,62 @@ class LiteralPool:
                the 'Literal' objects so a literal can be looked up without
                already knowing its offset
     size       total pool size in bytes
-    literals   the unique 'Literal's ('literalIndex' defines the identity)"""
+    literals   the unique 'Literal's ('literalIndex' defines the identity)
+    index      operand text -> position in 'literals'; maintained by 'add'
+               ('literals' is append-only, never reordered)
+    atLtorg    True for a pool closed by an explicit mid-csect LTORG (its
+               origin is the LTORG's location and the LC advances past it);
+               False for the default end-of-source pool (placed after the
+               csect's high-water mark)"""
   sect: str = ""
   offset: Addr | None = None
   alignment: int | None = None
   offsets: list = field(default_factory=list)
   size: int = 0
   literals: list = field(default_factory=list)
+  index: dict = field(default_factory=dict)
+  atLtorg: bool = False
+
+  def add(self, literal):
+    self.index[literal.operand] = len(self.literals)
+    self.literals.append(literal)
+
+# Arrange a pool's literals by alignment bucket (8/4/2/1) and compute their
+# in-pool byte offsets, the pool's own alignment, and its total size.  Shared
+# by 'ltorg' (a mid-csect pool's size must be known AT the LTORG, so the
+# location counter can advance past it) and the end-of-pass-1 layout of the
+# default end-of-source pool.
+def layoutPool(pool):
+  offset = 0
+  pool.alignment = 2
+  pool.offsets = [None] * len(pool.literals)
+  pool.size = 0
+  for alignment in [8, 4, 2, 1]:
+    for i, lit in enumerate(pool.literals):
+      if pool.offsets[i] != None:
+        continue
+      if (lit.L % alignment) != 0:
+        continue
+      if alignment > pool.alignment:
+        pool.alignment = alignment
+      rem = offset % alignment
+      if rem != 0:
+        offset += alignment - rem
+      pool.offsets[i] = offset
+      offset += lit.L
+      if offset > pool.size:
+        pool.size = offset
 
 literalPools = [LiteralPool()]
-# Call this whenever an 'LTORG' is encountered.
+# Call this whenever an 'LTORG' is encountered.  The closed pool's contents
+# are complete here, so it is laid out immediately -- handleLtorg needs its
+# size to advance the location counter past it.
 def ltorg(sect):
   literalPool = literalPools[-1]
   literalPool.sect = sect
   literalPool.offset = sects[sect].pos1
+  literalPool.atLtorg = True
+  layoutPool(literalPool)
   literalPools.append(LiteralPool())
 # Call this at the end of the source code.
 def endOfSource():
@@ -538,11 +692,7 @@ def endOfSource():
 # the stable identity and the slot's length (its layout footprint) is
 # value-independent, so refreshing a slot's value in place is layout-safe.
 def literalIndex(literalPool, literal):
-  key = literal.operand
-  for i, lit in enumerate(literalPool.literals):
-    if lit.operand == key:
-      return i
-  return -1
+  return literalPool.index.get(literal.operand, -1)
 
 @dataclass(frozen=True)
 class DcType:
@@ -589,6 +739,7 @@ def evalLiteralAttributes(stmt, ast, symtab):
     scale = pow(2.0, -lscale)
   numerical = True
   zsym = None        # set by the Z branch (=Z literal reloc-target symbol)
+  zdata = False      # set by the Z branch (data-subfield target -> 'ZD' RLD)
   if t == "C":
     numerical = False
     value = body.replace("''", "'").replace("&&", "&")
@@ -613,7 +764,8 @@ def evalLiteralAttributes(stmt, ast, symtab):
     value = round(value)
   elif t in ("E", "D"):
     l = DCTYPES[t].nbytes
-    msw, lsw = toFloatIBM(body, scale)
+    # =E rounds at the 24-bit single-precision fraction, like DC E.
+    msw, lsw = toFloatIBM(body, scale, single=(t == "E"))
     value = msw if t == "E" else (msw << 32) | lsw
   elif t == "Y":
     l = DCTYPES[t].nbytes
@@ -638,6 +790,7 @@ def evalLiteralAttributes(stmt, ast, symtab):
     numerical = False
     bytes = ZCon.prelink(zadd, zflags).to_bytes()
     zsym = zname
+    zdata = getattr(lit, "zdata", False)
   else:
     error(stmt, f"Unknown constant-type specifier '{t}'")
     return None
@@ -676,7 +829,8 @@ def evalLiteralAttributes(stmt, ast, symtab):
     operand += f"({raw if raw is not None else ''})"
   else:
     operand += f"'{body}'"
-  return Literal(value=l2, T=t, L=l, operand=operand, assembled=bytes, zsym=zsym)
+  return Literal(value=l2, T=t, L=l, operand=operand, assembled=bytes,
+                 zsym=zsym, zdata=zdata)
 
 #=============================================================================
 # 'optimizeScratch' analyzes the "scratch" structures created during the
@@ -687,8 +841,6 @@ def evalLiteralAttributes(stmt, ast, symtab):
 # AM form selection" note at the top of the file.
 
 def optimizeScratch():
-  global symtab, sects, literalPools
-
   def adjust(scratch, stmt, i):
     entry = scratch[i]
     entry["length"] = 2
@@ -708,7 +860,11 @@ def optimizeScratch():
         nextPos2 = nextPos1.hw
         entry2["pos1"] = nextPos1
         entry2["properties"].pos1 = nextPos1
-        if "name" in entry2:
+        if "name" in entry2 and entry2["properties"].operation != "EQU":
+          # An EQU symbol's value comes from its operand expression, not its
+          # position, so don't overwrite it here -- the outer walk re-evaluates
+          # it on arrival.  A forward-referencing EQU (see the EQU branch
+          # below) may not even be in symtab yet.
           name = entry2["name"]
           sym2 = symtab[name]
           sym2.address = nextPos2
@@ -720,7 +876,6 @@ def optimizeScratch():
   literalPoolNumber = 0
   for sect in sects:
     scratch = sects[sect].scratch
-    previouslyDefined = {}
     for i in range(len(scratch)):
       entry = scratch[i]
       stmt = entry["properties"]
@@ -750,11 +905,13 @@ def optimizeScratch():
           symtab[n].properties = stmt
         continue
       elif operation == "LTORG":
+        # A mid-csect LTORG occupies its pool's size (see handleLtorg); its
+        # scratch length must survive into stmt.length so the end-of-pass-1
+        # length replay keeps the pool's room.
+        stmt.length = entry["length"]
         literalPoolNumber += 1
         continue
       stmt.length = entry["length"]
-      if "name" in entry:
-        previouslyDefined[entry["name"]] = i
       if not entry["ambiguous"]:
         continue
       # We've found an ambiguous instruction (i.e., SRS vs RS) that we
@@ -773,11 +930,9 @@ def optimizeScratch():
           # B2 was really X2.
           entry["ambiguous"] = False
           continue
+      # An AST with neither L2 nor D2 leaves d2 unset; None drops it below.
+      d2 = None
       if "L2" in ast:
-        l2 = evalArithmeticExpression(ast["L2"], NO_LOCALS, stmt, \
-                                      symtab, \
-                                      symtab[sect].value + entry["pos1"].hw, \
-                                      severity=0)
         attributes = evalLiteralAttributes(stmt, ast, symtab)
         if attributes == None:
           entry["ambiguous"] = False
@@ -790,7 +945,6 @@ def optimizeScratch():
           continue
         offset = literalPool.offsets[index] + literalPool.offset
         d2 = symtab[literalPool.sect].value + offset.hw
-        pass
       elif "D2" in ast:
         d2 = evalArithmeticExpression(ast["D2"], NO_LOCALS, stmt, \
                                       symtab, \
@@ -801,8 +955,13 @@ def optimizeScratch():
         continue
       section, value = unhash(d2)
       if section == None:
-        if "B2" in ast and value >= SRS_FLOOR and value < SRS_CEILING \
-                and operation != "BCT":
+        # The COMMA form 'expr(,Rn)' (B2ONLY -- index slot explicitly
+        # omitted) never condenses to SRS, even when the value fits; the
+        # bare form 'expr(Rn)' DOES condense.  Number displacements
+        # condense in both forms (legacy).
+        if "B2" in ast and (isNumberD2(ast) or not ast.get("B2ONLY")) \
+                and value >= SRS_FLOOR \
+                and value < SRS_CEILING and operation != "BCT":
           adjust(scratch, stmt, i)
           continue
         entry["ambiguous"] = False
@@ -820,11 +979,21 @@ def optimizeScratch():
       # Check for the case 'OPCODE R1,D2', where 'D2' is a location in
       # the current CSECT.
       if section == sect and \
-              (operation in BRANCH_ALIASES or operation in ["BC", "BVC"]): # operation not in fpOperations:
+              (operation in BRANCH_ALIASES or operation in ["BC", "BVC"]):
         d = value - stmt.pos1.hw - 1
-        if d >= SRS_FLOOR and d < SRS_CEILING:
+        if fitsForwardSrsBranch(d, stmt):
           adjust(scratch, stmt, i)
           continue
+      # A paren register on a RELOCATABLE address ('L R2,KFSTRNG1(X3)',
+      # 'ST R4,TESTBUF(R3)') is an INDEX -- the base still comes from USING,
+      # and SRS has no index field, so base+index+displacement can only be
+      # the long form.  (With an ABSOLUTE d2 the paren register is the BASE
+      # and the section==None branch above already handles the SRS case.)
+      # Before 'refreshUsing' the stale snapshot bases masked this path by
+      # rarely matching; an accurate base would wrongly condense these.
+      if "B2" in ast:
+        entry["ambiguous"] = False
+        continue
       # 'OPCODE R1,D2' where D2 lives in a CSECT/DSECT currently in 'USING'.
       # Condense to SRS only when the ACTUAL displacement fits.  'unUsing'
       # resolves the very base/displacement codegen will encode (the
@@ -834,12 +1003,10 @@ def optimizeScratch():
       # looked in-range and wrongly condensed large DSECT-member offsets
       # (e.g. 'STH R1,TICCSYTM' over 'USING TFICC,R2', offset ~100) to SRS,
       # then failed at codegen with "SRS displacement out of range".
-      ub2, ud2 = unUsing(entry["using"], d2)
+      ub2, ud2 = unUsing(refreshUsing(entry["using"]), d2)
       if ub2 is not None:
         # Match codegen's SRS test exactly: SRS only when the unitized
-        # displacement is in range AND divides evenly (else forbiddenSRS) --
-        # e.g. 'ST R0,TICCSYTH' (disp 0x46) must condense to SRS to match
-        # flight.
+        # displacement is in range AND divides evenly (else forbiddenSRS).
         dUnitizer = srs_d2_units(operation)
         dSRS = (ud2 + dUnitizer - 1) // dUnitizer
         if dSRS >= SRS_FLOOR and dSRS < SRS_CEILING and ud2 % dUnitizer == 0:
@@ -859,15 +1026,14 @@ filled in to hold object-code data; no other existing field is touched.
 'macros' is just the list of operation names to ignore.  Returns a dict of
 whole-assembly metadata.  Addresses are in bytes.
 '''
-ignore = { "TITLE",
-           "GBLA", "GBLB", "GBLC", "LCLA", "LCLB",
-           "LCLC", "SETA", "SETB", "SETC", "AIF",
-           "AGO", "ANOP", "ACTR", "SPACE", "MEXIT", "MNOTE", "SPON", "SPOFF",
-           # Listing- and assembly-control pseudo-ops that generate no object
-           # code and do not move the location counter.  COPY is handled in the
-           # source-reading pass (its target is already expanded inline), so by
-           # the time code is generated the COPY statement itself is inert.
-           "EJECT", "PRINT", "COPY" }
+# The macro-language ops (shared base sets in model101tables) plus the
+# listing- and assembly-control pseudo-ops that generate no object code and
+# do not move the location counter.  COPY is handled in the source-reading
+# pass (its target is already expanded inline), so by the time code is
+# generated the COPY statement itself is inert.  Mutable: each run adds its
+# macro names.
+ignore = set(GENERATOR_OPS) | { "TITLE", "SPACE", "MNOTE", "SPON", "SPOFF",
+                                "EJECT", "PRINT", "COPY" }
 
 
 def normalizeLongFormat(operation, stmt):
@@ -903,14 +1069,41 @@ it), and 'value', used when the symbol appears in an arithmetic expression:
 '''
 
 # Scratch buffer for assembling one 'DC'.  1024 bytes is far below the real
-# maximum but is overkill for any Shuttle flight-software DC.
+# maximum but ample in practice.
 dcBuffer = bytearray(1024)
 firstCSECT = None
-def generateObjectCode(source, macros, log=None):
+# The statement-stream prologue shared by the pass-0 and main pass loops.
+# Yields (stmt, operation) for each statement a pass should process, applying:
+#   * continuation consumption FIRST, before 'skip' -- a continuation card is
+#     frequently skip-flagged, so testing 'skip' first would leave the flag
+#     stuck True and swallow the next real statement (e.g. an 'ORG *-1');
+#   * macro-continuation absorption -- a continued macro invocation's
+#     continuation cards sit AFTER its expansion (skip-flagged), so its flag
+#     must not absorb the first expanded statement (unless definition/comment
+#     lines happen to interleave and soak it up -- FCMBMTMC's BMTENT survives
+#     only because its body opens with comment cards);
+#   * definition/comment skips, then the '$' long-format normalization.
+def processable(source, macros, heartbeat=None):
+  continuation = False
+  for n, stmt in enumerate(source):
+    if heartbeat is not None:
+      heartbeat(n)
+    if continuation:
+      continuation = stmt.continues
+      continue
+    if stmt.skip:
+      continue
+    continuation = stmt.continues and stmt.operation not in macros
+    if stmt.inMacroDefinition or stmt.is_blank_or_comment:
+      continue
+    yield stmt, normalizeLongFormat(stmt.operation, stmt)
+
+
+def generateObjectCode(source, macros, log=None, march="ap101s"):
   global dcBuffer, firstCSECT, literalPools
 
   # Optional progress callback (e.g. Assemble._log under --verbose).  The pass
-  # loop below can run for many seconds on large flight files with nothing else
+  # loop below can run for many seconds on large inputs with nothing else
   # to show for it, so it reports each pass as it starts; default is a no-op.
   if log is None:
     log = lambda _message: None
@@ -979,8 +1172,7 @@ def generateObjectCode(source, macros, log=None):
         memory = sects[sect].memory
         while end > len(memory):
           memory.extend(DEFAULT_CHUNK)
-        for i in range(len(bytes)):
-          memory[pos1 + i] = bytes[i]
+        memory[pos1:end] = bytes
       stmt.assembled = bytes
       sects[sect].pos1 = end
     else:
@@ -1014,6 +1206,19 @@ def generateObjectCode(source, macros, log=None):
       # such as assigning statements like "DS 0F" a non-zero length.
       pos1 = sects[sect].pos1.align(alignment)
       if pos1 != sects[sect].pos1:
+        # A CPU-csect alignment gap (DC/DS/LTORG forcing fullword or
+        # doubleword alignment from an odd halfword) is covered by TXT and
+        # filled with C9FB -- the SVC opcode halfword, a stray-execution
+        # trap -- NOT zeros (HAL-compiler csect gaps use C6C6 instead).
+        # CNOP is excluded: it fills its own gap with executable NOPs
+        # (D800; C000 for @CNOP/#CNOP) before calling here.
+        if cVsD and compile and \
+                operation not in ("CNOP", "@CNOP", "#CNOP"):
+          memory = sects[sect].memory
+          while pos1 > len(memory):
+            memory.extend(DEFAULT_CHUNK)
+          for p in range(int(sects[sect].pos1), int(pos1)):
+            memory[p] = 0xC9 if (p & 1) == 0 else 0xFB
         sects[sect].pos1 = pos1
         if pos1 > sects[sect].used:
           sects[sect].used = pos1
@@ -1257,22 +1462,7 @@ def generateObjectCode(source, macros, log=None):
   def findB2D2(d2):
     if not isinstance(d2, Reloc):
       return None, (_num(d2) & 0xFFFFFF)
-    D2 = None
-    B2 = None
-    for i in range(len(using)):
-      e = using[i]
-      if e == None:
-        continue
-      # Same-section 'd2 - base' cancels to a bare int; a cross-section
-      # difference stays a 'Reloc' and is not a valid base displacement.
-      d = d2 - e[0]
-      if isinstance(d, int) and d >= 0 and d < 4096:
-        # "<=" not "<": when two registers give the same D2, the manual
-        # says use the higher-numbered one.
-        if D2 == None or d <= D2:
-          D2 = d
-          B2 = i
-    return B2, D2
+    return unUsing(using, d2, limit=4095)
 
   #-----------------------------------------------------------------------
   # Per-operation handlers.
@@ -1432,8 +1622,8 @@ def generateObjectCode(source, macros, log=None):
                 
 
   def handleMSC_BCE():
-    # IOP (MSC/BCE) encoding, descriptor-driven via iop_instr (the
-    # encoder is flight-validated by test_asm101_iop).  The IOP runs
+    # IOP (MSC/BCE) encoding, descriptor-driven via iop_instr
+    # (validated by test_asm101_iop).  The IOP runs
     # inline in the CPU instruction stream, sharing this section's LOC,
     # symbol table, and relocation algebra.  Field model (see the
     # iop_instr / test_asm101_iop conventions):
@@ -1443,8 +1633,8 @@ def generateObjectCode(source, macros, log=None):
     #   * the 1-bit index field (named 'i' for long-format ops, 'm' for
     #     the BCE store-status #SSC/#SST) is set by a trailing "(1)";
     #   * field 'a' (long-format 18-bit) is an ABSOLUTE main-store
-    #     address -- a relocatable term emits a Y-type RLD on the second
-    #     halfword (see the IOP-A-RLD-AMBIGUOUS note at the emit site);
+    #     address -- a relocatable term emits a fullword ACON RLD over
+    #     the whole instruction (see the note at the emit site);
     #   * field 'd' of a memory/branch op (iop_instr.PC_RELATIVE) is a
     #     PC-RELATIVE displacement = target - (IC + 1) (the section term
     #     cancels for a same-section target, leaving a bare int);
@@ -1470,41 +1660,41 @@ def generateObjectCode(source, macros, log=None):
     icHalf = currentHash()      # this instruction's halfword address
     freeFields = [f for f in iop_instr.value_fields(operation)
                   if f not in forced]
-    for field, exp in zip(freeFields, ops):
+    for fld, exp in zip(freeFields, ops):
       v = evalArithmeticExpression(exp, NO_LOCALS, stmt, symtab,
                                    currentHash(), severity=0)
       if v is None:
         v = 0
-      width = desc.fields[field][2]
+      width = desc.fields[fld][2]
       mask = (1 << width) - 1
-      if field == "a":
-        # IOP-A-RLD-AMBIGUOUS: the RLD type/width for this 18-bit field
-        # is an EDUCATED GUESS -- we emit a 2-byte Y-type RLD on the
-        # second halfword, like a DC Y adcon.  No pre-relocation IOP deck
-        # exists to confirm it, so it's deferred to the first LINK of IOP
-        # code.  Unknowns: exact RLD type/width; and the >64K case, where
-        # the 2 high 'a' bits live in the first halfword (uncovered by a
-        # 2-byte hw2 RLD).  Grep this tag when linking IOP code.
+      if fld == "a":
+        # The 18-bit 'a' field spans both halfwords: a[17:16] are the low
+        # bits of hw1 and a[15:0] fill hw2.  The reloc is a fullword ACON
+        # add over the whole 32-bit instruction, so the link-time base add
+        # carries out of hw2 into hw1's low bits (a 2-byte hw2 reloc
+        # would drop address bit 16).  Sub-64K targets are unaffected:
+        # the carry never reaches hw1.
         relSect, relOff = unhash(v)
         if relSect is not None and passCount == 3:
           combinedOffset = relOff + sectionOffset(relSect)
           rldSymbol = resolveCSect(combinedOffset, sects,
                                    relSect, exclude=sect)
-          emitDisplacementReloc(rldSymbol)
+          appendReloc(relocations, rldSymbol, sect, sects[sect].pos1,
+                      type='A')
           v = combinedOffset
         elif relSect is None and relOff is None and passCount >= 3:
           error(stmt, "Complex relocatable expression not "
                 "supported in an IOP address", severity=0)
-        fields[field] = _num(v) & mask
-      elif field == "d" and base in iop_instr.PC_RELATIVE:
+        fields[fld] = _num(v) & mask
+      elif fld == "d" and base in iop_instr.PC_RELATIVE:
         d = v - (icHalf + 1)
         if isinstance(d, Reloc):
           error(stmt, "PC-relative IOP target is not in "
                 "the current section", severity=0)
           d = 0
-        fields[field] = _num(d) & mask
+        fields[fld] = _num(d) & mask
       else:
-        fields[field] = _num(v) & mask
+        fields[fld] = _num(v) & mask
     try:
       data = bytearray(iop_instr.IOP.encode(base, fields))
     except Exception as exc:
@@ -1520,15 +1710,15 @@ def generateObjectCode(source, macros, log=None):
     if ast == None:
       error(stmt, f"Cannot parse {operation} operand")
       return
-    flattened = list(astFlattenList(ast))
+    flattened = list(ast)   # copy: stmt.ast is shared with the parse cache
     dcBufferPtr = 0
     # 'flattened' is one DcSuboperand per suboperand (.dup/.type/.length/
     # .values/.hexstr/.zexpr/.flags/.scale); manual GC28-6514-8 "DC", pdf p. 46.
 
     # Record the L' length attribute of a DS/DC-defined symbol: the HALFWORD
     # footprint of ONE element of the first suboperand (the AP-101 location
-    # counter is in halfwords and L' is mixed into halfword offset arithmetic --
-    # DASS-confirmed: 'L'TIOQSELF' over 'TIOQSELF DS F' is 2, not 4 bytes).  Only
+    # counter is in halfwords and L' is mixed into halfword offset
+    # arithmetic: L' over a 'DS F' is 2, not 4 bytes).  Only
     # the EQU-with-length form was captured before (at macro-expansion time), so
     # 'L'symbol' on a DS/DC symbol previously errored.  Additive: an unrecorded
     # L' always errored, so this never changes a symbol that already resolved.
@@ -1577,6 +1767,12 @@ def generateObjectCode(source, macros, log=None):
     dcLabel = name
     for subIndex, suboperand in enumerate(flattened):
       name = dcLabel if subIndex == 0 else ""
+      # The buffer restarts at every suboperand: each type handler emits
+      # dcBuffer[:dcBufferPtr] after packing, so a statement-lifetime
+      # buffer re-emitted every prior suboperand ('DC Y(X),H'130'' laid
+      # down Y,Y,H -- FCMCBLKS FCMHTABL, 6 spurious halfwords) and skewed
+      # emitAddressConstant's pos1+dcBufferPtr RLD positions.
+      dcBufferPtr = 0
       if suboperand.dup is None:
         duplicationFactor = 1
       else:
@@ -1602,6 +1798,10 @@ def generateObjectCode(source, macros, log=None):
           symbolName, addend = zRelocTarget(suboperand.zexpr)
           if addend is None:
             addend = 0
+          # The relocated address may be the CODE subfield ('Z(sym...)',
+          # ZCON/code RLD 0x04) or the DATA subfield ('Z(,sym...)',
+          # ZCON/data 0x50, where the linker also patches DSR).
+          zType = 'ZD' if suboperand.zdata else 'Z'
           zexpr = suboperand.zexpr
           if symbolName is None and zexpr is not None and passCount >= 3:
             error(stmt, "Unsupported Z-con reloc target "
@@ -1614,20 +1814,47 @@ def generateObjectCode(source, macros, log=None):
             if flags is None:
               flags = 0
 
+          hw0 = addend
           if symbolName:
-            registerExtrn(symbolName, stmt.n)
-
-            if passCount == 3:
-              pos1 = sects[sect].pos1
-              # The ZCON flags byte goes into the data image
-              # below, not the RLD entry; the writer derives
-              # the RLD flag from the 'Z' type.
-              appendReloc(relocations, symbolName, sect, pos1, 'Z')
+            sym = symtab.get(symbolName)
+            if sym is None or sym.type == "EXTERNAL":
+              # Genuinely external target: ER ESD + RLD against it; the
+              # linker adds the resolved absolute address to the addend.
+              registerExtrn(symbolName, stmt.n)
+              if passCount == 3:
+                pos1 = sects[sect].pos1
+                # The ZCON flags byte goes into the data image
+                # below, not the RLD entry; the writer derives
+                # the RLD flag from the 'Z' type.
+                appendReloc(relocations, symbolName, sect, pos1, zType)
+            elif passCount >= 3:
+              # Target defined in this assembly: mirror emitAddressConstant.
+              # Fold the assembled halfword address into HW0 and relocate
+              # against the containing CSECT (the linker adds the section's
+              # relocation factor) -- NOT an ER, which would make the linker
+              # demand an export nothing provides.
+              v = evalArithmeticExpression(zexpr, NO_LOCALS, stmt, symtab,
+                                           currentHash())
+              relSect, relOff = unhash(v)
+              if relSect is not None:
+                # 'zexpr' already includes the addend.
+                hw0 = relOff + sectionOffset(relSect)
+                if passCount == 3:
+                  pos1 = sects[sect].pos1
+                  rldSymbol = resolveCSect(hw0, sects, relSect, exclude=sect)
+                  appendReloc(relocations, rldSymbol, sect, pos1, zType)
+              elif relOff is not None:
+                # Absolute (EQU) target: no RLD; a linked ZCON HW0 is always
+                # sector-encoded, so set bit 15 the way the linker would.
+                hw0 = 0x8000 | (relOff & 0x7FFF)
+              else:
+                error(stmt, "Complex relocatable expression not "
+                      "supported in Z constant")
 
           # See 'ZCon.prelink' for the 4-byte ZCON layout; 'flags' is the
           # source flags operand.
           dcBuffer[dcBufferPtr:dcBufferPtr + 4] = \
-              ZCon.prelink(addend, flags).to_bytes()
+              ZCon.prelink(hw0, flags).to_bytes()
           dcBufferPtr += 4
           toMemory(dcBuffer[:dcBufferPtr])
         else:
@@ -1701,6 +1928,12 @@ def generateObjectCode(source, macros, log=None):
         # the duplication factor (e.g. '(N)X'FFFF'' -> N copies); replicate
         # the assembled bytes / reserved width 'duplicationFactor' times.
         if operation == "DC":
+          # A non-hex character here is a real deck error (or an
+          # unsubstituted &VAR that leaked through macro expansion);
+          # diagnose it rather than crashing in int().
+          if not all(c in "0123456789ABCDEFabcdef" for c in hexString):
+            error(stmt, f"Invalid hexadecimal constant X'{hexString}'")
+            continue
           bytes = bytearray()
           for i in range(0, count, 2):
             b = hexString[i:i+2]
@@ -1710,8 +1943,8 @@ def generateObjectCode(source, macros, log=None):
           toMemory(duplicationFactor * (count // 2))
       elif suboperandType == "B":
         commonProcessing(1)
-        # B-type (binary) constant -- common in flight data (32-bit
-        # schedule masks).  Bits pack MSB-first into ceil(bits/8) bytes,
+        # B-type (binary) constant.  Bits pack MSB-first into
+        # ceil(bits/8) bytes,
         # leading byte zero-padded (IBM Assembler-F IEUF8D).  An implicit
         # length rounds UP to a halfword (as the X branch does) to avoid
         # an odd-byte location counter; an explicit BLn is honored exactly
@@ -1750,13 +1983,13 @@ def generateObjectCode(source, macros, log=None):
           # A plain or singly-negated integer is stored as-is;
           # anything else is a fixed-point fraction scaled by the
           # type's full-scale multiplier (and clamped).
-          # KNOWN BUG: only the FIRST value is emitted, dropping any
-          # comma-separated tail (DC F'1,2' -> one fullword).  Left as
-          # is -- known code has no multi-value F/H, so no ground truth
-          # for the layout; E/D below do emit all values.
-          for fstr in suboperand.values[:1]:
+          # A comma-separated nominal-value list (DC H'0,1,160,37,0,0,0')
+          # emits one field PER value, exactly as the E/D branch below
+          # does.
+          for fstr in suboperand.values:
             isInt = fstr.isdigit() or \
                     (fstr[:1] == '-' and fstr[1:].isdigit())
+            expInt = None if isInt else decimalExponentInt(fstr)
             if suboperand.scale is not None:
               # Fixed-point scale modifier (e.g. FS-19, FS20): multiply by
               # 2**scale (the binary point sits 'scale' bits from the right,
@@ -1774,6 +2007,8 @@ def generateObjectCode(source, macros, log=None):
               v = round(sv) & mask
             elif isInt:
               v = int(fstr) & mask
+            elif expInt is not None:
+              v = expInt & mask
             else:
               v = float(fstr) * multiplier
               if v >= multiplier:
@@ -1796,8 +2031,10 @@ def generateObjectCode(source, macros, log=None):
             # We now have to convert the 'value' to an
             # IBM hexadecimal float, of either single
             # precision ('fpLength==4') or double
-            # precision ('fpLength==8').
-            msw, lsw = toFloatIBM(fstr)
+            # precision ('fpLength==8').  An E constant ROUNDS at the
+            # 24-bit single-precision fraction (the double conversion's
+            # msw would instead truncate the last bit).
+            msw, lsw = toFloatIBM(fstr, single=(fpLength == 4))
             dcBufferPtr = packBE(dcBuffer, dcBufferPtr, msw, 4)
             if fpLength == 8:
               dcBufferPtr = packBE(dcBuffer, dcBufferPtr, lsw, 4)
@@ -1862,8 +2099,9 @@ def generateObjectCode(source, macros, log=None):
       if literalAttributes == None:
         return
       if collect and not asis:
-        if literalIndex(literalPools[-1], literalAttributes) < 0:
-          literalPools[-1].literals.append(literalAttributes)
+        pool = literalPools[-1]
+        if literalIndex(pool, literalAttributes) < 0:
+          pool.add(literalAttributes)
       else:
         pool = literalPools[literalPoolNumber]
         idx = literalIndex(pool, literalAttributes)
@@ -1940,12 +2178,52 @@ def generateObjectCode(source, macros, log=None):
         or stmt.longFormat
     atStar = "@" in operation or "#" in operation \
         or (b2 != None and b2 > 3 and not forceRS)
-    if atStar and x2 == None:
-      x2 = b2
+    bareParen = b2 != None and x2 == None and not ast.get("B2ONLY")
+    if bareParen and isinstance(d2, Reloc) and not extrnD2 \
+            and operation != "LA":
+      # LA is exempt: its paren register is the BASE even over a
+      # relocatable displacement (the AM=0 based form with the absolute
+      # assembled address, same as the absolute-displacement LA rule).
+      # A bare paren register over a RELOCATABLE displacement is an INDEX
+      # -- ANY register, not just the @/#-or-R4-R7 heuristic below: the
+      # base comes from the covering USING.  An ABSOLUTE displacement
+      # keeps the register as base -- the split is
+      # relocatable-vs-absolute.
       b, d = unUsing(using, d2)
       if b != None:
+        x2 = b2
         b2 = b
         d2 = d
+      elif not atStar and unhash(d2)[0] == sect:
+        # Current-section relocatable, no covering USING: the reference is
+        # self-relative (current-section fallback), the register an index.
+        # A $-forced AM=0 encoding has no index field -- the register is
+        # dropped but the displacement relocation KEPT (Y RLD over the
+        # 16-bit field); treating the register as a base would suppress
+        # that RLD.
+        if not stmt.longFormat:
+          x2 = b2
+        b2 = None
+      elif atStar:
+        # @/# (or R4-R7) with no covering USING: keep the legacy form
+        # (register in X2, and -- unchanged -- still in B2).
+        x2 = b2
+    elif atStar and bareParen:
+      # A bare paren register on an @/# op is an INDEX (base comes from
+      # USING) -- but the COMMA form 'expr(,Rn)' names the BASE with the
+      # index slot explicitly empty, and must keep it empty (x2=0).
+      if ("@" in operation or "#" in operation) and b2 <= 3 \
+              and not isinstance(d2, Reloc):
+        # ... and over a NUMERIC (absolute) displacement the register is
+        # the BASE alone: the @/# indirect form must not duplicate it
+        # into hw2's X2 field.
+        pass
+      else:
+        x2 = b2
+        b, d = unUsing(using, d2)
+        if b != None:
+          b2 = b
+          d2 = d
     done = False
     forceAM0 = False
     if operation in ["BC", "BCT"]:
@@ -1960,7 +2238,7 @@ def generateObjectCode(source, macros, log=None):
       # True) yet still has a backward SRS form (BCTB).
       if not stmt.longFormat \
               and isinstance(d, int) \
-              and d < 0 and d > -SRS_CEILING:
+              and fitsBackwardSrsBranch(d):
         d = (-d & 0b111111)
         data = generateSRS(stmt, \
                            operation+"B", \
@@ -1971,7 +2249,7 @@ def generateObjectCode(source, macros, log=None):
       elif not stmt.longFormat \
               and operation == "BC" \
               and isinstance(d, int) \
-              and d >= 0 and d < SRS_CEILING:
+              and fitsForwardSrsBranch(d, stmt):
         # Short SRS forward form (BCF); only BC has
         # one (BCT has no forward SRS form and falls
         # to the RS path).  Uses the PC-relative d
@@ -1999,7 +2277,7 @@ def generateObjectCode(source, macros, log=None):
       # A '$'-forced long branch skips the SRS
       # short forms and is coded as RS (BC).
       if not forceRS and isinstance(d, int) \
-              and d >= 0 and d < SRS_CEILING:
+              and fitsForwardSrsBranch(d, stmt):
         d = d & 0b111111
         if ovflCarry:
           o = "BVCF"
@@ -2010,7 +2288,7 @@ def generateObjectCode(source, macros, log=None):
         data = generateSRS(stmt, o, r1, d, b)
         done = True
       elif not forceRS and isinstance(d, int) \
-              and d < 0 and d > -SRS_CEILING:
+              and fitsBackwardSrsBranch(d):
         # Backward: BCB is the condition-code
         # form.  There is no SRS backward
         # overflow/carry form, so a backward
@@ -2057,9 +2335,13 @@ def generateObjectCode(source, macros, log=None):
           # stays relocatable -> not a B2=3
           # current-section displacement.
           newd2 = d2 - symtab[sect].value
+          # 'used' is mid-rebuild during a compile pass (it resets with
+          # pos1), so a FORWARD reference ranges against the previous
+          # pass's 'usedPrev' estimate as well.
           if isinstance(newd2, int) \
                   and newd2 >= 0 and newd2 < 4096 \
-                  and newd2 < sects[sect].used.hw:
+                  and newd2 < max(sects[sect].used.hw,
+                                  sects[sect].usedPrev.hw):
             b2 = 3
             d2 = newd2
             selfRelB2 = True       # current-section, no base -> PC-relative
@@ -2096,8 +2378,8 @@ def generateObjectCode(source, macros, log=None):
     rsBit0, _rsBit9 = rs_form_bits(operation)
     # 'forceAM0' is purely empirical.  A '$'-forced long instruction takes the
     # RS AM=0 (extended, 16-bit) form -- for a branch this is the absolute
-    # 16-bit target (+ RLD), e.g. 'BNZ$ FCMCSLPE' -> C3F3 <target>, matching the
-    # flight; the AM=1 PC-relative form is for the auto-selected (non-$) long.
+    # 16-bit target (+ RLD); the AM=1 PC-relative form is for the
+    # auto-selected (non-$) long.
     forceAM0 = forceAM0 or stmt.longFormat or ( rsBit0 \
                 and b2 not in [3, None] and x2 == None)
     if extrnD2:
@@ -2116,17 +2398,11 @@ def generateObjectCode(source, macros, log=None):
         # number of fullwords from here, so force RS.
         forceRS = True
         forceAM0 = True
-      isNumberD2 = False
-      # D2 is absent for the literal (L2) form.
-      rawD2 = unroll(ast.get("D2"))
-      if isinstance(rawD2, str) and rawD2.isdigit():
-        isNumberD2 = True
-      elif isinstance(rawD2, Int):
-        # Clean AST: a bare integer displacement
-        # (e.g. the 0 in 0(R2,3)) -- the absolute
-        # counterpart of the digit-string check.
-        isNumberD2 = True
-      if isNumberD2:
+      # D2 is absent for the literal (L2) form; a
+      # bare integer displacement (e.g. the 0 in
+      # 0(R2,3)) takes the absolute encodings below.
+      d2IsNumber = isNumberD2(ast)
+      if d2IsNumber:
         dSRSa = unhashedValue
         dRSAM1 = unhashedValue
       else:
@@ -2158,7 +2434,12 @@ def generateObjectCode(source, macros, log=None):
         selfRelB2 = True           # no base register -> PC-relative
       else:
         ib2 = b2
-      if ib2 == 3:
+      if ib2 == 3 and selfRelB2:
+        # PC-relative d only for a TRUE self-relative reference (no base
+        # register anywhere).  R3 CODED as a base -- explicit 'expr(R3)' /
+        # '(X,R3)' or USING-resolved -- carries the absolute displacement,
+        # never a PC-relativized one (whose EA is correct only by the
+        # accident R3=0).
         d = dSRS
         d1 = dRSAM1
       else:
@@ -2181,6 +2462,14 @@ def generateObjectCode(source, macros, log=None):
               and d2 > -2048 and d2 < 2048:
         if d2 >= 0 and d2 < SRS_CEILING and len(data) == 2:
           data = generateSRS(stmt, operation, r1, d2, ib2)
+        elif not selfRelB2:
+          # A real (USING-resolved or explicit) base, R3 included: LA
+          # takes the AM=0 based form with the ABSOLUTE displacement,
+          # not a PC-relativized form (correct EA only by coincidence of
+          # layout).  selfRelB2 alone marks the PC-relative sentinel, so
+          # no ib2 test.  The PC-relative branches below are for the
+          # true self-relative/absolute-target cases.
+          data = generateRS0(stmt, operation, r1, d2 & 0xFFFF, ib2)
         elif d2 < icRS:
           # RS AM=1 with the I bit set, so d2 is
           # subtracted from the updated IC.
@@ -2192,7 +2481,7 @@ def generateObjectCode(source, macros, log=None):
                    operation in FP_OPERATIONS_SP) and \
               not forceRS and x2 == None and \
               (specifiedB2 or ib2 == 3) and \
-              d >= SRS_FLOOR and d < SRS_CEILING and \
+              fitsForwardSrsBranch(d, stmt) and \
               not forbiddenSRS and \
               operation in BRANCH_ALIASES):
         # Is SRS.
@@ -2213,7 +2502,7 @@ def generateObjectCode(source, macros, log=None):
         data = generateSRS(stmt, operation, r1, d, ib2)
       elif isConstant and literalAttributes == None:
         data = generateRS0(stmt, operation, r1, _num(d2) & 0xFFFF, 3)
-      elif isNumberD2 and b2 != None and x2 == None and not i and not ia:
+      elif d2IsNumber and b2 != None and x2 == None and not i and not ia:
         data = generateRS0(stmt, operation, r1, _num(d2) & 0xFFFF, b2)
       elif literalAttributes != None:
         pool = literalPools[literalPoolNumber]
@@ -2240,19 +2529,33 @@ def generateObjectCode(source, macros, log=None):
         # reaches ~-56 halfwords, beyond which it needs this long form.
         # '$'-forced long (forceAM0) instead takes the AM=0 absolute-target form
         # below, even backward (e.g. 'BNZ$ FCMCSOUL' -> C3F3 <target>).
-        data = generateRS1(stmt, operation, 0, 1, r1, 0x3FF & -d1, 0, ib2)
+        data = generateRS1(stmt, operation, 0, 1, r1, 0x7FF & -d1, 0, ib2)
       elif not forceAM0 and \
               (x2 != None or ia or \
-               i or (ib2 == 3 and d1 >= 0 and d1 < 2048)):
+               i or (ib2 == 3 and selfRelB2 and d1 >= 0 and d1 < 2048) or \
+               (ast.get("B2ONLY") and ib2 != 3 and not d2IsNumber and
+                d1 >= 0 and d1 < 2048)):
         # RS AM=1 here.  The bare in-range-displacement case is AM=1 only when
         # PC/self-relative (ib2 == 3, no real base): an index (x2), indirect
-        # (ia) or immediate (i) forces AM=1 regardless.  A reference over a REAL
-        # base register (USING-resolved or explicit 'SYM(Rn)') with a
-        # displacement too large for SRS belongs in AM=0 (16-bit displacement),
-        # matching the flight assembler -- e.g. 'STH R1,TICCSYTM' over
-        # 'USING TFICC,R2' (disp 0x45) encodes B9F2 0045, not the AM=1 B9F6.
-        if ib2 == 3:
-          if d1 < 0:
+        # (ia) or immediate (i) forces AM=1 regardless.  A reference over
+        # a USING-RESOLVED base register with a displacement too large
+        # for SRS belongs in AM=0 (16-bit displacement).  The COMMA form
+        # 'expr(,Rn)' (B2ONLY, n != 3) with an expression displacement is
+        # the OPPOSITE: AM=1 (the 11-bit AM=1 field bounds the rule;
+        # larger falls through to AM=0).  The BARE form 'expr(Rn)' stays
+        # out of this clause: it is base semantics -- SRS when it fits
+        # (see optimizeScratch), legacy AM=0 beyond.  b2 == 3 is
+        # excluded: a single paren register R3 rides the PC-relative d1 path
+        # above, not a base.
+        if ib2 == 3 and selfRelB2:
+          # A genuinely self-relative target (ib2 == 3 is the PC sentinel,
+          # not a real base) with a non-positive displacement takes the
+          # subtractive I-bit form: 'BAL R3,*+2' (d1 = 0) encodes i=1,
+          # d=0 (EA = IC - 0), never the additive form.  selfRelB2 is
+          # required: 'STH R4,0(R5,3)' -- a real R3 BASE with an R5
+          # index -- also reaches this clause (x2 != None) with ib2 == 3
+          # and d1 == 0, and must stay additive.
+          if d1 <= 0:
             d1 = -d1
             i = 1
         if x2 == None:
@@ -2274,6 +2577,16 @@ def generateObjectCode(source, macros, log=None):
             emitDisplacementReloc(rextrns[originalD2])
         elif b2 != None:
           d0 = _num(d2) & 0xFFFF
+          if selfRelB2 and passCount == 3:
+            # The current-section fallback rewrote d2 to a csect-relative
+            # offset (b2=3, no real base).  The AM=0 16-bit field holds
+            # an ABSOLUTE in-bank address at run time, so it must be
+            # relocated by the owning csect (csect base + offset, not the
+            # bare offset).  Without this RLD every $-forced same-csect
+            # branch in a linked image jumps to an unrelocated address.
+            # (A real base-register displacement -- explicit or
+            # USING-resolved -- is NOT relocated.)
+            emitDisplacementReloc(sect)
         elif d2 in rextrns:
           b2 = 3
           d0 = 0
@@ -2331,8 +2644,12 @@ def generateObjectCode(source, macros, log=None):
     # 'USING TFBMP,R0').  It must NOT reuse "" (that is the unnamed CSECT /
     # private code, a real control section), so map every bare DSECT to one
     # reserved key that cannot collide with a symbol-named section.
+    protClose()
     sect = UNNAMED_DSECT if (name == "" and not cVsD) else name
     ensureSection(sect, dsect=not cVsD, esdSeq=stmt.n)
+    if protOn and cVsD:
+      protManaged.add(sect)
+      protOpen[sect] = int(sects[sect].pos1)
     stmt.section = sect
     stmt.pos1 = sects[sect].pos1
     return
@@ -2342,11 +2659,9 @@ def generateObjectCode(source, macros, log=None):
     if ast == None:
       error(stmt, f"Cannot parse operand of {operation}")
     else:
-      ast = unroll(ast)
-      # idlist yields a string list; unroll collapses a
-      # single-symbol list to a bare string.
-      symbols = [ast] if isinstance(ast, str) else list(ast)
-      for symbol in symbols:
+      # idlist yields a list of symbol strings; pass 0 may have replaced an
+      # EXTRN's list with its filtered copy.
+      for symbol in list(ast):
         if operation == "ENTRY":
           entries.setdefault(symbol)
           if symbol in symtab:
@@ -2411,11 +2726,20 @@ def generateObjectCode(source, macros, log=None):
       error(stmt, "LTORG outside any control section")
       return
     commonProcessing(4)
-    if collect:
-      if not asis:
-        ltorg(sect)
-      else:
-        literalPools[literalPoolNumber].offset = sects[sect].pos1
+    if collect and not asis:
+      ltorg(sect)
+    # A mid-csect pool occupies [pos1, pos1+size): record its origin (already
+    # fullword-aligned by commonProcessing) and ADVANCE the location counter
+    # past it -- every pass, so the layout is consistent across the compile
+    # fixpoint.  IBM FIOLGERR: pool at hw 0x86, the two trailing DC Z ZCONs
+    # at 0x88/0x8A, csect 140 hw; without the advance the ZCONs overlapped
+    # the pool and the csect sized 136.  toMemory also gives the LTORG's
+    # scratch/statement entry the pool's length, so optimizeScratch's
+    # repositioning and the end-of-pass-1 length replay both account for it.
+    pool = literalPools[literalPoolNumber]
+    if pool.literals and pool.atLtorg:
+      pool.offset = sects[sect].pos1
+      toMemory(pool.size)
     literalPoolNumber += 1
     return
 
@@ -2426,11 +2750,13 @@ def generateObjectCode(source, macros, log=None):
       for r in range(len(using)):
         using[r] = None
       return
-    ast = copy.deepcopy(stmt.ast)
+    ast = stmt.ast
     if ast == None or "r" not in ast or not isinstance(ast["r"], list):
       error(stmt, "Cannot parse operand of " + operation)
       return
-    rlist = copy.deepcopy(ast["r"])
+    # Evaluate into a copy; ast["r"] keeps the unevaluated nodes (locAst
+    # below is stored for later re-evaluation and must stay an AST).
+    rlist = list(ast["r"])
     for i in range(len(rlist)):
       rlist[i] = evalArithmeticExpression(rlist[i], NO_LOCALS, \
                                           stmt, \
@@ -2446,13 +2772,20 @@ def generateObjectCode(source, macros, log=None):
         h = rlist.pop(0)
         section, address = unhash(h)
         stmt.using = address
+        # Keep the unevaluated location expression plus the eval context, so
+        # optimizeScratch can re-resolve a forward-referenced base against
+        # the settled symtab (see 'refreshUsing').
+        locAst = ast["r"][0]
+        starHash = currentHash()
+    k = 0
     for r in rlist:
       if r == None or r < 0 or r > 7:
         error(stmt, "Bad register number")
       elif operation == "USING":
-        using[r] = (h, section, address)
+        using[r] = (h, section, address, locAst, k, stmt, starHash)
         h += 4096
         address += 4096
+        k += 1
       else: # DROP
         using[r] = None
     return
@@ -2472,13 +2805,29 @@ def generateObjectCode(source, macros, log=None):
                                         symtab, currentHash())
       if nval:
         align = nval * 2
+      if nval == 1:
+        # CNOP 1 = ODD-halfword alignment ('FORCED ODD BOUNDRY
+        # ALIGNMENT'): ONE filler hw when the counter is EVEN, so that
+        # following skeletons assemble with zero displacements; nothing
+        # emitted when the counter is already odd.  The pad is emitted as
+        # real bytes (toMemory) so every sizing pass replays it via
+        # stmt.length; a label would take the PRE-pad address.
+        commonProcessing(1)
+        if sect is not None and sect in sects \
+                and (sects[sect].pos1.hw & 1) == 0:
+          fill1 = 0xC0 if operation[0] in "@#" else 0xD8
+          toMemory(bytearray([fill1, 0x00]))
+        return
     # CNOP ("conditional no-op") fills the alignment gap with executable
-    # BCF 0,0 NOPs (0xD800), NOT a zero gap -- the pad sits in the instruction
-    # stream and may be reached by fall-through.  Write the NOP halfwords over
-    # the gap (gated like toMemory: real bytes only in a CSECT compile pass),
-    # then let commonProcessing advance the counter and place any label at the
-    # aligned location.
+    # NOPs, NOT a zero gap -- the pad sits in the instruction stream and may
+    # be reached by fall-through.  CPU context (CNOP): BCF 0,0 = 0xD800.
+    # IOP context (@CNOP/#CNOP): the DLYI-0 no-op = 0xC000 (a D800
+    # there would be a CPU opcode in IOP instruction space).  Write the filler
+    # halfwords over the gap (gated like toMemory: real bytes only in a
+    # CSECT compile pass), then let commonProcessing advance the counter
+    # and place any label at the aligned location.
     if cVsD and compile and sect is not None and sect in sects:
+      fill_hi = 0xC0 if operation[0] in "@#" else 0xD8
       pos1 = sects[sect].pos1
       end = pos1.align(align)
       if end != pos1:
@@ -2486,7 +2835,7 @@ def generateObjectCode(source, macros, log=None):
         while end > len(memory):
           memory.extend(DEFAULT_CHUNK)
         for p in range(pos1, end, 2):
-          memory[p] = 0xD8
+          memory[p] = fill_hi
           memory[p + 1] = 0x00
     commonProcessing(align)
     return
@@ -2531,34 +2880,11 @@ def generateObjectCode(source, macros, log=None):
   passCount = 0
   asmContext.passCount = passCount
   metadata["passCount"] = passCount
-  continuation = False
   sect = None
   using = [None]*8
         
   # Process source code, line-by-line
-  for stmt in source:
-    # Consume continuation cards FIRST -- before the 'skip' and
-    # inMacroDefinition/comment skips below.  A continued statement's
-    # continuation cards carry no operand of their own (the first card holds the
-    # merged operand), so they must not reset 'continuation' via the later
-    # tail-assignment; and they are themselves often 'skip'-flagged, so testing
-    # 'skip' first would short-circuit past this reset and leave 'continuation'
-    # stuck True -- which then swallows the next REAL statement (e.g. an
-    # 'ORG *-1').  This also handles the on-demand-macro case: a continued macro
-    # invocation's MACRO..MEND lines sit between its first card and the expanded
-    # body, and absorb the dangling flag here before the body is reached.
-    if continuation:
-      continuation = stmt.continues
-      continue
-    if stmt.skip:
-      continue
-    continuation = stmt.continues
-    if stmt.inMacroDefinition or stmt.is_blank_or_comment:
-      continue
-    # Various types of lines we can immediately discard by looking at
-    # their 'operation' fields
-    operation = stmt.operation
-    operation = normalizeLongFormat(operation, stmt)
+  for stmt, operation in processable(source, macros):
     if operation in ignore:
       continue
     operand = stmt.operand.rstrip()
@@ -2574,19 +2900,22 @@ def generateObjectCode(source, macros, log=None):
     # assembler silently dropped EXTRN statements for already-defined
     # symbols -- not even listed -- so we detect and do the same.
     if operation == "EXTRN":
-      ast = unroll(ast)
-      if ast != None and isinstance(ast, str):
-        ast = [ast]
-        already = set()
+      # Only a single-symbol EXTRN gets pass-0 pre-registration and the
+      # already-defined drop; a multi-symbol EXTRN ('EXTRN IOCODE,IOBUF')
+      # is registered only by handleEntryExtrn.  Extending pass 0 to
+      # multi-symbol lists changes output.
+      ast = stmt.ast if operand != "" else None
+      if isinstance(ast, list) and len(ast) == 1:
+        # stmt.ast is shared with the parse cache; filter into a new list.
+        kept = []
         for symbol in ast:
           if symbol in symtab:
-            already.add(symbol)
+            pass    # already defined: IBM silently drops (and delists) it
           else:
             makeExtern(symbol, stmt)
-        for symbol in already:
-          ast.remove(symbol)
-        stmt.ast = ast
-        if len(ast) == 0:
+            kept.append(symbol)
+        stmt.ast = kept
+        if len(kept) == 0:
           stmt.empty = True
       continue
     if operation in ["EQU"]:
@@ -2652,7 +2981,6 @@ def generateObjectCode(source, macros, log=None):
     collect = (passCount in [1, 2])
     asis = (passCount == 2)
     compile = (passCount >= 3)
-    continuation = False
 
     if passCount == 1:
       log("Pass 1: placing sections, sizing instructions")
@@ -2674,43 +3002,67 @@ def generateObjectCode(source, macros, log=None):
             symtab[sect].preliminaryOffset = ppos1
             ppos1 += sects[sect].used.hw
             # 'used' doesn't include the literal pool appended to the
-            # section's end, so add it explicitly.
+            # section's end, so add it explicitly.  (A mid-csect LTORG
+            # pool IS inside 'used' -- handleLtorg advances the location
+            # counter past it -- so only the end-of-source pool counts.)
             for pool in literalPools:
-              if pool.sect == sect:
+              if pool.sect == sect and not pool.atLtorg:
                 ppos1 += ppos1 & 1
                 ppos1 += pool.size // 2
                 break
         sects[sect].pos1 = Addr(0)
+        # Reset 'used' along with pos1: each compile pass re-derives the
+        # high-water mark from its own (possibly SHORTER) layout.  The
+        # previous pass's value survives in 'usedPrev' for the mid-pass
+        # size-estimate readers.  (The literal-pool flush after the final
+        # pass still grows 'used' to cover the end-of-source pool.)
+        sects[sect].usedPrev = sects[sect].used
+        sects[sect].used = Addr(0)
     sect = None
     using = [None]*8
     literalPoolNumber = 0
+
+    # SPON/SPOFF store-protect capture.  The directives toggle a persistent
+    # per-halfword protect state (the real PSA interleaves them PSW cell by
+    # PSW cell); the assembler's only output for them is the PROT control
+    # cards emitted with the object (see assemble.writeObject).  protOn
+    # persists across CSECT switches (FIOMFBCE-style decks re-assert it right
+    # after CSECT precisely because it carries).  A csect is "managed" once a
+    # toggle fires inside it or it opens with the state already on; managed
+    # csects get a PROT card even with no protected ranges (the card's
+    # presence tells the linker the source fully specifies protection).
+    protOn = False
+    protManaged = set()
+    protRanges = {}                 # csect -> [(startByte, endByte), ...]
+    protOpen = {}                   # csect -> currently-open range start
+
+    def protClose():
+      if sect is not None and sect in protOpen:
+        start = protOpen.pop(sect)
+        end = int(sects[sect].pos1)
+        if end > start:
+          protRanges.setdefault(sect, []).append((start, end))
+
+    # Heartbeat through a large encoding pass: without it a multi-thousand-
+    # line member looks frozen mid-pass under --verbose.  Gated to the slow
+    # compile passes and big inputs so ordinary assemblies stay quiet.
+    def heartbeat(n):
+      if compile and n and len(source) > 5000 and n % 5000 == 0:
+        log(f"  ... {n}/{len(source)} lines")
+
     # Process source code, line-by-line
-    for propNum in range(len(source)):
-      stmt = source[propNum]
-
-      # Heartbeat through a large encoding pass: without it a multi-thousand-
-      # line member looks frozen mid-pass under --verbose.  Gated to the slow
-      # compile passes and big inputs so ordinary assemblies stay quiet.
-      if compile and propNum and len(source) > 5000 and propNum % 5000 == 0:
-        log(f"  ... {propNum}/{len(source)} lines")
-
-      # Consume continuation cards FIRST -- before 'skip' (see the Pass-0 loop):
-      # a continuation card is frequently 'skip'-flagged, so testing 'skip' first
-      # would leave 'continuation' stuck True and swallow the next real
-      # statement (e.g. an 'ORG *-1').
-      if continuation:
-        continuation = stmt.continues
+    for stmt, operation in processable(source, macros, heartbeat=heartbeat):
+      if operation in ("SPON", "SPOFF"):
+        turnOn = (operation == "SPON")
+        if sect is not None and sect in sects and not sects[sect].dsect:
+          protManaged.add(sect)
+          if turnOn != protOn:
+            if turnOn:
+              protOpen[sect] = int(sects[sect].pos1)
+            else:
+              protClose()
+        protOn = turnOn
         continue
-      if stmt.skip:
-        continue
-      continuation = stmt.continues
-      #******** Should this line be processed or discarded? ********
-      if stmt.inMacroDefinition or stmt.is_blank_or_comment:
-        continue
-      # Various types of lines we can immediately discard by looking at
-      # their 'operation' fields
-      operation = stmt.operation
-      operation = normalizeLongFormat(operation, stmt)
       if operation in ignore:
         continue
 
@@ -2727,6 +3079,7 @@ def generateObjectCode(source, macros, log=None):
         handleCsectDsect()
         continue
       elif operation == "END":
+        protClose()
         break
       elif operation in ["ENTRY", "EXTRN"]:
         handleEntryExtrn()
@@ -2767,6 +3120,11 @@ def generateObjectCode(source, macros, log=None):
       if operation in ["DC", "DS"]:
         handleDcDs()
         continue
+
+      if march != "ap101s" and base_op(operation) in AP101S_ONLY:
+        error(stmt, f"'{operation}' is an AP-101S-only instruction, "
+                    f"not available with --march {march}")
+        continue
       if operation in ARGS_RR:
         handleRR()
         continue
@@ -2792,31 +3150,24 @@ def generateObjectCode(source, macros, log=None):
       # Close out the final literal pool
       endOfSource()
       # Rearrange "literals" in the literal pool according to alignment,
-      # and figure out their offsets into the pools.
+      # and figure out their offsets into the pools.  A mid-csect (LTORG)
+      # pool was laid out at its LTORG (see 'ltorg') and its origin is the
+      # LTORG's location -- only the default end-of-source pool is placed
+      # here, after the csect's high-water mark.  IBM aligns the pool
+      # ORIGIN to a FULLWORD, not merely to the pool's widest literal
+      # (an all-halfword pool still starts on a fullword, with one gap
+      # halfword when the code ends odd).
       for pool in literalPools:
-        if not pool.literals:
+        if not pool.literals or pool.atLtorg:
           continue
-        offset = 0
-        pool.alignment = 2
-        pool.offsets = [None] * len(pool.literals)
-        pool.size = 0
-        for alignment in [8, 4, 2, 1]:
-          for i, lit in enumerate(pool.literals):
-            if pool.offsets[i] != None:
-              continue
-            if (lit.L % alignment) != 0:
-              continue
-            if alignment > pool.alignment:
-              pool.alignment = alignment
-            rem = offset % alignment
-            if rem != 0:
-              offset += alignment - rem
-            pool.offsets[i] = offset
-            offset += lit.L
-            if offset > pool.size:
-              pool.size = offset
-        pool.offset = sects[pool.sect].used.align(pool.alignment)
-      # Eliminate ambiguity between SRS and RS instructions.
+        layoutPool(pool)
+        pool.offset = \
+            sects[pool.sect].used.align(max(pool.alignment, 4))
+      # Eliminate ambiguity between SRS and RS instructions.  The repetition
+      # is required even though optimizeScratch iterates every section
+      # itself: each rerun re-evaluates scratch EQUs at post-condensation
+      # addresses, and pass 2 reads those values through forward references
+      # before redefining them.  A single call changes output.
       for sect in sects:
         optimizeScratch()
       # optimizeScratch may have shrunk CSECTs (SRS < RS), which can move
@@ -2838,15 +3189,14 @@ def generateObjectCode(source, macros, log=None):
         except:
           pass
       for pool in literalPools:
-        if not pool.literals:
+        if not pool.literals or pool.atLtorg:
           continue
         usage = sects[pool.sect].used
         offset = pool.offset
-        alignment = pool.alignment
-        if alignment < 2:
-          alignment = 2
-        elif alignment > 4:
-          alignment = 4
+        # Walk the end-of-source pool back down to just above the replayed
+        # high-water mark, in FULLWORD steps: the pool origin stays
+        # fullword-aligned (IBM rule -- see the placement above).
+        alignment = 4
         while offset - alignment >= usage:
           offset -= alignment
         pool.offset = offset
@@ -2885,7 +3235,6 @@ def generateObjectCode(source, macros, log=None):
       f"{len(sects)} section(s), {len(symtab)} symbol(s)")
 
   # Let's append the literal pools to their CSECTs.
-  fill = [0x00, 0x00]
   for pool in literalPools:
     if not pool.literals:
       continue
@@ -2894,8 +3243,12 @@ def generateObjectCode(source, macros, log=None):
     actualLength = len(assembled)
     if actualLength < desiredLength:
       assembled.extend(bytearray(desiredLength - actualLength))
-      for i in range(actualLength, desiredLength):
-        assembled[i] = fill[i & 1]
+    # The alignment gap between the csect's code and an end-of-source
+    # pool's fullword origin is covered by TXT and holds C9FB, like every
+    # other CPU-csect alignment gap (see commonProcessing).
+    if not pool.atLtorg:
+      for i in range(int(sects[pool.sect].used), int(pool.offset)):
+        assembled[i] = 0xC9 if (i & 1) == 0 else 0xFB
     for i, lit in enumerate(pool.literals):
       offset = pool.offset + pool.offsets[i]
       lassembled = lit.assembled
@@ -2903,9 +3256,61 @@ def generateObjectCode(source, macros, log=None):
       # A =Z literal's pool slot is a ZCON: emit a 'Z' RLD against its reloc
       # target so the linker fills HW0 (adding the in-image addend) and the
       # segment byte.  Other literal types carry no pool-site relocation.
+      # A target defined in this assembly resolves here (the flush runs after
+      # the final pass): its halfword address is added to the in-image addend
+      # and the RLD targets its containing CSECT, mirroring the DC Z path --
+      # only a still-undefined target becomes an ER.
       if lit.zsym is not None:
-        registerExtrn(lit.zsym)
-        appendReloc(relocations, lit.zsym, pool.sect, offset, 'Z')
-    sects[pool.sect].used = desiredLength
+        zType = 'ZD' if lit.zdata else 'Z'   # data-subfield target -> 0x50
+        litsym = symtab.get(lit.zsym)
+        if litsym is None or litsym.type == "EXTERNAL":
+          registerExtrn(lit.zsym)
+          appendReloc(relocations, lit.zsym, pool.sect, offset, zType)
+        else:
+          relSect, relOff = unhash(litsym.value)
+          zcon = ZCon.from_image(assembled, offset)
+          if relSect is not None:
+            combined = relOff + sectionOffset(relSect)
+            zcon.hw0 = (zcon.hw0 + combined) & 0xFFFF
+            zcon.write_to_image(assembled, offset)
+            rldSymbol = resolveCSect(combined, sects, relSect,
+                                     exclude=pool.sect)
+            appendReloc(relocations, rldSymbol, pool.sect, offset, zType)
+          elif relOff is not None:
+            # Absolute (EQU) target: no RLD; sector-encode like the linker.
+            zcon.hw0 = 0x8000 | ((zcon.hw0 + relOff) & 0x7FFF)
+            zcon.write_to_image(assembled, offset)
+          # A complex-relocatable target was already diagnosed at the
+          # literal's use site; leave the slot's addend image as-is.
+      elif lit.T == "Y" and isinstance(lit.value, Reloc):
+        # A =Y literal over a RELOCATABLE value gets a pool-slot Y RLD,
+        # mirroring DC Y / emitAddressConstant: a local target folds its
+        # section offset into the halfword and relocates against the
+        # containing CSECT; an EXTRN target keeps the addend image and the
+        # linker adds the symbol.  (Previously the bare numeric image was
+        # emitted with no RLD at all.)
+        relSect, relOff = unhash(lit.value)
+        if relSect is not None:
+          ysym = symtab.get(relSect)
+          if ysym is not None and ysym.type == "EXTERNAL":
+            registerExtrn(relSect)
+            appendReloc(relocations, relSect, pool.sect, offset, 'Y')
+          else:
+            combined = relOff + sectionOffset(relSect)
+            assembled[offset:offset + 2] = \
+                (combined & 0xFFFF).to_bytes(2, "big")
+            rldSymbol = resolveCSect(combined, sects, relSect,
+                                     exclude=pool.sect)
+            appendReloc(relocations, rldSymbol, pool.sect, offset, 'Y')
+        # A complex value (relSect None) keeps its numeric image, like the
+        # =Z case above.
+    # A mid-csect (LTORG) pool ends below the csect's high-water mark; only
+    # GROW 'used' for the end-of-source pool -- never truncate back to a
+    # mid pool's end (that clipped FIOLGERR's trailing ZCONs).
+    if desiredLength > sects[pool.sect].used:
+      sects[pool.sect].used = desiredLength
 
+  protClose()                     # a deck with no END card still closes out
+  metadata["protManaged"] = sorted(protManaged)
+  metadata["protRanges"] = {s: sorted(r) for s, r in protRanges.items()}
   return metadata

@@ -12,7 +12,7 @@ import re
 from collections import namedtuple
 from dataclasses import dataclass, field
 from typing import Optional
-from .larkparse import DcSuboperand, parse, split_top_level
+from .larkparse import parse, split_top_level
 # The expression nodes now evaluate themselves (see `astnodes.py`), so this
 # module no longer references the node classes directly.  `Reloc` -- the
 # relocatable-value type a `Sym` resolves to -- is still used here (and
@@ -121,6 +121,15 @@ def indexValue(value, iv, depth=0):
   if iv < 0 or iv >= len(value):
     return ""
   return value[iv]
+
+# N' of a single operand value.  A nested sublist is stored re-rendered as its
+# source text "(a,b,...)" (see indexValue), so N' must count its top-level
+# elements; any other scalar counts 1.
+def sublistCount(value):
+  if isinstance(value, str) and len(value) >= 2 \
+          and value[0] == "(" and value[-1] == ")":
+    return len(split_top_level(value[1:-1]))
+  return 1
 
 '''
 `svReplace` replaces all symbolic variables (e.g. &A) given by `svGlobals` and
@@ -276,39 +285,6 @@ def svReplace(stmt, text, svLocals):
 
   return text
 
-# In parsed expressions, remove useless levels of tuple/list embedding, such
-# as [([expression])] -> expression.
-def unroll(expression):
-  while isinstance(expression, (tuple, list)):
-    if len(expression) == 1:
-      expression = expression[0]
-    elif len(expression) > 0 and expression[-1] == []:
-      expression = expression[:-1]
-    elif len(expression) == 4 and expression[0] == '(' and \
-            expression[2] == [] and expression[3] == ')':
-      expression = expression[1]
-    else:
-      break
-  return expression
-
-# Flatten the AST of a `X { ',' X }` rule into a plain list [AST1, AST2, ...].
-# Such rules yield ( AST1, [] ) or ( AST1, [ [',',AST2], [',',AST3], ... ] ).
-def astFlattenList(ast):
-  if ast == []:
-    return []
-  if isinstance(ast, list) and isinstance(ast[0], (dict, DcSuboperand)):
-    # Lark dc/ds already return a flat list of DcSuboperand objects
-    return ast
-  try:
-    flattened = [ ast[0] ]
-    for e in ast[1]:
-      flattened.append(e[1])
-    return flattened
-  except:
-    print("Implementation error: AST for X{',',X} not appropriate")
-    import sys
-    sys.exit(1)
-
 # ===========================================================================
 # Lark AST evaluators
 # ===========================================================================
@@ -329,6 +305,9 @@ class EvalCtx:
 
   def applySubscripts(self, value, idxs, name):
     return _applySubscripts(value, idxs, name, self)
+
+  def sublistCount(self, value):
+    return sublistCount(value)
 
   def isDefined(self, name):
     return name in definedNormalSymbols
@@ -381,18 +360,7 @@ def _applySubscripts(value, idxs, name, ctx):
     if name == "&SYSLIST" and depth == 0 and iv == 0:
       value = ctx.svLocals.get("&SYSLIST0", SymbolicVar("")).value
       continue
-    iv -= 1
-    if not isinstance(value, (tuple, list)):
-      if depth >= 1 and isinstance(value, str) and len(value) >= 2 \
-              and value[0] == "(" and value[-1] == ")":
-        sub = split_top_level(value[1:-1])
-        value = sub[iv] if 0 <= iv < len(sub) else ""
-      else:
-        value = value if iv == 0 else ""
-    elif iv < 0 or iv >= len(value):
-      value = ""
-    else:
-      value = value[iv]
+    value = indexValue(value, iv, depth)
   return value, True
 
 # Evaluate an arithmetic expression to an integer and return it, or else `None`
@@ -468,41 +436,41 @@ def svDeclare(operation, operand, svLocals, stmt = None):
     sv = svGlobals
   else:
     sv = svLocals
-  for field in fields:
+  for fname in fields:
     value = originalValue
-    if field[:1] != "&":
-      error(stmt, f"In {operation}, {field} is not a symbolic variable")
+    if fname[:1] != "&":
+      error(stmt, f"In {operation}, {fname} is not a symbolic variable")
       continue
-    if "(" in field:
-      subfields = field.split("(")
+    if "(" in fname:
+      subfields = fname.split("(")
       if len(subfields) != 2 or subfields[1][-1:] != ")":
-        error(stmt, f"In {operation}, {field} is improperly formed")
+        error(stmt, f"In {operation}, {fname} is improperly formed")
         continue
       length = subfields[1][:-1]
       ast = parse(length, "arith_only")
       if ast == None:
-        error(stmt, f"Could not parse dimension of {field}")
+        error(stmt, f"Could not parse dimension of {fname}")
         continue
       n = evalArithmeticExpression(ast, svLocals, stmt)
       if n == None:
-        error(stmt, f"Could not compute dimension of {field}")
+        error(stmt, f"Could not compute dimension of {fname}")
         continue
       if n < 1:
-        error(stmt, f"Dimension of {field} out of range ({n})")
+        error(stmt, f"Dimension of {fname} out of range ({n})")
         continue
-      field = subfields[0]
+      fname = subfields[0]
       value = [value] * n
     if isGlobal:
-      # Record that THIS scope declared `field` as a global, so a later SET
+      # Record that THIS scope declared `fname` as a global, so a later SET
       # may write through to it (see SymbolTable.lookupForSet).  A macro may
       # access a global SET symbol only if it declares it GBLx; otherwise the
       # process-wide `svGlobals` leaks an unrelated macro's global of the same
       # name into a macro using it as an undeclared local.
-      svLocals.declareGlobal(field)
-    if field in sv:
-      existing = sv[field].value
+      svLocals.declareGlobal(fname)
+    if fname in sv:
+      existing = sv[fname].value
       if isDifferentType(existing, value):
-        error(stmt, f"Attempt to change type of existing symbolic variable {field}")
+        error(stmt, f"Attempt to change type of existing symbolic variable {fname}")
       elif isinstance(existing, list) and isinstance(value, list) \
               and len(value) > len(existing):
         # A compatible re-declaration with a larger dimension grows the
@@ -510,7 +478,7 @@ def svDeclare(operation, operand, svLocals, stmt = None):
         # in range regardless of which macro was loaded first.
         existing.extend([originalValue] * (len(value) - len(existing)))
       continue
-    sv[field] = SymbolicVar(value)
+    sv[fname] = SymbolicVar(value)
 
 # Set a symbolic variable.  `operation` is one of "SETA", "SETB", "SETC".
 # `name` and `operand` are strings.
@@ -534,23 +502,22 @@ def svSet(operation, name, operand, svLocals, stmt = None):
   # from binding into an unrelated macro's undeclared local), else None.
   sv = svLocals.lookupForSet(sname)
   if sv is None:
-    if "exp" not in pname:
-      # Undeclared (non-arrayed) SET target.  System/360 requires prior
-      # declaration, but AP-101 appears to auto-declare it as local.
-      if operation == "SETA":
-        dv = 0
-      elif operation == "SETB":
-        dv = False
-      elif operation == "SETC":
-        dv = ""
-      else:
-        error(stmt, "Instruction is not SETA, SETB, or SETC")
-        return
-      sv = svLocals
-      svLocals[sname] = SymbolicVar(dv)
+    # Undeclared SET target.  System/360 requires prior declaration, but
+    # AP-101 appears to auto-declare it as local -- including the SUBSCRIPTED
+    # form: FCMBMTMC builds its comfault-mask tables with no LCLC at all
+    # (`&APLHRM(1) SETC 'E0000000'` ...), so `&X(k) SETx` implicitly declares
+    # a local array (grown on write below, HLASM-style).
+    if operation == "SETA":
+      dv = 0
+    elif operation == "SETB":
+      dv = False
+    elif operation == "SETC":
+      dv = ""
     else:
-      error(stmt, f"Symbolic variable {sname} undeclared")
+      error(stmt, "Instruction is not SETA, SETB, or SETC")
       return
+    sv = svLocals
+    svLocals[sname] = SymbolicVar([dv] if "exp" in pname else dv)
   v = sv[sname].value
   if isinstance(v, list):
     if "exp" not in pname:
@@ -630,8 +597,21 @@ def svSet(operation, name, operand, svLocals, stmt = None):
       error(stmt, f"Unable to evaluate data expression {operand}")
       return
     idx = index + offset
-    if idx < 0 or idx >= len(sv[sname].value):
+    if idx < 0:
       error(stmt, f"Index out of range: {name}")
       return
-    sv[sname].value[idx] = value
+    arr = sv[sname].value
+    if idx >= len(arr):
+      # Writing past the current dimension GROWS the array (HLASM-style;
+      # the AP-101 assembler must allow it -- FCMBMTMC assigns
+      # `&APLHRM(1)`..`(16)` with no declared dimension at all).  Reads
+      # past the end are already null (see svReplace).
+      if isinstance(v, bool):
+        filler = False
+      elif isinstance(v, int):
+        filler = 0
+      else:
+        filler = ""
+      arr.extend([filler] * (idx + 1 - len(arr)))
+    arr[idx] = value
 

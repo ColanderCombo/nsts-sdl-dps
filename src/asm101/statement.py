@@ -50,9 +50,11 @@ class Statement:
   identification: str = field(init=False, default="")  # card columns 73-80
   continues: bool = field(init=False, default=False)   # continues onto nextline
 
-  _empty: bool = field(init=False, default=False)
-  _fullComment: bool = field(init=False, default=False)
-  _dotComment: bool = field(init=False, default=False)
+  # Text-derived flags, set at construction; the macro expander overwrites
+  # empty/fullComment on cards it rewrites.
+  empty: bool = field(init=False, default=False)
+  fullComment: bool = field(init=False, default=False)
+  dotComment: bool = field(init=False, default=False)
 
   section: object = None
   pos1: object = None      # location counter at this line: an 'Addr', or None
@@ -65,7 +67,6 @@ class Statement:
   # by codegen.  Heterogeneous (dict / list / DcSuboperand / str), or None when
   # the operand could not be parsed or the line has none.  None == not parsed.
   ast: object = None
-  endComment: str = ""
   # USING base address, set on a USING directive and read by the listing's
   # address column for that line.  Only USING lines read it; 0 is the unused
   # default (matches the old stmt.get("using", 0)).
@@ -99,32 +100,11 @@ class Statement:
     # `continues` and the text-derived flags are frozen here (computed once via
     # the memoized _split_card, not recomputed on read; see the module docstring).
     (self.text, self.identification, self.continues,
-     self._empty, self._fullComment, self._dotComment) = _split_card(line, nextline)
-
-  # --- text-derived flags ---
-  @property
-  def empty(self):
-    return self._empty
-
-  @empty.setter
-  def empty(self, value):
-    self._empty = value
-
-  @property
-  def fullComment(self):
-    return self._fullComment
-
-  @fullComment.setter
-  def fullComment(self, value):
-    self._fullComment = value
-
-  @property
-  def dotComment(self):
-    return self._dotComment
+     self.empty, self.fullComment, self.dotComment) = _split_card(line, nextline)
 
   @property
   def is_blank_or_comment(self):
-    return self._empty or self._fullComment or self._dotComment
+    return self.empty or self.fullComment or self.dotComment
 
   # --- listing render (per-line) ---
   def objcode_hex(self):

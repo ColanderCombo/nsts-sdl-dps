@@ -16,6 +16,19 @@ from .instrdefs import (CPU, CPU_DEFS, MSC_DEFS, BCE_DEFS,
                         CPU_ALIASES)
 from .iop_instr import ALIASES as _MSC_ALIASES
 
+# Macro-language op families, shared by the macro generator (assemble.Assemble)
+# and codegen's 'ignore' set (model101) so their memberships cannot drift.
+# DECLARE = global/local symbolic-variable declarations, SET = assignments;
+# GENERATOR_OPS = the conditional-assembly directives the generator performs --
+# they emit no object code and are dropped from the stream the assembly stage
+# reads (the IBM F-assembler evaluates these and writes only generated
+# statements to SYSUT2).  MNOTE and SPACE are excluded: both are
+# listing-relevant, and MNOTE carries diagnostics.
+MACRO_DECLARE_OPS = frozenset({"GBLA", "GBLB", "GBLC", "LCLA", "LCLB", "LCLC"})
+MACRO_SET_OPS = frozenset({"SETA", "SETB", "SETC"})
+GENERATOR_OPS = (MACRO_DECLARE_OPS | MACRO_SET_OPS
+                 | frozenset({"AIF", "AGO", "ANOP", "ACTR", "MEXIT"}))
+
 # CPU RR-instruction DISPATCH membership -- a derived SET of mnemonics (encoding
 # comes from the GPC descriptors in instrdefs), not an opcode table.  Three parts:
 #   * cpu_mnemonics("RR")  -- the descriptor-typed RR instructions;

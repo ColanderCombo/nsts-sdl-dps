@@ -24,16 +24,6 @@ app = typer.Typer(
 )
 
 
-def validate_source_file(path: Path) -> Path:
-  if not path.exists():
-    raise typer.BadParameter(f"Source file not found: {path}")
-  return path
-
-
-def validate_object_file(path: Optional[Path]) -> Optional[Path]:
-  return path
-
-
 @app.command()
 def assemble(
   source_files: Annotated[ list[Path], typer.Argument(
@@ -56,7 +46,7 @@ def assemble(
       help="SETs global &SYSPARM (BFS or PASS)"),
   ] = "PASS",
   march: Annotated[ March, typer.Option("-march", "--march",
-      help="ap101b or ap101s"),
+      help="Set target architecture."),
   ] = March.ap101s,
   tolerable: Annotated[ int, typer.Option("--tolerable",
       help="Maximum tolerable error severity. asm101 errors are severity 255.",
@@ -65,9 +55,6 @@ def assemble(
   debug_info: Annotated[ bool, typer.Option("--debug-info/--no-debug-info",
       help="Emit a BASENAME.asmg.json debug-symbol sidecar."),
   ] = True,
-  quiet: Annotated[ bool, typer.Option("--quiet", "-q",
-      help="Suppress output unless there are errors."),
-  ] = False,
   verbose: Annotated[ bool, typer.Option("--verbose", "-v",
       help="Print progress messages during assembly."),
   ] = False,
@@ -81,11 +68,6 @@ def assemble(
     asm101 -L macros/ -o output.obj file1.asm file2.asm
   """
 
-  for src in source_files:
-    validate_source_file(src)
-
-  object_file = validate_object_file(object_file)
-
   if object_file is None:
     object_file = Path(source_files[-1].stem + ".obj")
 
@@ -98,6 +80,7 @@ def assemble(
       tolerable_severity=tolerable,
       verbose=verbose,
       debug_info=debug_info,
+      march=march.value,
     )
 
     assembler.assemble()

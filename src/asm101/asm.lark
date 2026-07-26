@@ -59,8 +59,8 @@ catom     : STRING substring?      -> strlit
 substring : "(" arith "," arith ")"
 
 // ============= ANCHORED EXPRESSION START RULES ================
-// {arith,bool,cexpr}_only; same as {arith,bool,cexpr} but DOESN'T
-// strip comments:
+// Variants of arith/bool/cexpr that skip comment stripping.  bool_only and
+// cexpr_only are used only by the test suites.
 ?arith_only : arith
 ?bool_only  : bool
 ?cexpr_only : cexpr
@@ -94,10 +94,12 @@ lcon : LITTYPE LMOD? SMOD? STRING        -> lcon_quoted
      // =Z literal: a ZCON in the literal pool (e.g. `L R3,=Z(,FPMXQETB+2,0)`).
      // Same operand shape as `DC Z(...)`: reloc target (arith, with an optional
      // addend) +/- a leading length and a trailing flags expr.
-     | LITZ "(" "," arith ")"                  -> lcon_z
+     // Leading comma = empty code subfield -> the DATA address subfield is
+     // the reloc target (ZCON/data RLD 0x50; see dc_z_data).
+     | LITZ "(" "," arith ")"                  -> lcon_z_data
      | LITZ "(" arith ")"                      -> lcon_z
      | LITZ "(" arith "," arith? ")"           -> lcon_z
-     | LITZ "(" "," arith "," arith ")"        -> lcon_z_flags
+     | LITZ "(" "," arith "," arith ")"        -> lcon_z_data_flags
      | LITZ "(" arith "," arith? "," arith ")" -> lcon_z_flags
 
 // equ (EQU): value, optional length, optional type attribute (3rd operand).
@@ -183,7 +185,7 @@ LTOK     : /[^ ,()]+/
 // dynamic lexer disambiguates by grammar position (type-letter at suboperand start
 // vs a self-def term inside an A/Y expression).
 dc : dcsub ("," dcsub)*
-ds : dcsub ("," dcsub)*
+ds : dcsub ("," dcsub)*      // same as dc; _parser("ds") shares dc's parser
 dcsub : dup? dctyped
 dup   : NUMBER | "(" arith ")"
 dctyped : "C" DCLEN? STRING?                      -> dc_c
@@ -200,10 +202,13 @@ dctyped : "C" DCLEN? STRING?                      -> dc_c
         // trailing flags expr.  The target is an `arith` (not just a bare
         // SYMBOL) so a relocatable expression with an addend -- `Z(,FIOBRU+4,0)`,
         // `Z(FPMSVCL+2,FPMSVC21,8)` -- parses; codegen extracts (symbol, addend).
-        | "Z" "(" "," arith ")"                  -> dc_z
+        // Leading comma = EMPTY code subfield: the reloc target is the DATA
+        // address subfield, which relocates as ZCON/data (RLD 0x50, DSR
+        // patched) rather than ZCON/code (0x04).
+        | "Z" "(" "," arith ")"                  -> dc_z_data
         | "Z" "(" arith ")"                      -> dc_z
         | "Z" "(" arith "," arith? ")"           -> dc_z
-        | "Z" "(" "," arith "," arith ")"        -> dc_z_flags
+        | "Z" "(" "," arith "," arith ")"        -> dc_z_data_flags
         | "Z" "(" arith "," arith? "," arith ")" -> dc_z_flags
         // bare Z (no parens): DS Z reserves a 4-byte fullword (ZCON slot).
         | "Z" DCLEN?                              -> dc_z

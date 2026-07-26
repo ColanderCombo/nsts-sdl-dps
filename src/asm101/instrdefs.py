@@ -4,6 +4,7 @@
 # descriptor-driven InstructionSets the assembler can encode from.
 # 
 import json
+from functools import cache
 from pathlib import Path
 
 from .instrset import Descriptor, InstructionSet
@@ -26,17 +27,22 @@ CPU = InstructionSet({"CPU": {name: d["d"] for name, d in CPU_DEFS.items()}},
                      CPU_ALIASES)
 
 
+# Mnemonics implemented by the AP-101S but not the AP-101B.
+AP101S_ONLY = frozenset({
+    "LXA", "LXAR", "STXA", "STXAR", "LDM", "STDM", "DIAG", "CED", "CEDR",
+})
+
+
+@cache
 def cpu_type(name):
-  d = CPU_DEFS.get(name)
+  d = CPU.by_name.get(name) if name in CPU_DEFS else None
   if d is None:
     return None
-  bits, _, flags = d["d"].partition("/")
-  fields = set(c for c in bits if c not in "01_")
-  if flags == "X":
+  if d.flags == "X":
     return "RS"
-  if flags == "I":
-    return "SI" if "d" in fields else "RI"
-  return "SRS" if "d" in fields else "RR"
+  if d.flags == "I":
+    return "SI" if "d" in d.fields else "RI"
+  return "SRS" if "d" in d.fields else "RR"
 
 
 def cpu_mnemonics(*types):
@@ -64,6 +70,7 @@ RS_HW2_EXTENDED = Descriptor("rs_ae", "dddddddddddddddd")
 RS_HW2_INDEXED = Descriptor("rs_ai", "xxxaiddddddddddd")
 
 
+@cache
 def srs_d2_units(name):
   """SRS D2 unitizer: 2 when the 6-bit displacement counts fullwords, else 1
   (POO SRS scaling: EA = base + (D2 << (addrWidth-1))).  Reads the same
@@ -87,6 +94,7 @@ def has_rs_descriptor(name):
                or {"a", "b"} <= set(d.fields)))
 
 
+@cache
 def implied_r1(name):
   """The R1 baked into a no-R1 SRS/RS op's fixed opcode bits -- descriptor bits 5-7
   (the R1 field position) -- for an op that takes NO explicit R1 operand (no 'x'
@@ -125,6 +133,7 @@ def rs_hw1(name, r1, b2, indexed):
   return CPU.encode(base, fields)
 
 
+@cache
 def rs_form_bits(name):
   """The two SRS/RS form-selection bits that model101's codegen reads off the old
   ARGS_SRS_OR_RS 10-bit opcode -- derived from the descriptor instead.  Returns

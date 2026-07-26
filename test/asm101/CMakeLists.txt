@@ -15,7 +15,7 @@
 # =====================================================================
 
 # The test scripts sit in test/ (the parent of this fixture directory).
-set(_asm_script_dir "${HAL_TEST_SRC_DIR}")
+set(_asm_script_dir "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
 # End-to-end smoke test for upstream ext/virtualagc/ASM101S: assembles a
 # tiny ZCONASM fixture and byte-compares the .obj to a checked-in golden.

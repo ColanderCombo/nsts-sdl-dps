@@ -26,6 +26,7 @@ from .cardreader import joinOperand
 from .larkparse import Aif, Equ, parse
 from .statement import Statement
 from ap101Utils.objModule import Module
+from . import model101tables
 from .model101 import (
     generateObjectCode, sectionOffset,
     symtab, sects, entries, extrns, literalPools, _num
@@ -171,29 +172,19 @@ class Assemble:
       "USING": [2, 17]
   }
 
-  # Macro-language op families (consolidated; referenced across the parse and
-  # listing passes).  DECLARE = global/local symbolic-variable declarations,
-  # SET = symbolic-variable assignments; LANGUAGE is the full set of ops that
-  # are part of the macro language itself (and so are not listed by default).
-  MACRO_DECLARE_OPS = frozenset({"GBLA", "GBLB", "GBLC", "LCLA", "LCLB", "LCLC"})
-  MACRO_SET_OPS = frozenset({"SETA", "SETB", "SETC"})
+  # Macro-language op families; the base sets live in model101tables so the
+  # generator and codegen's 'ignore' set share one definition.  LANGUAGE is
+  # the full set of ops that are part of the macro language itself (and so
+  # are not listed by default); GENERATOR_OPS are dropped from the stream
+  # the assembly stage reads (see '_codegen_source').
+  MACRO_DECLARE_OPS = model101tables.MACRO_DECLARE_OPS
+  MACRO_SET_OPS = model101tables.MACRO_SET_OPS
+  GENERATOR_OPS = model101tables.GENERATOR_OPS
   MACRO_LANGUAGE_OPS = (MACRO_DECLARE_OPS | MACRO_SET_OPS
                         | frozenset({"AIF", "AGO", "ANOP", "SPACE", "MEXIT", "MNOTE"}))
-  # The conditional-assembly directives the macro GENERATOR "performs" -- they
-  # emit no object code and are dropped from the stream the ASSEMBLY stage reads
-  # (mirroring the IBM F-assembler: the generator evaluates these and writes only
-  # generated statements to SYSUT2; see '_codegen_source').  Every op here is in
-  # model101's 'ignore' set, so excluding them should not change the object code.
-  # MNOTE and SPACE are deliberately NOT included (MNOTE carries diagnostics;
-  # both are listing-relevant and not part of the bloat).
-  GENERATOR_OPS = (MACRO_DECLARE_OPS | MACRO_SET_OPS
-                   | frozenset({"AIF", "AGO", "ANOP", "ACTR", "MEXIT"}))
+  # Declare+set union, precomputed for the per-line library-scan test.
+  MACRO_SV_OPS = MACRO_DECLARE_OPS | MACRO_SET_OPS
 
-  # Characters valid in symbol names
-  LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ$#@"
-  DIGITS = "0123456789"
-  SPECIAL_CHARACTERS = "+-,=*()'/& "
-    
   def __init__(
       self,
       source_files: list[Path],
@@ -203,10 +194,12 @@ class Assemble:
       tolerable_severity: int = 1,
       verbose: bool = False,
       debug_info: bool = True,
+      march: str = "ap101s",
   ):
     self.source_files = source_files
     self.object_file = object_file
     self.debug_info = debug_info
+    self.march = march
     self.libraries = libraries or []
     self._log_path_base = source_files[0].parent if source_files else Path.cwd()
     self.sysparm = sysparm
@@ -220,6 +213,9 @@ class Assemble:
     # Operation names confirmed to have no on-demand library member, so we
     # don't re-stat the library for every machine op / pseudo-op occurrence:
     self._no_library_member = set()
+    # Per-macro (body text, line correspondence, sequence prescan); see
+    # _read_source_file.
+    self._macro_read_cache = {}
     self.sequence_global_locals = {}  # Sequence symbols for global-local scope
     self.metadata = {}  # Assembly metadata (TITLE, etc.)
     self.sysndx = -1  # Macro invocation counter
@@ -234,13 +230,92 @@ class Assemble:
     if self.verbose:
       print(message, file=sys.stderr)
 
-  def _relpath(self, path) -> str:
+  def _relpath(self, path, base=None) -> str:
+    """Path relative to 'base' (default: the primary source's directory),
+    absolute if relativizing fails or is longer."""
     absolute = str(path)
     try:
-      relative = os.path.relpath(absolute, str(self._log_path_base))
+      relative = os.path.relpath(absolute, base or str(self._log_path_base))
     except ValueError:
       return absolute
     return relative if len(relative) <= len(absolute) else absolute
+
+  def _macro_body_map(self, name):
+    """self.source indices of macro 'name's body cards, in the order the
+    expansion reader sees them: a generated statement with lineNumber k came
+    from body card _macro_body_map(name)[k-1].  Mirrors the body
+    reconstruction in _read_source_file (the MACRO card, the prototype and
+    its continuations, and the MEND card are not part of the body stream)."""
+    cache = getattr(self, "_body_map_cache", None)
+    if cache is None:
+      cache = self._body_map_cache = {}
+    if name in cache:
+      return cache[name]
+    mw = self.macros.get(name)
+    idxs = []
+    if mw is not None and mw.end is not None:
+      continue_prototype = False
+      for i in range(mw.start, mw.end + 1):
+        if i == mw.start or i == mw.end:
+          continue
+        if i == mw.prototype:
+          continue_prototype = self.source[i].continues
+          continue
+        if continue_prototype:
+          if not self.source[i].continues:
+            continue_prototype = False
+          continue
+        idxs.append(i)
+    cache[name] = idxs
+    return idxs
+
+  def _diag_path(self, path) -> str:
+    """Path as shown in a diagnostic: relative to the working directory (so
+    'file:line' is clickable where the build ran), absolute if shorter."""
+    return self._relpath(path, base=os.curdir)
+
+  def _diag_origin(self, stmt):
+    """(display-path, line-number) a diagnostic on 'stmt' should point at.
+    A card read from a file reports that file:line directly; a
+    macro-generated card reports the macro-definition card it was generated
+    from, resolved through nested definitions until a real file is found."""
+    s = stmt
+    for _ in range(16):  # nested-definition depth guard
+      if s.file is not None:
+        return self._diag_path(s.file), s.lineNumber
+      body = self._macro_body_map(s.macro) if s.macro else []
+      k = s.lineNumber - 1
+      if 0 <= k < len(body):
+        s = self.source[body[k]]
+      else:
+        break
+    return f"<macro {s.macro}>", s.lineNumber
+
+  def _invocation_chain(self, stmt):
+    """The macro-invocation statements that produced generated card 'stmt',
+    innermost first, ending at depth 0 in a primary source file.  The
+    invoker of a depth-d expansion is the nearest preceding card at depth
+    d-1 whose operation is the macro's name -- matching on the name skips
+    the cards an on-demand library-member load appended between the
+    invocation card and the expansion (and the member's own prototype card,
+    which repeats the name but sits inside a MACRO definition)."""
+    chain = []
+    cur = stmt
+    idx = stmt.n
+    while cur.depth > 0 and idx > 0:
+      found = None
+      while idx > 0:
+        idx -= 1
+        s = self.source[idx]
+        if (s.depth == cur.depth - 1 and not s.inMacroDefinition
+                and s.operation == cur.macro):
+          found = s
+          break
+      if found is None:
+        break
+      chain.append(found)
+      cur = found
+    return chain
 
   def _codegen_source(self) -> list:
     """The generated-statement stream the assembly stage consumes: 'self.source'
@@ -357,7 +432,6 @@ class Assemble:
     first_index_of_file = len(self.source)
     in_macro_proto = False
     in_macro_definition = False
-    continue_prototype = False
     line_correspondence = []
     # ACTR-style conditional-assembly loop counter.  Every AGO and every
     # taken AIF branch decrements the budget; if it is exhausted we have
@@ -366,33 +440,34 @@ class Assemble:
     branch_budget = self.ACTR_LIMIT
         
     if from_where in self.macros:
-      # Load the macro definition
+      # Load the macro definition.  Body text, line correspondence, and the
+      # sequence prescan depend only on the MacroDef, so they are built once
+      # and shared across invocations.  'sequence' gets a copy: the lazy
+      # record in the execution loop mutates it.
       filename = None
       macroname = from_where
       macro_where = self.macros[macroname]
-      this_source = []
-      sequence = {}
-
-      for i in range(macro_where.start, macro_where.end + 1):
-        if i == macro_where.start:
-          continue
-        if i == macro_where.prototype:
-          if self.source[i].continues:
-            continue_prototype = True
-          continue
-        if i == macro_where.end:
-          continue
-        if continue_prototype:
-          if not self.source[i].continues:
-            continue_prototype = False
-          continue
-                
-        if self.source[i].continues:
-          suffix = "X"
-        else:
-          suffix = " "
-        this_source.append((self.source[i].text + suffix).ljust(80))
-        line_correspondence.append(i - macro_where.firstIndex)
+      cached = self._macro_read_cache.get(macroname)
+      if cached is None:
+        # _macro_body_map drops the MACRO card, the prototype and its
+        # continuations, and the MEND card.
+        idxs = self._macro_body_map(macroname)
+        body_source = [
+            (self.source[i].text + ("X" if self.source[i].continues else " "))
+            .ljust(80)
+            for i in idxs
+        ]
+        body_correspondence = [i - macro_where.firstIndex for i in idxs]
+        prescan = {}
+        for _seqLn, _seqLine in enumerate(body_source):
+          if _seqLine[:1] == "." and _seqLine[:2] != ".*":
+            _seqToks = _seqLine.split()
+            if _seqToks and _seqToks[0] not in prescan:
+              prescan[_seqToks[0]] = (from_where, _seqLn)
+        cached = (body_source, body_correspondence, prescan)
+        self._macro_read_cache[macroname] = cached
+      this_source, line_correspondence, _prescan = cached
+      sequence = dict(_prescan)
     else:
       try:
         with open(from_where, "rt") as f:
@@ -407,22 +482,25 @@ class Assemble:
     skip_count = 0
     line_number = -1
     skip_to_seq = None
+    just_branched = False
     # 'this_source' is fixed for this read (the macro body / file lines were
     # assembled above and are only read below), so its length is loop-invariant.
     nLines = len(this_source)
 
-    # Pre-scan this file/macro body for sequence symbols so that BOTH
-    # forward and backward AGO/AIF targets resolve.  The lazy scan further
-    # down records a label only when its line is executed, which cannot
-    # resolve a BACKWARD jump to a label an earlier FORWARD jump skipped over.
-    # A sequence symbol occupies the name field (a leading ".", but not the
-    # ".*" comment); record the first occurrence.
-    for _seqLn in range(len(this_source)):
-      _seqLine = this_source[_seqLn]
-      if _seqLine[:1] == "." and _seqLine[:2] != ".*":
-        _seqToks = _seqLine.split()
-        if _seqToks and _seqToks[0] not in sequence:
-          sequence[_seqToks[0]] = (from_where, _seqLn)
+    # Pre-scan a file for sequence symbols so both forward and backward
+    # AGO/AIF targets resolve; the lazy scan below records a label only when
+    # its line is executed, which cannot resolve a backward jump to a label
+    # a forward jump skipped over.  A sequence symbol occupies the name
+    # field (a leading ".", but not the ".*" comment); first occurrence
+    # wins.  A file read scans into the caller's dict; a macro read uses its
+    # cached prescan from above.
+    if macroname is None:
+      for _seqLn in range(len(this_source)):
+        _seqLine = this_source[_seqLn]
+        if _seqLine[:1] == "." and _seqLine[:2] != ".*":
+          _seqToks = _seqLine.split()
+          if _seqToks and _seqToks[0] not in sequence:
+            sequence[_seqToks[0]] = (from_where, _seqLn)
 
     while line_number + 1 < nLines:
       line_number += 1
@@ -483,10 +561,17 @@ class Assemble:
       # file/macro read begins from inside '_parse_line' of a CONTINUED
       # invocation line, self.source[-2] is that outer continuation card,
       # not a line of THIS read -- skipping it would consume the new
-      # member's MACRO header.
-      if (len(self.source) - 1 > first_index_of_file and
+      # member's MACRO header.  The just_branched guard: after a taken
+      # AIF/AGO branch self.source[-2] is the CONTINUED branching statement
+      # itself (its continuation cards were never appended -- the cursor
+      # jumped), and the first card at the target is a labeled statement,
+      # never a continuation -- without the guard the branch-target card
+      # is silently eaten.
+      if (not just_branched and
+              len(self.source) - 1 > first_index_of_file and
               self.source[-2].continues):
         continue
+      just_branched = False
             
       skip_count = self._parse_line(this_source, line_number,
                                    in_macro_definition, in_macro_proto,
@@ -548,7 +633,7 @@ class Assemble:
       # SET/declaration statements (which emit no code).  Everything else
       # at the top level is ignored -- marked so codegen skips it, and
       # short-circuited here so it is not expanded now.
-      if library_scan and operation not in (self.MACRO_DECLARE_OPS | self.MACRO_SET_OPS):
+      if library_scan and operation not in self.MACRO_SV_OPS:
         stmt.skip = True
         continue
 
@@ -609,8 +694,17 @@ class Assemble:
         else:
           fields = operand.split()
           target = fields[0] if fields else ""
+        _pre_branch_ln = line_number
         line_number, skip_to_seq = self._branch_to(
             target, sequence, from_where, stmt, line_number)
+        if skip_to_seq is not None or line_number != _pre_branch_ln:
+          # A taken branch invalidates the pending continuation-card skip:
+          # skip_count belongs to THIS (continued) statement's continuation
+          # cards, which the cursor move leaves behind.  Letting it
+          # linger silently eats the branch-TARGET card, so a macro line
+          # reached from a multi-card AIF never runs.
+          skip_count = 0
+          just_branched = True
         continue
       if operation == "AIF":
         operand = operand.rstrip()
@@ -629,8 +723,14 @@ class Assemble:
           branch_budget = self._charge_branch(
               branch_budget, macroname, filename, line_number)
           # Conditional test passed - go to sequence symbol
+          _pre_branch_ln = line_number
           line_number, skip_to_seq = self._branch_to(
               target, sequence, from_where, stmt, line_number)
+          if skip_to_seq is not None or line_number != _pre_branch_ln:
+            # See the AGO site: a taken branch invalidates the pending
+            # continuation-card skip or it eats the branch-target card.
+            skip_count = 0
+            just_branched = True
           continue
         else:
           error(stmt, f"Unrecognized AIF operand: {operand}")
@@ -672,9 +772,20 @@ class Assemble:
           stmt.mnote = True
         continue
             
-      # Symbolic-variable replacement
-      if "&" in line:
+      # Symbolic-variable replacement.  Test the PARSED fields, not the raw
+      # card image: `line` is only the FIRST card of a continued statement,
+      # so a variable appearing only on a continuation card (FCMBMTMC's
+      # `BMTENT ...,`/`  0C,&AERRLBL`) would otherwise skip substitution and
+      # pass the raw `&VAR` text through as a macro argument.
+      if "&" in name or "&" in operation or "&" in operand:
         name = svReplace(stmt, name, sv_locals)
+        # The real assembler RE-SCANS the substituted card, so a name field
+        # ends at the first blank.  A SETC value with deliberate trailing
+        # blanks (PCGEN: &SYM SETC '&SYSLIST(3,1)'.'  ') must define the
+        # CLEAN symbol -- keying symtab on the padded text made every such
+        # ENTRY silently drop its LD from the ESD (FIOADCNS/FIOADCCL PC/CM/
+        # LS entries, 88 hw unresolved in the composed SSW).
+        name = name.split(" ", 1)[0]
         raw_operation = operation
         operation = svReplace(stmt, operation, sv_locals)
         operand = svReplace(stmt, operand, sv_locals)
@@ -702,7 +813,7 @@ class Assemble:
       # deferred.  The length operand is a macro-time constant (already
       # pure arithmetic by now), so it evaluates with empty symbolic-
       # variable and symbol-table context; define-before-use holds for
-      # these symbols in real flight decks.
+      # these symbols in practice.
       if (operation == "EQU" and name != "" and name[:1] not in [".", "&"]):
         eqast = parse(operand, "equ")
         if isinstance(eqast, Equ) and eqast.length is not None:
@@ -719,16 +830,19 @@ class Assemble:
             asmContext.symbolAttributes.setdefault(name, {})["type"] = \
                 bytes((tval,)).decode("ebcdicvagc")
 
-      if (name != "" and name[:1] not in [".", "&"] 
-          and operation not in ["TITLE", "CSECT", "DSECT"] 
+      def _define_symbol(symbol):
+        definedNormalSymbols[symbol] = {
+            "label": True,
+            "fromWhere": from_where,
+            "lineNumber": line_number,
+            "fromLine": line_correspondence[line_number]
+        }
+
+      if (name != "" and name[:1] not in [".", "&"]
+          and operation not in ["TITLE", "CSECT", "DSECT"]
           and operation not in self.macros):
         if name not in definedNormalSymbols:
-          definedNormalSymbols[name] = {
-              "label": True,
-              "fromWhere": from_where,
-              "lineNumber": line_number,
-              "fromLine": line_correspondence[line_number]
-          }
+          _define_symbol(name)
         else:
           error(stmt, f"Already defined: {name}")
       elif operation == "EXTRN":
@@ -741,12 +855,7 @@ class Assemble:
         for symbol in symbols:
           symbol = symbol.strip()
           if symbol and symbol not in definedNormalSymbols:
-            definedNormalSymbols[symbol] = {
-                "label": True,
-                "fromWhere": from_where,
-                "lineNumber": line_number,
-                "fromLine": line_correspondence[line_number]
-            }
+            _define_symbol(symbol)
             
       if operation in self.macros:
         self.sysndx += 1
@@ -891,7 +1000,8 @@ class Assemble:
     # record (the intolerable-error scan below and writeListing read it).
     codegen_source = self._codegen_source()
     self._log(f"Generating object code ({len(codegen_source)} of {len(self.source)} lines)...")
-    self.metadata = generateObjectCode(codegen_source, self.macros, log=self._log)
+    self.metadata = generateObjectCode(codegen_source, self.macros, log=self._log,
+                                       march=self.march)
         
     # Check for errors.  Intolerance is judged per source LINE, not per
     # occurrence.  Codegen passes (pass >= 1) RE-evaluate and RE-log every
@@ -905,10 +1015,14 @@ class Assemble:
     error_count, _max_severity = getErrorCount()
     final_pass = self.metadata.get("passCount", 0)
 
+    def _intolerable(rec):
+      return rec.severity > self.tolerable_severity and \
+          (rec.passCount <= 0 or rec.passCount == final_pass)
+
     def _line_max_intolerable(errs):
       worst = 0
       for rec in errs:
-        if rec.severity > self.tolerable_severity and (rec.passCount <= 0 or rec.passCount == final_pass):
+        if _intolerable(rec):
           worst = max(worst, rec.severity)
       return worst
 
@@ -927,40 +1041,62 @@ class Assemble:
       max_intolerable = 255
 
     if intolerables > 0:
-      # Build detailed error report
+      # Compiler-style diagnostics: one 'file:line: error: message' per
+      # intolerable diagnostic, a source excerpt, and (for macro-generated
+      # lines) the expansion/invocation chain back to the primary source.
+      # Only lines whose errors ABORT the assembly are reported -- transient
+      # early-pass errors and tolerated severities are not repeated here
+      # (the listing remains the complete record).
       error_lines = []
-      error_lines.append(
-          f"Assembly aborted due to intolerable errors. "
-          f"{error_count} total error(s) detected.")
-      error_lines.append(
-          "Fix any intolerable errors marked below and retry.")
-      error_lines.append("")
+      REPORT_LIMIT = 50   # sites shown in full; the rest are counted
 
-      last_error = False
-      for i in range(len(self.source)):
-        line = self.source[i]
-        depth_star = "+" if line.depth > 0 else ' '
-        if len(line.errors) == 0:
-          error_lines.append(f"{i:5d}: {depth_star}   {line.text}")
-          last_error = False
-        else:
-          if not last_error:
-            error_lines.append("=" * 53)
-          for rec in line.errors:
-            error_lines.append(str(rec))
-          error_lines.append(f"{i:5d}: {depth_star}   {line.text}")
-          error_lines.append("=" * 53)
-          last_error = True
+      def _line_diags(errs):
+        # The diagnostics that make this line intolerable (the _intolerable
+        # predicate), deduplicated across codegen passes.
+        seen, out = set(), []
+        for rec in errs:
+          if _intolerable(rec) and rec.message not in seen:
+            seen.add(rec.message)
+            out.append(rec)
+        return out
 
+      shown = 0
+      for line in self.source:
+        diags = _line_diags(line.errors)
+        if not diags:
+          continue
+        shown += 1
+        if shown > REPORT_LIMIT:
+          continue
+        where, ln = self._diag_origin(line)
+        for rec in diags:
+          sev = "" if rec.severity == 255 else f" (severity {rec.severity})"
+          error_lines.append(f"{where}:{ln}: error{sev}: {rec.message}")
+        error_lines.append(f"{ln:6d} | {line.text.rstrip()}")
+        # A generated line's card image is the raw macro-body text; when
+        # substitution changed the operand, show what it became.
+        if line.depth > 0 and line.operand and line.operand not in line.text:
+          expanded = f"{line.name:<8} {line.operation:<5} {line.operand}".rstrip()
+          error_lines.append(f"       | expands to: {expanded}")
+        for inv in self._invocation_chain(line):
+          w, l = self._diag_origin(inv)
+          error_lines.append(
+              f"  note: in expansion of macro {inv.operation}, "
+              f"invoked from {w}:{l}")
+        error_lines.append("")
+
+      if shown > REPORT_LIMIT:
+        error_lines.append(
+            f"... {shown - REPORT_LIMIT} more line(s) with intolerable "
+            f"errors not shown (see listing for the full record)")
       if unclosed_macro:
-        error_lines.append("No closing MEND for MACRO")
+        error_lines.append("error: no closing MEND for MACRO")
 
       error_lines.append(
-          "Assembly aborted. Fix the errors or use higher tolerable_severity.")
-      error_lines.append(
-          f"{','.join(source_file_names)}: {intolerables} intolerable line(s) "
-          f"detected, {self.tolerable_severity} < severity < {1 + max_intolerable}.")
-            
+          f"{','.join(source_file_names)}: assembly aborted: "
+          f"{error_count} error(s), {intolerables} line(s) with intolerable "
+          f"errors (severity > {self.tolerable_severity}).")
+
       raise AssemblyError("\n".join(error_lines), error_count, max_intolerable)
         
     # Write object file
@@ -979,7 +1115,14 @@ class Assemble:
                  d.offset.bytes if d.offset is not None else 0,
                  bytes(d.memory[:d.used]))
                 for name, d in sects.items() if not d.dsect]
-    externs = list(extrns.items())
+    # A symbol registered as an external on an early pass (e.g. a Z-con
+    # target seen before its definition) may have ended up defined in this
+    # assembly; emitting an ER for it would make the linker demand an export
+    # nothing provides.  Keep only names still EXTERNAL at end of assembly --
+    # the original assembler likewise dropped EXTRNs of defined symbols.
+    externs = [(name, n) for name, n in extrns.items()
+               if (sym := symtab.get(name)) is None
+               or sym.type == "EXTERNAL"]
     relocations = [(r.symbol, r.section, r.type, r.address.bytes)
                    for r in self.metadata.get('relocations', [])]
 
@@ -1000,10 +1143,58 @@ class Assemble:
       if _entAddr >= 0:
         end = (_entAddr, sym.section or '')
 
+    # Runtime stack frame: an AMAIN/AENTRY routine defines a 'STACK' DSECT whose
+    # byte size (STACKEND-STACK) is the frame the linkage editor reserves in the
+    # routine's @0 stack.  Emit the compiler-style STACKEND SYM marker for the
+    # primary code CSECT (the END entry's section, else the first coded one) so
+    # the linker sizes assembler-routine stacks the same way it does compiler
+    # objects.  Modules with no 'STACK' DSECT push no HAL/S frame and get none.
+    stack_frames = []
+    stackDsect = sects.get('STACK')
+    if stackDsect is not None and stackDsect.dsect and stackDsect.used.bytes > 0:
+      primary = (end[1] if end else
+                 next((name for name, _s, _o, img in sections if img), None))
+      if primary:
+        stack_frames.append((primary, stackDsect.used.bytes))
+
     module = Module.from_assembly(sections, externs, ldEntries,
-                                  end=end, relocations=relocations)
+                                  end=end, relocations=relocations,
+                                  stack_frames=stack_frames)
     with open(self.object_file, 'wb') as f:
+      f.write(self._protCards())
       f.write(module.to_bytes(ident="ASM101 0.00"))
+
+  def _protCards(self) -> bytes:
+    """Free-format ' PROT <csect> <s>-<e>[,...]' control cards recording the
+    SPON/SPOFF store-protect ranges (halfword offsets, hex, end-exclusive).
+    One card set per managed csect; a bare ' PROT <csect>' card (no ranges)
+    means the source manages protection and protects nothing.  Like HAL/S-FC's
+    ' STACK' cards these precede the object module proper and are carried as
+    objModule.ControlRecord statements."""
+    out = bytearray()
+
+    def emit(csect, parts):
+      text = f" PROT {csect} {','.join(parts)}" if parts else f" PROT {csect}"
+      out.extend(text.ljust(80)[:80].encode("ebcdicvagc"))
+
+    for csect in self.metadata.get('protManaged', []):
+      merged = []
+      for s, e in sorted(self.metadata.get('protRanges', {}).get(csect, [])):
+        sHw, eHw = s // 2, (e + 1) // 2
+        if merged and sHw <= merged[-1][1]:
+          merged[-1][1] = max(merged[-1][1], eHw)
+        else:
+          merged.append([sHw, eHw])
+      parts, width = [], 0
+      for sHw, eHw in merged:
+        piece = f"{sHw:X}-{eHw:X}"
+        if width + len(piece) > 56 and parts:    # keep cards within col 71
+          emit(csect, parts)
+          parts, width = [], 0
+        parts.append(piece)
+        width += len(piece) + 1
+      emit(csect, parts)
+    return bytes(out)
 
   # Map a SymtabEntry.type to the asmg.json 'kind' for a defined symbol.
   # CSECTs are carried in the 'sections' list instead; EXTERNAL (ER imports)

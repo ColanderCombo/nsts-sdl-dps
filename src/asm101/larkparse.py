@@ -11,15 +11,10 @@ from ap101Utils import codepages  # noqa: F401 -- registers the 'ebcdicvagc' cod
 from .astnodes import (
     Int, Loc, Neg, BinOp, Sym, Var, Attr, Lcon,
     Bool, Not, And, Or, Defined, Rel, Str, Concat, Substr, Tattr,
-    zRelocTarget,
+    ebcdicValue as _ebcdic,
 )
 
 _GRAMMAR = os.path.join(os.path.dirname(__file__), "asm.lark")
-
-
-def _ebcdic(s):
-  """Pack a C'..' string big-endian as EBCDIC bytes into an integer."""
-  return int.from_bytes(s.replace("''", "'").encode("ebcdicvagc"), "big")
 
 
 @dataclass
@@ -95,6 +90,9 @@ class DcSuboperand:
     hexstr  the A-hex form's hex string, or None
     zexpr   the Z reloc-target arith node (a bare Sym, or Sym +/- a constant
             addend), or None
+    zdata   True when the Z reloc target is the DATA address subfield
+            ('Z(,sym...)' -- code subfield empty), which relocates as
+            ZCON/data (RLD 0x50) instead of ZCON/code (0x04)
     flags   the Z flags arith node, or None
     scale   the fixed-point scale modifier (Sn) integer for F/H/E/D, or None
     dup     duplication-factor arith node, or None (filled in by 'dcsub')"""
@@ -103,6 +101,7 @@ class DcSuboperand:
   values: list = field(default_factory=list)
   hexstr: object = None
   zexpr: object = None
+  zdata: bool = False
   flags: object = None
   scale: object = None
   dup: object = None
@@ -226,8 +225,11 @@ class _AST(Transformer):
     return self._r1(r1, {"D2": d2, "X2": x2, "B2": b2})
 
   def rs_d2_b2only(self, *a):           # [R1,] D2(,B2)  -- X2 omitted
+    # B2ONLY marks the comma form: 'expr(,Rn)' (explicitly omitted
+    # index) requests the INDEXED RS AM=1 format and never condenses to
+    # SRS, unlike the bare 'expr(Rn)' base form.
     *r1, d2, b2 = a
-    return self._r1(r1, {"D2": d2, "B2": b2})
+    return self._r1(r1, {"D2": d2, "B2": b2, "B2ONLY": True})
 
   def rs_d2_empty(self, *a):            # [R1,] D2()
     *r1, d2 = a
@@ -251,24 +253,41 @@ class _AST(Transformer):
     raw = node[node.index("(") + 1:node.rindex(")")]
     return {"L2": Lcon("Y", expr, length, None, raw)}
 
-  # =Z literal: same operand shape as 'DC Z(...)'.  'body' holds the reloc-target
-  # arith (first arith node); a trailing arith (length/base) is ignored; 'raw' is
-  # the parenthesized source (pool key / listing).
-  @v_args(meta=True, inline=True)
-  def lcon_z(self, meta, litz, *rest):
+  def _zparts(self, meta, rest):
+    """Shared by the Z-form rules: (non-DCLEN arith nodes, parenthesized
+    source text).  First arith = reloc target, last = flags where present;
+    any middle arith (length/base) is dropped."""
     ariths = [a for a in rest if getattr(a, "type", None) != "DCLEN"]
-    target = ariths[0] if ariths else None
     node = self._text[meta.start_pos:meta.end_pos]
     raw = node[node.index("(") + 1:node.rindex(")")]
-    return {"L2": Lcon("Z", target, None, None, raw)}
+    return ariths, raw
+
+  # =Z literal: same operand shape as 'DC Z(...)'.  'body' holds the
+  # reloc-target arith; 'raw' is the parenthesized source (pool key /
+  # listing).
+  @v_args(meta=True, inline=True)
+  def lcon_z(self, meta, litz, *rest):
+    ariths, raw = self._zparts(meta, rest)
+    return {"L2": Lcon("Z", ariths[0] if ariths else None, None, None, raw)}
 
   @v_args(meta=True, inline=True)
   def lcon_z_flags(self, meta, litz, *rest):
-    # First arith = reloc target, last arith = flags, any middle is dropped.
-    ariths = [a for a in rest if getattr(a, "type", None) != "DCLEN"]
-    node = self._text[meta.start_pos:meta.end_pos]
-    raw = node[node.index("(") + 1:node.rindex(")")]
+    ariths, raw = self._zparts(meta, rest)
     return {"L2": Lcon("Z", ariths[0], None, None, raw, ariths[-1])}
+
+  # =Z(,tgt[,flags]): empty code subfield -- the DATA address subfield is the
+  # reloc target (ZCON/data RLD 0x50; the raw pool key keeps the comma, so
+  # data- and code-subfield literals never unify).
+  @v_args(meta=True, inline=True)
+  def lcon_z_data(self, meta, litz, *rest):
+    ariths, raw = self._zparts(meta, rest)
+    return {"L2": Lcon("Z", ariths[0] if ariths else None, None, None, raw,
+                       None, True)}
+
+  @v_args(meta=True, inline=True)
+  def lcon_z_data_flags(self, meta, litz, *rest):
+    ariths, raw = self._zparts(meta, rest)
+    return {"L2": Lcon("Z", ariths[0], None, None, raw, ariths[-1], True)}
 
   def equ(self, *a):                    # EQU: value [, length [, type]]
     return Equ(a[0],
@@ -491,9 +510,17 @@ class _AST(Transformer):
   def dc_z_flags(self, *args):            # ...,flags  (the trailing arith)
     # First arith = reloc target, last arith = flags, any middle (the ignored
     # base/length field) is dropped.  Works for both 'Z(tgt,flags)' (2 args)
-    # and 'Z(tgt,base,flags)' / 'Z(,tgt,flags)'
+    # and 'Z(tgt,base,flags)'.
     ariths = [a for a in args if getattr(a, "type", None) != "DCLEN"]
     return DcSuboperand("Z", zexpr=ariths[0], flags=ariths[-1])
+
+  def dc_z_data(self, *args):             # Z(,tgt) -- DATA-subfield target
+    ariths = [a for a in args if getattr(a, "type", None) != "DCLEN"]
+    return DcSuboperand("Z", zexpr=ariths[0] if ariths else None, zdata=True)
+
+  def dc_z_data_flags(self, *args):       # Z(,tgt,flags)
+    ariths = [a for a in args if getattr(a, "type", None) != "DCLEN"]
+    return DcSuboperand("Z", zexpr=ariths[0], zdata=True, flags=ariths[-1])
 
   def dup(self, x):
     # 'x' is a raw integer token for a bare factor ('3DC...'), or an already-
@@ -539,14 +566,21 @@ _LALR_STARTS = frozenset({
 })
 
 
+# Starts whose transformer rules read node positions (rs: lcon_y/lcon_z*;
+# oinv: litem_bare).  The rest skip per-node position bookkeeping.
+_META_STARTS = frozenset({"rs", "oinv"})
+
+
 @cache
 def _parser(start):
+  if start == "ds":
+    return _parser("dc")   # identical grammar rule; share one parser
   isLalr = start in _LALR_STARTS
-  return Lark.open(_GRAMMAR, start=start, 
+  return Lark.open(_GRAMMAR, start=start,
                    parser = "lalr" if isLalr else "earley",
                    lexer = "contextual" if isLalr else "auto",
                    maybe_placeholders=False,
-                   propagate_positions=True)
+                   propagate_positions=(start in _META_STARTS))
 
 
 # Quote/paren/attribute-aware field scanning, shared by the Stage-0 comment

@@ -1561,7 +1561,7 @@
       ]
     },
     "#RDL": {
-      "d": "11111011000000cccccccccccccccccc",
+      "d": "11111011000000aaaaaaaaaaaaaaaaaa",
       "fmt": [
         "#RDL ADDRESS"
       ]
