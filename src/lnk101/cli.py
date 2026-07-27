@@ -23,6 +23,7 @@ class LinkerOpts:
     # inputs / outputs
     input_files:      list[str]        = field(default_factory=list)
     output:           str              = 'out.fcm'
+    lib:              Optional[str]    = None
     map:              Optional[str]    = None
     json_symbols:     Optional[str]    = None
     save_external_syms: Optional[str] = None
@@ -34,6 +35,10 @@ class LinkerOpts:
     external_syms:    Optional[str]    = None
     concard:          Optional[str]    = None
     concard_root:     str              = "OFTMP"
+    map_lib:          list[str]        = field(default_factory=list)
+    autocall_json:    Optional[str]    = None
+    link_order:       Optional[str]    = None
+    warn_unresolved_phases: bool       = False
     entry:            Optional[str]    = None
     base_address:     int              = 0
     generate_stacks:  int              = 0
@@ -45,6 +50,7 @@ class LinkerOpts:
     no_undefined:     bool             = False
     allow_undefined:  bool             = False
     strict_compools:  bool             = False
+    nocall:           bool             = False
     # diagnostics
     verbose:          bool             = False
     quiet:            bool             = False
@@ -60,6 +66,7 @@ def link(
 
     # Output
     output: Annotated[Optional[str], typer.Option("-o", "--output", help="Output FCM file name")] = None,
+    lib: Annotated[Optional[str], typer.Option("--lib", help="Also write an AP-101 loadable module (.lib): CESD, per-extent text, RLD, store-protection, overlay/phase metadata")] = None,
     map: Annotated[Optional[str], typer.Option("-M", "--map", help="Generate a link map/listing file")] = None,
     json_symbols: Annotated[Optional[str], typer.Option("--json-symbols", help="Output symbol table as JSON for simulator")] = None,
     save_external_syms: Annotated[Optional[str], typer.Option("--save-external-syms", help="Save csect address table for single-module relocation")] = None,
@@ -75,6 +82,10 @@ def link(
     external_syms: Annotated[Optional[str], typer.Option("--external-syms", help="JSON file with external symbol addresses for single-module relocation")] = None,
     concard: Annotated[Optional[str], typer.Option("--concard", help="CON80 deck directory; place csects from its BANK/OVERLAY/INSERT layout program")] = None,
     concard_root: Annotated[str, typer.Option("--concard-root", help="Top-level CON80 card to lay out (default: OFTMP)")] = "OFTMP",
+    map_lib: Annotated[Optional[list[str]], typer.Option("--map-lib", help="Earlier-phase load module for MAP cards, as N=path/to/PHASE0N.lib (repeatable)")] = None,
+    autocall: Annotated[Optional[str], typer.Option("--autocall", help="con80build autocall.json: modules this job pulled by automatic library call (their csects are exempt from later-phase deferral)")] = None,
+    link_order: Annotated[Optional[str], typer.Option("--link-order", help="linkorder.json pins file: link orderings (Z1 ZCON pool, autocall waves/streams); without it orderings fall back to deterministic defaults")] = None,
+    warn_unresolved_phases: Annotated[bool, typer.Option("--Wunresolved-phases/--no-Wunresolved-phases", help="Warn per symbol left for cross-phase resolution (default: one summary line; phaseresolve reports the final residue)")] = False,
 
     # Linking options
     entry: Annotated[Optional[str], typer.Option("-e", "--entry", help="Set entry point symbol or address")] = None,
@@ -88,6 +99,7 @@ def link(
     no_undefined: Annotated[bool, typer.Option("--no-undefined", help="Report unresolved symbols as errors (default)")] = False,
     allow_undefined: Annotated[bool, typer.Option("--allow-undefined", help="Allow unresolved symbols without -f")] = False,
     strict_compools: Annotated[bool, typer.Option("--strict-compools", help="Error (don't warn) on undefined #P* (REMOTE COMPOOL) references")] = False,
+    nocall: Annotated[bool, typer.Option("--nocall", help="CON80 NOCALLER (NCAL): warn on unresolved externals and leave them in the image")] = False,
 
     # Diagnostics
     verbose: Annotated[bool, typer.Option("-v", "--verbose", help="Verbose output")] = False,
@@ -182,6 +194,7 @@ def link(
     opts = LinkerOpts(
         input_files=input_files,
         output=output or (Path(input_files[0]).stem + '.fcm' if input_files else 'a.out.fcm'),
+        lib=lib,
         map=map,
         json_symbols=json_symbols,
         save_external_syms=save_external_syms,
@@ -193,6 +206,10 @@ def link(
         external_syms=external_syms,
         concard=concard,
         concard_root=concard_root,
+        map_lib=map_lib or [],
+        autocall_json=autocall,
+        link_order=link_order,
+        warn_unresolved_phases=warn_unresolved_phases,
         entry=entry,
         base_address=int(base_address, 0),
         generate_stacks=int(generate_stacks, 0),
@@ -202,6 +219,7 @@ def link(
         no_undefined=no_undefined,
         allow_undefined=allow_undefined,
         strict_compools=strict_compools,
+        nocall=nocall,
         verbose=verbose,
         quiet=quiet,
         debug=debug,
@@ -214,6 +232,8 @@ def link(
         error(f"Config file not found: {opts.load_config}")
     if opts.external_syms and not os.path.exists(opts.external_syms):
         error(f"External symbols file not found: {opts.external_syms}")
+    if opts.link_order and not os.path.exists(opts.link_order):
+        error(f"Link-order pins file not found: {opts.link_order}")
     if opts.concard and not os.path.isdir(opts.concard):
         error(f"CON80 deck directory not found: {opts.concard}")
 
@@ -237,6 +257,9 @@ def link(
         raise typer.Exit(1)
 
     linker.saveImage(opts.output)
+
+    if opts.lib:
+        linker.saveLib(opts.lib)
 
     if opts.map:
         linker.saveListing(opts.map)

@@ -11,11 +11,13 @@ version = _version_string()
 
 import sys
 import os
+import re
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import NamedTuple
 from pathlib import Path
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from ap101Utils import objModule
 from ap101Utils.addr import Addr, AddrDisp, AddressMap
 from ap101Utils.addrcon import (
@@ -23,6 +25,7 @@ from ap101Utils.addrcon import (
     RLD_ZCON_CODE, RLD_ZCON_ADDR, RLD_ZCON_DATA, RLD_BSR_ONLY, RLD_DSR_ONLY,
 )
 from .linkconfig import LinkConfig
+from ap101Utils.linkorder import LinkOrder
 
 
 #=============================================================================
@@ -57,23 +60,12 @@ ZCON_END    = Addr(0x01000)    # ZCON zone: first 2K halfwords of sector 0
 #=============================================================================
 # Logging
 #=============================================================================
-import logging
 log = logging.getLogger("LNK101")
 
 def error(msg, fatal=True):
     log.error(msg)
     if fatal:
         sys.exit(1)
-
-def hexDump(data, start=0, length=None):
-    if length is None:
-        length = len(data)
-    lines = []
-    for i in range(0, length, 16):
-        chunk = data[start + i : start + i + 16]
-        hexPart = ' '.join(f'{b:02X}' for b in chunk)
-        lines.append(f'  {i:06X}: {hexPart}')
-    return '\n'.join(lines)
 
 #=============================================================================
 # Object Module Classes
@@ -107,6 +99,10 @@ class Section:
     baseAddress: 'Addr | None' = None            # assigned during linking
     data: bytearray = field(default_factory=bytearray)
     ldId: int | None = None                      # LD only: ESD ID of owning SD
+    # Store-protection for the csect's halfwords: True/False once decided
+    # (CON80 SET/CLEAR block mark, or the class default at .lib emission);
+    # None = undecided.  Per-halfword PROT refinement rides the module.
+    protected: 'bool | None' = None
 
     @property
     def zone(self):
@@ -151,14 +147,23 @@ class Relocation:
 class LoadModule:
     filename: str
     name: str = ''
-    sections: 'dict[int, Section]' = field(default_factory=dict)        # esdId -> Section
-    sectionsByName: 'dict[str, Section]' = field(default_factory=dict)  # name -> Section
+    sections: 'dict[int, Section]' = field(default_factory=dict)        # esdId -> SD Section
+    sectionsByName: 'dict[str, Section]' = field(default_factory=dict)  # name -> Section (SD + LD)
+    lds: 'list[Section]' = field(default_factory=list)                  # LD sections, ESD order
+    ldsByEsdId: 'dict[int, Section]' = field(default_factory=dict)      # unambiguous LD ids only
+    _ldIdDups: set = field(default_factory=set)
     externals: 'dict[int, External]' = field(default_factory=dict)      # esdId -> External
     externalsByName: 'dict[str, External]' = field(default_factory=dict)  # name -> External
     relocations: 'list[Relocation]' = field(default_factory=list)
     entryPoint: 'tuple[int, AddrDisp] | None' = None       # (esdId, byteOffset)
     entryName: str | None = None
-    stackSizes: dict[str, int] = field(default_factory=dict)  # csectName -> halfword size
+    stackSizes: dict[str, int] = field(default_factory=dict)  # csectName -> frame BYTES (SYM STACKEND)
+    # Source-level store-protect info from ' PROT' control cards (asm101's
+    # SPON/SPOFF capture).  A csect listed in protManaged is FULLY specified
+    # by its ranges (an empty range list = nothing protected); csects not
+    # listed fall back to the CON80 SET/CLEAR block mark / class default.
+    protManaged: set = field(default_factory=set)
+    protRangesHw: dict = field(default_factory=dict)  # csect -> [(sHw, eHw)]
     external: bool = False                                 # True = address-only, not in image
 
     def __post_init__(self):
@@ -166,20 +171,45 @@ class LoadModule:
             self.name = Path(self.filename).stem
 
     def addSection(self, section: 'Section') -> None:
-        self.sections[section.esdId] = section
+        # LD entries do NOT share the SD/ER id space: asm101-emitted objects
+        # give each LD a real, unique, RLD-referenceable id, but halsfc-emitted
+        # LD cards reuse ids positionally (a 49-LD compool parses as ids
+        # 3/4/5/3/4/5/...), so keying LDs into `sections` clobbered both other
+        # LDs and, potentially, real SDs.  LDs live in their own list; the
+        # id lookup keeps only ids that stay unambiguous among LDs.
+        if section.type == 'LD':
+            self.lds.append(section)
+            if section.esdId in self.ldsByEsdId:
+                del self.ldsByEsdId[section.esdId]
+                self._ldIdDups.add(section.esdId)
+            elif section.esdId not in self._ldIdDups:
+                self.ldsByEsdId[section.esdId] = section
+        else:
+            self.sections[section.esdId] = section
         self.sectionsByName[section.name] = section
+
+    def allSections(self):
+        """All SD and LD sections: SDs (id order) then LDs (ESD order)."""
+        yield from self.sections.values()
+        yield from self.lds
+
+    def nextEsdId(self) -> int:
+        """Next unused ESD id across sections, LDs, and externals."""
+        used = [s.esdId for s in self.allSections()] + list(self.externals)
+        return max(used, default=0) + 1
 
     def addExternal(self, ext: 'External') -> None:
         self.externals[ext.esdId] = ext
         self.externalsByName[ext.name] = ext
 
     def synthesizeMissingExternals(self):
-        #  Synthesize missing ER entries for RLD targets not in the ESD table.
-        #       PROGRAMs get @0P stack ER's, but TASKS don't seem to get them
-        #       for TASKS, generate a @nX from the $nX symbol:
-        #
+        # Synthesize ER entries for RLD targets absent from the ESD table.
+        # This never fires on current compiler/assembler output; it is a
+        # loud safety net — an RLD pointing at a missing ESD id means a
+        # malformed object.
         for reloc in self.relocations:
-            if reloc.relId in self.sections or reloc.relId in self.externals:
+            if reloc.relId in self.sections or reloc.relId in self.externals \
+                    or reloc.relId in self.ldsByEsdId:
                 continue
             posName = None
             if reloc.posId in self.sections:
@@ -190,8 +220,10 @@ class LoadModule:
                 inferredName = f'@ESD{reloc.relId}'
 
             self.addExternal(External(inferredName, reloc.relId, False, self))
-            log.debug(f"Synthesized missing ER: ESD#{reloc.relId} = '{inferredName}' "
-                      f"(inferred from posId={reloc.posId})")
+            log.warning(
+                f"RLD references ESD#{reloc.relId} absent from the ESD "
+                f"table (malformed object?); synthesized ER "
+                f"'{inferredName}' (inferred from posId={reloc.posId})")
 
     @classmethod
     def load(cls, filename, quiet=False):
@@ -232,12 +264,29 @@ class LoadModule:
                 sect = module.sections.get(tr.esdId)
                 if sect and sect.type == 'SD':
                     by_sect.setdefault(tr.esdId, []).append(tr)
+            # The link editor fills object-text HOLES of HAL/S-FC
+            # compiler csects with EBCDIC "FF" halfwords (C6C6); the
+            # compiler emits no gap bytes, and uninitialized variables are
+            # TXT-covered zeros.  Assembler csects carry their own C9FB
+            # fill inside TXT, so only HAL-translated modules (END-card
+            # IDR names the translator) get the fill, and only sections
+            # that have text at all.
+            halProduced = bool(cmod.end and
+                               (cmod.end.translator or '').startswith('HAL/S'))
             for esdId, trs in by_sect.items():
                 sect = module.sections[esdId]
                 try:
                     sect.data = objModule.scatterText(trs, size=len(sect.data))
                 except ValueError as e:
                     raise ValueError("%s %s: %s" % (filename, sect.name, e))
+                if halProduced:
+                    covered = bytearray(len(sect.data))
+                    for tr in trs:
+                        covered[tr.address:tr.address + len(tr.data)] = \
+                            b'\x01' * len(tr.data)
+                    for i, c in enumerate(covered):
+                        if not c:
+                            sect.data[i] = 0xC6
 
             for r in cmod.relocations:
                 module.relocations.append(
@@ -252,11 +301,33 @@ class LoadModule:
                 if end.entryName:
                     module.entryName = end.entryName.strip()
 
-            if module.sections:
+            if module.sections or module.lds:
                 module.synthesizeMissingExternals()
                 modules.append(module)
 
-        # Extract per-CSECT stack sizes from SYM STACKEND entries. 
+        # ' PROT <csect> [<s>-<e>,...]' control cards: asm101's SPON/SPOFF
+        # capture (halfword offsets, hex, end-exclusive).  Attach to the
+        # module that owns the csect.
+        for rec in objfile.controlStatements:
+            toks = rec.text.split()
+            if len(toks) < 2 or toks[0].upper() != 'PROT':
+                continue
+            csect = toks[1]
+            ranges = []
+            for piece in (toks[2].split(',') if len(toks) > 2 else []):
+                try:
+                    s, e = piece.split('-')
+                    ranges.append((int(s, 16), int(e, 16)))
+                except ValueError:
+                    log.warning(f"{filename}: bad PROT range {piece!r}")
+            for mod in modules:
+                if csect in mod.sectionsByName:
+                    mod.protManaged.add(csect)
+                    mod.protRangesHw.setdefault(csect, []).extend(ranges)
+                    break
+
+        # Extract per-CSECT frame sizes from SYM STACKEND entries.  The
+        # STACKEND value is the block's frame high-water (MAXTEMP) in BYTES.
         allSymbols = [s for cmod in objfile.modules for s in cmod.symbols]
         if modules and allSymbols:
             csectName = None
@@ -266,12 +337,11 @@ class LoadModule:
                 if sym.symType == objModule.SymRefType.CONTROL:
                     csectName = sym.name
                 elif sym.name == 'STACKEND' and csectName is not None:
-                    stackHW = sym.offsetInCSECT or 0
-                    if stackHW > 0:
-                        for mod in modules:
-                            if csectName in mod.sectionsByName:
-                                mod.stackSizes[csectName] = stackHW
-                                break
+                    stackBytes = sym.offsetInCSECT or 0
+                    for mod in modules:
+                        if csectName in mod.sectionsByName:
+                            mod.stackSizes[csectName] = stackBytes
+                            break
 
         return modules, errors, warnings
 
@@ -285,21 +355,69 @@ class GlobalSymbol(NamedTuple):
 class Linker:
     def __init__(self, args):
         self.args = args
-        self.modules = [] 
-        self.globalSymbols: 'OrderedDict[str, GlobalSymbol]' = OrderedDict()
+        self.modules = []
+        self.globalSymbols: 'dict[str, GlobalSymbol]' = {}
         self.undefinedSymbols = defaultdict(set)  # name -> set of (filename, csect_or_None)
-        self.stackSizes = {}
-        self.generatedStacks = []
-        self.image: 'bytearray | None' = None 
+        # Link-order pins (--link-order JSON); empty = deterministic
+        # defaults, no pinned autocall placement.
+        lo = getattr(args, 'link_order', None)
+        self.linkOrder = LinkOrder.load(lo) if lo else LinkOrder()
+        # RESERVE-carded csects (allocation only, no text) -- see
+        # assignAddressesFromConcard and saveLib.
+        self.reservedCsects = set()
+        self._concardProgram = None
+        self._concardPlacement = None
+        # Byte intervals reserved by MAP cards (earlier-phase content that is
+        # already in memory): occupancy only, never part of this image.
+        self.mappedIntervals = []
+        # Earlier-phase OVERLAY region starts (name -> byte addr) from every
+        # --map-lib load module: an origin-less OVERLAY card naming one of
+        # these RE-OPENS the region for replacement content.
+        self.phaseRegionStarts = {}
+        # Symbols DEFINED by an earlier phase (every SD/LD name in every
+        # --map-lib load module).  The original linkage editor processed the
+        # master deck as one job, so a later segment's reference to a symbol
+        # an earlier segment defined resolved in place and never triggered
+        # autocall; a phase build must likewise not pull a duplicate library
+        # copy of an already-resident symbol (the sites stay unresolved here
+        # and phaseresolve patches them against the earlier phase's lib).
+        self.phaseDefinedSymbols = set()
+        # SD subset of the above with the base's byte address: used to pin a
+        # RE-SUPPLIED base csect (this phase carries its own copy of base
+        # content for configs that run without the base phase) at the base's
+        # address instead of auto-placing it.
+        self.phaseDefinedAddrs = {}
+        # Byte LENGTH of those same base SDs -- needed to reserve the space of
+        # a base-defined @-stack this link drops (see stackCsectNames and
+        # _droppedStackIntervals).
+        self.phaseDefinedSizes = {}
+        # [lo, hi) byte extents of every SD in the MAP-carded phases' libs:
+        # the co-resident base's memory footprint.  A roll-in phase's NEW
+        # overlay content is packed into the FREE GAPS of this footprint
+        # (see conlayout's roll-in pool).
+        self.phaseDefinedExtents = []
+        # Carried Z1 pool cursor (byte, 0 = none): the LE ran the
+        # master deck as ONE job, so its pool cursor persisted across phase
+        # segments -- a later phase's NEW ZCONs pack where the co-resident
+        # earlier phases' cursor stands, never from the pool floor (which
+        # would re-assign the base pool's addresses and clobber them at load
+        # time).  Read from the MAP-carded parents' .lib linkState
+        # (zconPoolNext); this link's saveLib carries it forward cumulatively.
+        self.phaseDefinedZconNext = 0
+        self.image: 'bytearray | None' = None
         self.imageBase = Addr(args.base_address)
         self.imageSize = AddrDisp(0)
         self.entryPoint: 'Addr | None' = None
         self.errors = []
         self.warnings = []
-        self.appliedRelocations = []   
+        self.appliedRelocations = []
         self.unresolvedRelocations = []
-        self.csectTable = {}           
-        self.deadERsLogged = set()     
+        self.csectTable = {}
+        self.deadERsLogged = set()
+        # CON80 NOCALLER (NCAL): unresolved externals are tolerated and left
+        # in the image (the linkage editor's automatic-library-call is off).
+        self.nocall = getattr(args, 'nocall', False)
+        self._libIndex = None          # lazy symbol->path index of -L dirs
     
     def loadInputFiles(self):
         """Load all input files and explicit libraries from args."""
@@ -342,45 +460,50 @@ class Linker:
         self.modules.extend(modules)
         return modules or None
 
+    def _librarySymbolIndex(self):
+        """symbol -> object path over every *.obj in the -L dirs, parsed once
+        (first defining file in search order wins).  Replaces the old
+        per-symbol directory rescan, which re-parsed every library object for
+        every undefined symbol on every resolve iteration."""
+        if self._libIndex is None:
+            self._libIndex = {}
+            nfiles = 0
+            for libPath in self.args.library_path:
+                if not os.path.isdir(libPath):
+                    continue
+                for fname in sorted(os.listdir(libPath)):
+                    if not fname.lower().endswith('.obj'):
+                        continue
+                    candidate = os.path.join(libPath, fname)
+                    try:
+                        mods = objModule.ObjectFile(candidate).modules
+                    except Exception:
+                        continue
+                    nfiles += 1
+                    for cmod in mods:
+                        for e in cmod.esdEntries:
+                            if e.type in (objModule.EsdType.SD,
+                                          objModule.EsdType.LD):
+                                self._libIndex.setdefault(e.name.strip(),
+                                                          candidate)
+            log.info(f"Indexed {nfiles} library object(s), "
+                     f"{len(self._libIndex)} symbol(s)")
+        return self._libIndex
+
     def findModuleForSymbol(self, symbolName):
+        # ZCON thunks: #QSQRT is in #QSQRT.obj (also extensionless, and
+        # without the # prefix on some systems) -- keep this fast path so a
+        # same-named file wins over the alphabetical index.
+        bases = [symbolName] + \
+                ([symbolName[1:]] if symbolName.startswith('#') else [])
         for libPath in self.args.library_path:
-            if not os.path.isdir(libPath):
-                continue
-            
-            # ZCON thunks: #QSQRT is in #QSQRT.obj
-            for ext in ['.obj', '.OBJ', '']:
-                candidate = os.path.join(libPath, symbolName + ext)
-                if os.path.exists(candidate):
-                    if self._moduleDefinesSymbol(candidate, symbolName):
-                        return candidate
-            
-            # XXX Also try without the # prefix (some systems)
-            if symbolName.startswith('#'):
-                baseName = symbolName[1:]
+            for base in bases:
                 for ext in ['.obj', '.OBJ', '']:
-                    candidate = os.path.join(libPath, baseName + ext)
+                    candidate = os.path.join(libPath, base + ext)
                     if os.path.exists(candidate):
                         if self._moduleDefinesSymbol(candidate, symbolName):
                             return candidate
-            
-            # Fall back to searching all .obj files in directory
-            # (slower but handles arbitrary symbol-to-file mappings)
-            for fname in os.listdir(libPath):
-                if not fname.lower().endswith('.obj'):
-                    continue
-                candidate = os.path.join(libPath, fname)
-                # Skip files we've already checked
-                if fname == symbolName + '.obj' or fname == symbolName + '.OBJ':
-                    continue
-                if symbolName.startswith('#'):
-                    baseName = symbolName[1:]
-                    if fname == baseName + '.obj' or fname == baseName + '.OBJ':
-                        continue
-                
-                if self._moduleDefinesSymbol(candidate, symbolName):
-                    return candidate
-        
-        return None
+        return self._librarySymbolIndex().get(symbolName)
     
     def _moduleDefinesSymbol(self, filename, symbolName):
         """Check if an object file defines the given symbol."""
@@ -397,21 +520,32 @@ class Linker:
     def buildGlobalSymbolTable(self):
         """Build the global symbol table from all loaded modules."""
         for module in self.modules:
-            for esdId, section in module.sections.items():
+            for section in module.allSections():
                 name = section.name
                 if not name or section.type not in ('SD', 'LD'):
                     continue
                 if name in self.globalSymbols:
                     existing = self.globalSymbols[name]
-                    self.warnings.append(
-                        f"Symbol '{name}' defined in both {existing[1].filename} "
-                        f"and {module.filename}")
+                    # An SD and a same-name LD from the SAME module are one
+                    # symbol -- the control section and its own entry-point
+                    # label (`FOO CSECT` + `ENTRY FOO`), not a redefinition.
+                    # Keep the SD as canonical and say nothing.
+                    sameModule = existing.module is module
+                    sdLdPair = {existing.section.type, section.type} == {'SD', 'LD'}
+                    if sameModule and sdLdPair:
+                        if existing.section.type != 'SD':
+                            self.globalSymbols[name] = \
+                                GlobalSymbol(section, module, None)
+                    else:
+                        self.warnings.append(
+                            f"Symbol '{name}' defined in both "
+                            f"{existing.module.filename} and {module.filename}")
                 else:
                     self.globalSymbols[name] = GlobalSymbol(section, module, None)
                     detail = f"length=0x{section.length:X}" if section.type == 'SD' \
                              else f"offset=0x{section.address:X}"
-                    log.debug(f"Symbol {section.type} '{name}' defined in {module.name} "
-                          f"ESD#{esdId} {detail}")
+                    log.debug(f"Symbol {section.type} '{name}' defined in "
+                              f"{module.name} ESD#{section.esdId} {detail}")
 
         for module in self.modules:
             for esdId, ext in module.externals.items():
@@ -426,9 +560,18 @@ class Linker:
         compiler (e.g., for an INCLUDE'd COMPOOL whose variables are never
         actually used) but never relocated against. Drop it silently with an
         informational message rather than failing the link."""
-        csects = {module.sections[r.posId].name.strip()
-                  for r in module.relocations
-                  if r.relId == esdId and r.posId in module.sections}
+        # relId -> referencing csect names, computed once per module (its
+        # relocations are fixed after load; this runs for every unresolved
+        # external on every symbol-table rebuild).
+        relmap = getattr(module, '_rldCsectsByRelId', None)
+        if relmap is None:
+            relmap = {}
+            for r in module.relocations:
+                s = module.sections.get(r.posId)
+                if s is not None:
+                    relmap.setdefault(r.relId, set()).add(s.name.strip())
+            module._rldCsectsByRelId = relmap
+        csects = relmap.get(esdId, set())
         if csects:
             for csect in csects:
                 self.undefinedSymbols[symName].add((module.filename, csect))
@@ -440,66 +583,92 @@ class Linker:
                          f"{Path(module.filename).name} (no RLD references)")
 
     def resolveExternals(self, searchLibraries=True):
-        """
-        Resolve external references against the global symbol table.
-        Optionally search library paths for missing symbols.
-        """
-        
+        """Resolve external references against the global symbol table,
+        optionally pulling library modules for missing symbols until the
+        table stops growing."""
         newModulesLoaded = True
         iterations = 0
-        maxIterations = 100  # Prevent infinite loops
-        
+        maxIterations = 100  # backstop against a load/rebuild loop
+
         while newModulesLoaded and iterations < maxIterations:
             iterations += 1
             newModulesLoaded = False
-            
+
             self._rebuildSymbolTable()
-            
-            # Check if we need to search for more modules
+
             if searchLibraries and self.undefinedSymbols:
                 for symName in list(self.undefinedSymbols):
                     if symName in self.globalSymbols:
                         continue
-                    
-                    # Search for module defining this symbol
+                    # Already defined by an earlier phase: the LE
+                    # resolved this in place (one multi-segment job); pulling
+                    # a library copy here would duplicate a resident symbol
+                    # at a phase-local address.  Leave the sites for the
+                    # cross-phase resolution pass.
+                    if symName in self.phaseDefinedSymbols:
+                        continue
+
                     filename = self.findModuleForSymbol(symName)
-                    if filename:
-                        # Check we haven't already loaded this module
-                        if not any(m.filename == filename for m in self.modules):
-                            if self.loadModule(filename):
-                                newModulesLoaded = True
-                                log.info(f"Loaded {filename} for symbol '{symName}'")
-        
+                    if filename and \
+                            not any(m.filename == filename for m in self.modules):
+                        if self.loadModule(filename):
+                            newModulesLoaded = True
+                            log.info(f"Loaded {filename} for symbol '{symName}'")
+
         # Final pass: resolve all externals
         for module in self.modules:
             for esdId, ext in module.externals.items():
                 if ext.name in self.globalSymbols:
-                    section, defModule, _ = self.globalSymbols[ext.name]
                     ext.resolved = True
-                    ext.resolvedSection = section
-                else:
-                    if not ext.weak:
-                        self._addUndefRef(ext.name, module, esdId)
-        
+                    ext.resolvedSection = self.globalSymbols[ext.name].section
+                elif not ext.weak:
+                    self._addUndefRef(ext.name, module, esdId)
+
         return len(self.undefinedSymbols) == 0
-    
+
+    def _occupiedIntervals(self):
+        """Byte intervals [lo, hi) of every placed SD section plus the
+        MAP-reserved earlier-phase intervals, sorted.
+
+        Deliberately NOT the co-resident phases' whole footprint: the LE's
+        occupancy is per OVERLAY PATH, and a later segment REPLACES earlier
+        content wholesale.  The deck's MAP/OVERLAY cards carry that tree;
+        a flat union of parent extents would forbid every legitimate
+        replacement."""
+        return sorted(
+            [(int(s.baseAddress), int(s.baseAddress + s.length))
+             for s in self._placedSDs() if s.length > 0]
+            + [(int(lo), int(hi)) for lo, hi in self.mappedIntervals])
+
     def _placeSections(self, sections, startAddr, label=""):
-        """Place a list of sections sequentially starting at startAddr.
+        """Place a list of sections sequentially starting at startAddr,
+        skipping over ranges already occupied by placed sections (a CON80
+        layout places csects all over; auto-placed stragglers must flow
+        around them, not overwrite them).
         Returns the address after the last section placed.
         All addresses are in bytes.
         """
+        occupied = self._occupiedIntervals()
         currentAddr = Addr(startAddr)
         for section in sections:
             currentAddr = currentAddr.align(4)
+            # advance past occupied intervals that clash with this section
+            moved = True
+            while moved:
+                moved = False
+                for lo, hi in occupied:
+                    if lo < currentAddr + section.length and int(currentAddr) < hi:
+                        currentAddr = Addr(hi).align(4)
+                        moved = True
 
             section.baseAddress = currentAddr
             currentAddr = currentAddr + section.length
 
-            cat = section.zone
             log.info(f"  {section.name:8s} @ 0x{section.baseAddress:06X} "
                      f"({section.length} bytes){' [' + label + ']' if label else ''}")
-            log.debug(f"Section '{section.name}' ({cat}) @ {section.baseAddress.x} "
-                  f"len=0x{section.length:X}(bytes) end=0x{currentAddr:06X}(byte)")
+            log.debug(f"Section '{section.name}' ({section.zone}) "
+                      f"@ {section.baseAddress.x} len=0x{section.length:X}(bytes) "
+                      f"end=0x{currentAddr:06X}(byte)")
         return currentAddr
 
     @staticmethod
@@ -523,9 +692,7 @@ class Linker:
     def _resolveLDLabels(self):
         """Resolve LD (label) addresses relative to their owning SD sections."""
         for module in self.modules:
-            for esdId, section in module.sections.items():
-                if section.type != 'LD':
-                    continue
+            for section in module.lds:
                 owner = self._findLDOwner(section, module, requireBaseAddress=True)
                 if owner is None:
                     continue
@@ -534,51 +701,105 @@ class Linker:
                 ldOffset = section.address - owner.address
                 section.baseAddress = owner.baseAddress + ldOffset
                 log.debug(f"Label '{section.name}' -> owner '{owner.name}' "
-                      f"addr={section.baseAddress.x} "
-                      f"(owner {owner.baseAddress.x} + offset 0x{ldOffset:X})")
+                          f"addr={section.baseAddress.x} "
+                          f"(owner {owner.baseAddress.x} + offset 0x{ldOffset:X})")
 
     def _updateGlobalSymbols(self):
-        for name in self.globalSymbols:
-            section, module, _ = self.globalSymbols[name]
-            if section.baseAddress is not None:
-                self.globalSymbols[name] = GlobalSymbol(section, module, section.baseAddress)
-                log.debug(f"Global symbol '{name}' -> addr={section.baseAddress.x}")
+        for name, gsym in self.globalSymbols.items():
+            if gsym.section.baseAddress is not None:
+                self.globalSymbols[name] = \
+                    gsym._replace(address=gsym.section.baseAddress)
+                log.debug(f"Global symbol '{name}' -> "
+                          f"addr={gsym.section.baseAddress.x}")
 
-    @staticmethod
-    def _classifySections(sections):
-        """Classify and sort sections into (zcon, data, code) groups."""
+    def _poolBlockOverride(self):
+        """Pinned pool-block ordering (linkorder poolBlocks).  Active only
+        when wave modules are in the link; their #Q needs come from their
+        own ESD ER lists, minus #Q names the MAP-imported base pool
+        already defines."""
+        cached = getattr(self, '_poolBlockOverrideCache', None)
+        if cached is not None:
+            return cached
+        waveMods = self.linkOrder.wave_modules()
+        qErs = {}
+        for mod in self.modules:
+            if mod.external or mod.name not in waveMods:
+                continue
+            qErs[mod.name] = [e.name for e in mod.externals.values()
+                              if e.name.startswith('#Q')]
+        override = {}
+        if qErs:
+            baseQ = {n for n in self.phaseDefinedSymbols
+                     if n.startswith('#Q')}
+            override = self.linkOrder.pool_block_override(qErs, baseQ)
+        self._poolBlockOverrideCache = override
+        return override
+
+    def _mcPoolOverride(self):
+        """Z1-pool ordering pinned by a per-MC section (linkorder mc):
+        active when autocall is live and the link defines the section's
+        anchor csect."""
+        cached = getattr(self, '_mcPoolOverrideCache', None)
+        if cached is not None:
+            return cached
+        override = {}
+        if self.linkOrder.mc and self._autocallStems():
+            defined = {s.name.strip()
+                       for m in self.modules if not m.external
+                       for s in m.sections.values() if s.type == 'SD'}
+            mc = self.linkOrder.mc_for(defined)
+            if mc is not None and mc.pool:
+                override = self.linkOrder.pool_override(mc)
+        self._mcPoolOverrideCache = override
+        return override
+
+    def _classifySections(self, sections):
+        """Classify and sort sections into (zcon, data, code) groups.
+
+        ZCONs are ordered by the canonical Z1-pool ordinal (--link-order
+        pins), with pool blocks derived from the link's own module ESDs
+        (_poolBlockOverride); DATA/CODE remain name-sorted.
+        """
+        override = dict(self._poolBlockOverride())
+        override.update(self._mcPoolOverride())
         groups = {'ZCON': [], 'DATA': [], 'CODE': []}
         for s in sections:
             groups[s.zone].append(s)
-        for g in groups.values():
-            g.sort(key=lambda s: s.name.strip())
+        groups['ZCON'].sort(
+            key=lambda s: self.linkOrder.zcon_sort_key(s.name, override))
+        groups['DATA'].sort(key=lambda s: s.name.strip())
+        groups['CODE'].sort(key=lambda s: s.name.strip())
         return groups['ZCON'], groups['DATA'], groups['CODE']
+
+    def _placedSDs(self):
+        """Every placed SD section of the non-external modules."""
+        for module in self.modules:
+            if module.external:
+                continue
+            for section in module.sections.values():
+                if section.type == 'SD' and section.baseAddress is not None:
+                    yield section
 
     def _computeImageSize(self):
         """Compute imageSize from the highest SD section end."""
         highestEnd = self.imageBase
-        for module in self.modules:
-            if module.external:
-                continue
-            for esdId, section in module.sections.items():
-                if section.type == 'SD' and section.baseAddress is not None:
-                    end = section.baseAddress + section.length
-                    if end > highestEnd:
-                        highestEnd = end
+        for section in self._placedSDs():
+            end = section.baseAddress + section.length
+            if end > highestEnd:
+                highestEnd = end
         self.imageSize = highestEnd - self.imageBase  # AddrDisp
         return self.imageSize
 
     def _highestEndInRange(self, lo, hi):
         """Find the highest section end address within [lo, hi)."""
         best = lo
-        for module in self.modules:
-            if module.external:
-                continue
-            for esdId, section in module.sections.items():
-                if section.type == 'SD' and section.baseAddress is not None:
-                    end = section.baseAddress + section.length
-                    if lo <= section.baseAddress < hi and end > best:
-                        best = end
+        for section in self._placedSDs():
+            end = section.baseAddress + section.length
+            if lo <= section.baseAddress < hi and end > best:
+                best = end
+        for mlo, mhi in self.mappedIntervals:
+            if lo <= mlo < hi and mhi > best:
+                best = mhi
         return best
 
     def _finishAddressAssignment(self):
@@ -596,7 +817,7 @@ class Linker:
         """
         allSections = []
         for module in self.modules:
-            for esdId, section in module.sections.items():
+            for section in module.sections.values():
                 if section.type == 'SD' and section.baseAddress is None:
                     allSections.append(section)
 
@@ -667,7 +888,7 @@ class Linker:
         self._collectModulePaths(config)
 
         for module in self.modules:
-            for esdId, section in module.sections.items():
+            for section in module.allSections():
                 if section.type == 'SD':
                     config.sections.append({
                         'name': section.name,
@@ -700,7 +921,7 @@ class Linker:
             if not spec:
                 continue
             attr, mkEntry = spec
-            for esdId, section in module.sections.items():
+            for section in module.allSections():
                 entry = mkEntry(section)
                 if entry:
                     getattr(config, attr).append(entry)
@@ -720,7 +941,7 @@ class Linker:
 
         # First pass: apply config-specified addresses
         for module in self.modules:
-            for esdId, section in module.sections.items():
+            for section in module.sections.values():
                 if section.type != 'SD':
                     continue
                 ce = cfgLookup.get((section.name, module.name))
@@ -734,6 +955,27 @@ class Linker:
                       for s in m.sections.values()
                       if s.type == 'SD' and s.baseAddress is None]
 
+        # An auto-placed csect the co-resident base already DEFINES (an
+        # external MAP import at a known address) is a RE-SUPPLY of base
+        # content: some deck members carry base compools for memory configs
+        # that run without the base phase, and their un-INSERTed sibling
+        # sections (the module's #Z pool entry) ride along.  Such a csect
+        # stays at the base address in EVERY config -- the one-job linkage
+        # editor had a single copy.  Pin it there instead of packing it
+        # into this phase's pool/zone.
+        baseAddr = dict(self.phaseDefinedAddrs)
+        baseAddr.update({s.name: int(s.baseAddress)
+                         for m in self.modules if m.external
+                         for s in m.sections.values()
+                         if s.type == 'SD' and s.baseAddress is not None})
+        resupplied = [s for s in unassigned if s.name in baseAddr]
+        for s in resupplied:
+            s.baseAddress = Addr(baseAddr[s.name])
+            log.info(f"  {s.name:8s} @ 0x{int(s.baseAddress):06X} "
+                     f"[re-supply of base copy]")
+        if resupplied:
+            unassigned = [s for s in unassigned if s.baseAddress is None]
+
         if self.args.compact or not unassigned:
             self._placeSections(unassigned,
                                 self._highestEndInRange(0, float('inf')),
@@ -741,9 +983,24 @@ class Linker:
         else:
             zcon, data, code = self._classifySections(unassigned)
             if zcon:
-                self._placeSections(zcon,
-                    max(self._highestEndInRange(0, ZCON_END), PSA_END),
-                    "auto-ZCON")
+                # placement is occupancy-aware: start at the zone floor and
+                # flow around deck-placed content (the real LE packs library
+                # ZCONs right after the PSA/LOWCORE region).  Anchor the pool
+                # at the first deck-placed ZCON (the `OVERLAY Z1` origin) so
+                # the canonically-ordered remainder packs AFTER it -- not
+                # into the PSA checksum gap just below it.
+                placedZconStarts = [int(s.baseAddress)
+                                    for m in self.modules
+                                    for s in m.sections.values()
+                                    if s.type == 'SD' and s.baseAddress is not None
+                                    and s.zone == 'ZCON']
+                poolStart = min(placedZconStarts) if placedZconStarts else PSA_END
+                if self.phaseDefinedZconNext:
+                    # One-job pool continuation: the carried LE cursor (which
+                    # already includes the parents' closing checksum slots)
+                    # says where the pool stands.
+                    poolStart = max(int(poolStart), self.phaseDefinedZconNext)
+                self._placeSections(zcon, poolStart, "auto-ZCON")
             if data:
                 self._placeSections(data,
                     max(self._highestEndInRange(0, 2 * SECTOR_SIZE), ZCON_END),
@@ -758,7 +1015,7 @@ class Linker:
 
     def assignAddressesFromConcard(self):
         """Assign SD section addresses from a CON80 layout"""
-        from ap101Utils import concard, conlayout
+        from ap101Utils import conlayout
 
         # Every SD csect name -> its module's ordered (name, size_halfwords) list.
         module_csects: dict[str, list[tuple[str, int]]] = {}
@@ -772,19 +1029,81 @@ class Linker:
                 if s.type == 'SD':
                     section_by_name.setdefault(s.name, s)
 
-        deck = concard.ConcardDeck(self.args.concard)
-        program = concard.layout_program(deck, self.args.concard_root)
-        placement = conlayout.LayoutEngine(module_csects).run(program)
+        # Csects already defined by the co-resident base -- MAP imports plus
+        # every SD in the MAP-carded phases' libs: a library INCLUDE of one
+        # of these replaces it in place at its already-loaded address, and
+        # the roll-in pool must NOT capture a re-supply INSERT of one (it
+        # keeps whole-block flow and lands at the base address).
+        existing = {n: a // 2 for n, a in self.phaseDefinedAddrs.items()}
+        existing.update({s.name.strip(): int(s.baseAddress) // 2
+                         for m in self.modules if m.external
+                         for s in m.sections.values()
+                         if s.type == 'SD' and s.baseAddress is not None})
+
+        # Modules this job pulled by automatic library call (con80build
+        # --autocall): the layout places their csects in the autocall waves
+        # (conlayout's autocall wave/stream pins), not by deck cards.
+        autocall_units: list[tuple[str, list[tuple[str, int]]]] = []
+        stems = self._autocallStems()
+        if stems:
+            byname = {}
+            for m in self.modules:
+                if not m.external:
+                    byname.setdefault(m.name, m)
+            for stem in stems:
+                m = byname.get(stem)
+                if m is not None:
+                    autocall_units.append(
+                        (stem, [(s.name, int(s.length) // 2)
+                                for s in m.sections.values()
+                                if s.type == 'SD']))
+
+        program = self._concardLayout()
+        placement = conlayout.LayoutEngine(
+            module_csects,
+            occupied=[(lo // 2, hi // 2) for lo, hi in self.mappedIntervals]
+            + self._droppedStackIntervals(),
+            phase_regions={n: a // 2
+                           for n, a in self.phaseRegionStarts.items()},
+            existing=existing,
+            base_occupied=[(lo // 2, hi // 2)
+                           for lo, hi in self.phaseDefinedExtents],
+            link_order=self.linkOrder,
+        ).run(program, autocall_units=autocall_units)
 
         placed = 0
         for name, hw in placement.addresses.items():
             s = section_by_name.get(name)
             if s is not None and s.baseAddress is None:
                 s.baseAddress = Addr.from_hw(hw)
+                s.protected = placement.protected.get(name)
                 placed += 1
+        self._concardPlacement = placement
         log.info(f"Placed {placed} section(s) from CON80 layout "
                  f"(root {self.args.concard_root}); "
                  f"{len(placement.unknown_inserts)} INSERT(s) had no loaded module")
+
+        # RESERVE-carded csects: allocation only (the MMU load-block reserve
+        # bit).  The SD keeps its address+length (symbols resolve, occupancy
+        # holds, CESD carries it) but NO text loads: blank the data and drop
+        # the csect's own fixups so neither text copy, image fixups, the
+        # retained RLD, nor the .lib extents carry any content for it.
+        self.reservedCsects = set(placement.reserved)
+        if self.reservedCsects:
+            for m in self.modules:
+                if m.external:
+                    continue
+                resIds = {esdId for esdId, s in m.sections.items()
+                          if s.type == 'SD'
+                          and s.name.strip() in self.reservedCsects}
+                if not resIds:
+                    continue
+                for esdId in resIds:
+                    m.sections[esdId].data = bytearray()
+                m.relocations = [r for r in m.relocations
+                                 if r.posId not in resIds]
+            log.info(f"RESERVE: {len(self.reservedCsects)} allocation-only "
+                     f"csect(s): {', '.join(sorted(self.reservedCsects))}")
 
         # Auto-place anything the deck did not name, after the highest occupied
         # address, using the sector-based rules (empty config => no overrides).
@@ -806,21 +1125,22 @@ class Linker:
         #
         # Copy section text to output:
         #
-        for module in self.modules:
-            if module.external:
+        for section in self._placedSDs():
+            offset = section.baseAddress - self.imageBase
+            if log.isEnabledFor(logging.DEBUG) and section.length > 0:
+                dataHex = section.data[:min(16, section.length)].hex()
+                log.debug(f"COPY {section.module.name}/{section.name}: "
+                          f"offset=0x{offset:06X}(byte) len={section.length} "
+                          f"data={dataHex}...")
+            off = int(offset)
+            if off < 0:
+                self.warnings.append(
+                    f"{section.module.filename}: section {section.name} below "
+                    f"image base (0x{int(section.baseAddress):06X}); not copied")
                 continue
-            for esdId, section in module.sections.items():
-                if section.type != 'SD' or section.baseAddress is None:
-                    continue
-                
-                offset = section.baseAddress - self.imageBase
-                if log.isEnabledFor(logging.DEBUG) and section.length > 0:
-                    dataHex = section.data[:min(16, section.length)].hex()
-                    log.debug(f"COPY {module.name}/{section.name}: offset=0x{offset:06X}(byte) len={section.length} data={dataHex}...")
-                for i, b in enumerate(section.data):
-                    if offset + i < len(self.image):
-                        self.image[offset + i] = b
-        
+            end = min(off + len(section.data), len(self.image))
+            self.image[off:end] = section.data[:end - off]
+
         if self.args.dump_unrelocated:
             # dump the image before we perform relocations for debugging:
             with open(self.args.dump_unrelocated, 'wb') as f:
@@ -841,12 +1161,19 @@ class Linker:
                             f"{module.filename}: Unknown position section ESD#{reloc.posId}")
                     continue
                 
-                # Find what the relocation references (R section/external)
+                # Find what the relocation references (R section/external).
+                # SD ids are authoritative, then ERs; LD ids last -- they are
+                # real only in asm101-emitted objects (`DC Y(localEntry)`),
+                # while halsfc LD "ids" are positional junk that must never
+                # shadow an ER.
                 targetAddr = Addr(0)
                 resolved = True
+                lenient = False     # unresolved-but-tolerated (NOCALLER / #P*)
+                targetSection = module.sections.get(reloc.relId)
+                if targetSection is None and reloc.relId not in module.externals:
+                    targetSection = module.ldsByEsdId.get(reloc.relId)
 
-                if reloc.relId in module.sections:
-                    targetSection = module.sections[reloc.relId]
+                if targetSection is not None:
                     if targetSection.baseAddress is not None:
                         targetAddr = targetSection.baseAddress - targetSection.address
                     else:
@@ -860,8 +1187,10 @@ class Linker:
                         resolved = False
                         # Lenient #P* (REMOTE COMPOOL) references skip the
                         # apply step below — the IBM linker leaves existing
-                        # TXT untouched for these (see issue #22).
-                        lenient = ext.name.startswith('#P') and not self.args.strict_compools
+                        # TXT untouched for these (see issue #22).  Under
+                        # NOCALLER every unresolved external is tolerated.
+                        lenient = self.nocall or \
+                            (ext.name.startswith('#P') and not self.args.strict_compools)
                         if not ext.weak and not lenient and not self.args.force:
                             self.errors.append(
                                 f"{module.filename}: Unresolved external '{ext.name}' "
@@ -873,13 +1202,7 @@ class Linker:
                         f"{module.filename}: Unknown relocation target ESD#{reloc.relId}")
                     resolved = False
 
-                lenient_unresolved = (
-                    not resolved
-                    and reloc.relId in module.externals
-                    and module.externals[reloc.relId].name.startswith('#P')
-                    and not self.args.strict_compools
-                )
-                if not resolved and not lenient_unresolved and not self.args.force:
+                if not resolved and not lenient and not self.args.force:
                     continue
 
                 # Calculate the image offset for this relocation (in bytes)
@@ -925,8 +1248,8 @@ class Linker:
                     continue
 
                 targetName = "???"
-                if reloc.relId in module.sections:
-                    targetName = module.sections[reloc.relId].name
+                if targetSection is not None:
+                    targetName = targetSection.name
                 elif reloc.relId in module.externals:
                     targetName = module.externals[reloc.relId].name
 
@@ -982,14 +1305,13 @@ class Linker:
             newValue.to_bytes(con.length, 'big')
     
     def determineEntryPoint(self):
+        """--entry symbol or numeric halfword address, else the first
+        module-declared entry point, else the image base."""
         if self.args.entry:
-            # passed as argument:
-            if self.args.entry in self.globalSymbols:
-                section, module, byteAddr = self.globalSymbols[self.args.entry]
-                if byteAddr is not None:
-                    # Convert byte address to halfword for simulator
-                    self.entryPoint = byteAddr  # already Addr
-                    return
+            gsym = self.globalSymbols.get(self.args.entry)
+            if gsym is not None and gsym.address is not None:
+                self.entryPoint = gsym.address
+                return
             try:
                 self.entryPoint = Addr.from_hw(int(self.args.entry, 0))
                 return
@@ -999,20 +1321,19 @@ class Linker:
         for module in self.modules:
             if module.entryPoint:
                 esdId, byteOffset = module.entryPoint
-                section = module.sections.get(esdId)
+                section = module.sections.get(esdId) or module.ldsByEsdId.get(esdId)
                 if section and section.baseAddress is not None:
                     self.entryPoint = section.baseAddress + byteOffset
                     return
 
             if module.entryName:
-                if module.entryName in self.globalSymbols:
-                    section, _, byteAddr = self.globalSymbols[module.entryName]
-                    if byteAddr is not None:
-                        self.entryPoint = byteAddr  # already Addr
-                        return
+                gsym = self.globalSymbols.get(module.entryName)
+                if gsym is not None and gsym.address is not None:
+                    self.entryPoint = gsym.address
+                    return
 
         self.entryPoint = self.imageBase
-    
+
     def _getOrCreateSyntheticModule(self, filename: str,
                                     displayName: str) -> 'LoadModule':
         """Get or create a synthetic module for generated sections."""
@@ -1028,8 +1349,7 @@ class Linker:
                              length: AddrDisp,
                              baseAddress: 'Addr | None' = None) -> 'Section':
         """Add an SD section to a synthetic module. Returns the new Section."""
-        nextEsdId = max((s.esdId for s in module.sections.values()), default=0) + 1
-        section = Section(name, nextEsdId, 'SD', AddrDisp(0), length, module,
+        section = Section(name, module.nextEsdId(), 'SD', AddrDisp(0), length, module,
                           data=bytearray(length), baseAddress=baseAddress)
         module.addSection(section)
         return section
@@ -1040,23 +1360,346 @@ class Linker:
         self.undefinedSymbols.clear()
         self.buildGlobalSymbolTable()
 
-    def generateStackSections(self):
-        #
-        # Generate BSS sections for undefined @xxx (stack frame) symbols.
-        # Sizes come from SYM STACKEND data
-        knownStackSizes = {}
-        for module in self.modules:
-            knownStackSizes.update(module.stackSizes)
+    def _concardLayout(self):
+        """The CON80 layout program (cached), or [] without a deck."""
+        if self._concardProgram is None:
+            if self.args.concard:
+                from ap101Utils import concard
+                deck = concard.ConcardDeck(self.args.concard)
+                self._concardProgram = concard.layout_program(
+                    deck, self.args.concard_root)
+            else:
+                self._concardProgram = []
+        return self._concardProgram
 
+    def _deckStackNames(self):
+        """@-stack names from the deck's ` STACK $0<prog>` cards ($ maps
+        to @), deck order, deduplicated."""
+        names = []
+        for op in self._concardLayout():
+            if op.verb == 'STACK' and op.operand and op.operand[0] in '$@':
+                name = '@' + op.operand[1:]
+                if name not in names:
+                    names.append(name)
+        return names
+
+    def _deckMapPhases(self):
+        """Phase numbers named by the deck's MAP cards."""
+        phases = set()
+        for op in self._concardLayout():
+            if op.verb == 'MAP':
+                tok = op.operand.split(',')[0].strip()
+                if tok.isdigit():
+                    phases.add(int(tok))
+        return phases
+
+    def _deckPhaseNumbers(self):
+        """Phase numbers listed on the deck's PHASE card(s), card order."""
+        out = []
+        for op in self._concardLayout():
+            if op.verb == 'PHASE':
+                for tok in op.operand.replace(',', ' ').split():
+                    if tok.isdigit() and int(tok) not in out:
+                        out.append(int(tok))
+        return out
+
+    def applyConcardChanges(self):
+        """Apply the deck's LE `CHANGE oldname(newname)` cards.
+
+        The CESD rename chain built by CHANGE applies to the ONE module
+        supplied by the next module-reading card -- in the CON80 decks always
+        the following `INCLUDE SYSLIBL1(member)` (LE PLM p.28/35; several
+        CHANGEs may stack before one INCLUDE).  The rename covers every ESD
+        entry type: SD, LD, and ER (an ER rename redirects references inside
+        the included module).
+
+        When a rename makes the included module's SD collide with a same-named
+        SD from another input module, the deck-included (renamed) copy is the
+        survivor: in the original NCAL link the other member was never read at
+        all, while our objdir glob supplies it as primary input.  The
+        duplicate csect is deleted and its LDs are delinked onto the survivor
+        at the same displacement (delete-type CESD entry + delinking, LE PLM
+        p.38-39/44-45)."""
+        pending: dict[str, str] = {}
+        changes: list[tuple[str, dict[str, str]]] = []  # (member, {old: new})
+        for op in self._concardLayout():
+            if op.verb == 'CHANGE':
+                m = re.match(r"([A-Z0-9#@$]+)\(([A-Z0-9#@$]+)\)", op.operand)
+                if m:
+                    pending[m.group(1)] = m.group(2)
+                else:
+                    log.warning(f"CHANGE operand not understood: "
+                                f"{op.operand!r} (card {op.card})")
+            elif op.verb == 'INCLUDE' and pending:
+                changes.append((op.operand, pending))
+                pending = {}
+        if pending:
+            log.warning(f"CHANGE card(s) without a following INCLUDE "
+                        f"(ignored): {pending}")
+        if not changes:
+            return
+
+        renamedSDs: list['Section'] = []
+        for member, renames in changes:
+            target = None
+            for mod in self.modules:
+                if not mod.external and member in mod.sectionsByName:
+                    target = mod
+                    break
+            if target is None:
+                log.warning(f"CHANGE: no loaded module supplies INCLUDE "
+                            f"member {member!r}; renames {renames} skipped")
+                continue
+            for old, new in renames.items():
+                hit = False
+                for s in target.allSections():
+                    if s.name == old:
+                        if target.sectionsByName.get(old) is s:
+                            del target.sectionsByName[old]
+                        s.name = new
+                        target.sectionsByName[new] = s
+                        hit = True
+                        if s.type == 'SD':
+                            renamedSDs.append(s)
+                ext = target.externalsByName.pop(old, None)
+                if ext is not None:
+                    ext.name = new
+                    target.externalsByName[new] = ext
+                    hit = True
+                lvl = log.info if hit else log.warning
+                lvl(f"CHANGE {old}({new}) applied to "
+                    f"{Path(target.filename).name}"
+                    f"{'' if hit else ': no such symbol (no-op)'}")
+
+        # Duplicate-SD resolution: the renamed copy survives; any other input
+        # module's same-named csect is deleted, its LDs delinked onto the
+        # survivor at the same displacement.
+        for winner in renamedSDs:
+            for mod in list(self.modules):
+                if mod.external or mod is winner.module:
+                    continue
+                dupIds = [i for i, s in mod.sections.items()
+                          if s.name == winner.name]
+                for esdId in dupIds:
+                    dup = mod.sections[esdId]
+                    for ld in [l for l in mod.lds if l.ldId == esdId]:
+                        off = int(ld.address) - int(dup.address)
+                        if ld.name not in winner.module.sectionsByName \
+                                and 0 <= off < int(winner.length):
+                            winner.module.addSection(Section(
+                                ld.name, winner.module.nextEsdId(), 'LD',
+                                AddrDisp(int(winner.address) + off),
+                                module=winner.module, ldId=winner.esdId))
+                            log.info(f"CHANGE: LD {ld.name} of deleted "
+                                     f"duplicate {dup.name} delinked onto "
+                                     f"survivor at +0x{off:X} bytes")
+                        else:
+                            log.warning(f"CHANGE: LD {ld.name} of deleted "
+                                        f"duplicate {dup.name} NOT carried "
+                                        f"(collision or out of range)")
+                        mod.lds.remove(ld)
+                        mod.ldsByEsdId.pop(ld.esdId, None)
+                        if mod.sectionsByName.get(ld.name) is ld:
+                            del mod.sectionsByName[ld.name]
+                    del mod.sections[esdId]
+                    if mod.sectionsByName.get(winner.name) is dup:
+                        del mod.sectionsByName[winner.name]
+                    mod.relocations = [r for r in mod.relocations
+                                       if r.posId != esdId]
+                    log.info(f"CHANGE: duplicate csect {winner.name} from "
+                             f"{Path(mod.filename).name} deleted "
+                             f"(survivor: {Path(winner.module.filename).name})")
+                if dupIds and not mod.sections and not mod.lds:
+                    self.modules.remove(mod)
+                    log.info(f"CHANGE: module {Path(mod.filename).name} "
+                             f"left empty; dropped from the link")
+
+    def stackCsectNames(self):
+        """@-stack CSECTs this link must create, in deck order.
+
+        Primary source: the CON80 ` STACK $0<prog>` cards ($ maps to @) --
+        SDL-mode objects carry no stack ERs at all, the cards are the only
+        trigger.  Also any undefined @xxx ERs (NOSDL objects reference their
+        own stack; tasks get synthesized @n ERs)."""
+        wanted = self._deckStackNames()
+        for symName in self.undefinedSymbols:
+            if symName.startswith('@') and symName not in wanted:
+                wanted.append(symName)
+        # Stacks the co-resident base already generated (defined in a MAP'd
+        # phase lib): the config link generated ONE stack per module
+        # over the FULL config call graph; re-generating from this phase's
+        # partial graph yields a different size and shifts every stack
+        # behind it.  The base's stack IS this phase's stack at runtime --
+        # do not re-emit it.
+        return [n for n in wanted if n not in self.phaseDefinedSymbols]
+
+    def _autocallStems(self):
+        """Ordered module stems from con80build's autocall.json -- the ONE
+        loader every autocall-conditioned behavior must go through (deferral
+        exemption, placement waves, full-config-graph stack sizing).
+
+        Policy: a missing, unreadable, or malformed file means NO autocall
+        semantics at all -- never a half-armed mix (e.g. full-graph sizing
+        keyed on file existence while the exemption parse failed).  NOCALLER
+        + autocall is contradictory (NOCALLER *is* NCAL = autocall off):
+        warn and disarm."""
+        cached = getattr(self, '_autocallStemsCache', None)
+        if cached is not None:
+            return cached
+        stems: list[str] = []
+        aj = getattr(self.args, 'autocall_json', None)
+        if aj and os.path.exists(aj):
+            try:
+                entries = json.loads(Path(aj).read_text())
+                if not isinstance(entries, list):
+                    raise ValueError("expected a top-level JSON list")
+                for e in entries:
+                    stem = Path(e["source"]).stem
+                    if stem not in stems:
+                        stems.append(stem)
+            except (OSError, ValueError, KeyError, TypeError) as e:
+                self.warnings.append(
+                    f"--autocall {aj}: unreadable ({e}); linking WITHOUT "
+                    f"autocall semantics")
+                stems = []
+            if stems and self.nocall:
+                self.warnings.append(
+                    f"--autocall {aj} contradicts --nocall (NOCALLER = NCAL "
+                    f"= automatic library call OFF); autocall DISARMED")
+                stems = []
+        self._autocallStemsCache = stems
+        return stems
+
+    def _droppedStackIntervals(self):
+        """Halfword [lo, hi) extents of the base-defined @-stacks this link
+        DROPS (stackCsectNames filters them out because a MAP'd/chained phase
+        already generated them).
+
+        Dropping is right -- but the space is still THEIRS, and this phase's
+        sequential flow has to step over it.  Usually the base's region is
+        MAP-imported anyway, so this adds nothing; the case that needs it is
+        a phase that RE-SUPPLIES a base overlay via `INCLUDE CONCARDS(...)`
+        instead of MAPping it, where the flow would otherwise pack content
+        into the dropped stack's space.  Deliberately NARROW: a flat union
+        of all base extents forbids legitimate replacement (see conlayout's
+        base_occupied note)."""
+        out, names = [], []
+        for name in self._deckStackNames():
+            if name not in self.phaseDefinedSymbols:
+                continue                      # this link generates it itself
+            addr = self.phaseDefinedAddrs.get(name)
+            size = self.phaseDefinedSizes.get(name, 0)
+            if addr is not None and size:
+                names.append(f'{name}@{addr // 2:#x}')
+                # +4 bytes = the trailing 2-hw checksum slot that closes the
+                # base's block, same as mappedIntervals.
+                out.append((addr // 2, (addr + size + 4) // 2))
+            else:
+                # base defines the stack but its CESD gives us no usable
+                # extent: nothing gets reserved and the flow can pack into
+                # the stack's space -- the overlap this method exists to
+                # prevent.  Loud, not silent.
+                self.warnings.append(
+                    f"dropped base stack {name}: no reservable extent "
+                    f"(addr={addr}, size={size}) -- flow may overlap it")
+        if out:
+            log.info(f"reserving {len(out)} dropped base @-stack extent(s): "
+                     f"{', '.join(names)}")
+        return out
+
+    def generateStackSections(self):
+        """Create the @-stack BSS CSECTs (named by stackCsectNames()).
+
+        Sizes come from the longest-weighted-call-chain algorithm over the
+        whole load module (stacksizer.py).  --generate-stacks N supplies a
+        fallback size for stacks whose program block is not in the link."""
+        from . import stacksizer
+
+        wanted = [n for n in self.stackCsectNames()
+                  if n not in self.globalSymbols]
+        if not wanted:
+            return
+
+        # AUTOCALL jobs size stacks over the ONE-JOB call graph: (a) the
+        # contributes-0 check must see EVERY stacked program in the config
+        # (deck STACK cards even when the base generated the csect, plus
+        # base-defined @-stacks), or a base program's chain piles onto a
+        # local caller; (b) a local chain that dips into MAP-imported base
+        # code needs the base modules' STACKEND frames and RLD edges, so
+        # load the base phases' objects graph-only (sizer input, never
+        # linked).  NOCALLER jobs keep the partial-graph sizing -- the
+        # per-phase sizes there ARE the partial-graph sizes.
+        autocallJob = bool(self._autocallStems())
+        sizerMods, stackSet = self.modules, set(wanted)
+        if autocallJob:
+            stackSet.update(self._deckStackNames())
+            stackSet.update(n for n in self.phaseDefinedSymbols
+                            if n.startswith('@'))
+            sizerMods = list(self.modules)
+            # scope the graph to the phases the DECK maps (con80build
+            # passes every earlier-phase lib; unrelated phases' objdirs
+            # must not deepen chains)
+            mapPhases = self._deckMapPhases()
+            for spec in self.args.map_lib:
+                ph, _, libPath = spec.partition('=')
+                if not ph.isdigit() or int(ph) not in mapPhases:
+                    continue
+                phaseDir = os.path.join(os.path.dirname(libPath),
+                                        Path(libPath).stem)
+                objdir = os.path.join(phaseDir, 'obj')
+                if not os.path.isdir(objdir):
+                    self.warnings.append(
+                        f"autocall stack sizing: MAP phase {ph} objdir "
+                        f"missing ({objdir}); its chains fall back to "
+                        f"default frames (36B/depth 0)")
+                    continue
+                # Only the objects that phase actually LINKED (its sym.json
+                # module manifest) feed the sizer: a bare objdir glob lets
+                # stale autocalled .objs from an old run deepen chains.
+                # No manifest -> glob, loudly.
+                linked = None
+                symp = os.path.join(phaseDir, Path(libPath).stem
+                                    + '.sym.json')
+                try:
+                    with open(symp) as f:
+                        linked = {os.path.basename(m['filename'])
+                                  for m in json.load(f)['modules']}
+                except (OSError, ValueError, KeyError) as e:
+                    self.warnings.append(
+                        f"autocall stack sizing: no module manifest for "
+                        f"MAP phase {ph} ({symp}: {e}); sizing over the "
+                        f"FULL objdir (stale .objs may deepen chains)")
+                for fn in sorted(os.listdir(objdir)):
+                    if not fn.endswith('.obj'):
+                        continue
+                    if linked is not None and fn not in linked:
+                        log.info(f"autocall stack sizing: skipping "
+                                 f"{fn} (not in PHASE{int(ph):02d}'s "
+                                 f"link manifest)")
+                        continue
+                    try:
+                        mods, _, _ = LoadModule.load(
+                            os.path.join(objdir, fn), quiet=True)
+                    except Exception as e:
+                        self.warnings.append(
+                            f"autocall stack sizing: unreadable obj "
+                            f"{fn} in MAP phase {ph} ({e}); its frames "
+                            f"default to 36B/depth 0")
+                        continue
+                    sizerMods.extend(mods)
+        sizer = stacksizer.StackSizer(sizerMods, stackSet)
         fallbackHW = self.args.generate_stacks or 0
         added = False
 
-        for symName in list(self.undefinedSymbols):
-            if not symName.startswith('@'):
-                continue
-
-            dollarName = '$' + symName[1:]
-            sizeHW = knownStackSizes.get(dollarName, fallbackHW)
+        for symName in wanted:
+            sizeHW = sizer.sizeHW(symName)
+            source = "chain"
+            if sizeHW is None:
+                sizeHW, source = fallbackHW, "fallback"
+                if sizeHW <= 0:
+                    log.warning(f"Stack '{symName}': no program block "
+                                f"'${symName[1:]}' in the link and no "
+                                f"--generate-stacks fallback; skipped")
             if sizeHW <= 0:
                 continue
 
@@ -1064,12 +1707,194 @@ class Linker:
             module = self._getOrCreateSyntheticModule("<generated-stacks>", "<stacks>")
             self._addSyntheticSection(module, symName, sizeBytes)
             added = True
-
-            source = "SYM" if dollarName in knownStackSizes else "fallback"
             log.info(f"Generated stack section '{symName}' ({sizeHW} HW / {sizeBytes} bytes, {source})")
 
         if added:
             self._rebuildSymbolTable()
+
+    def _deferredCsects(self):
+        """Csect names a LATER phase segment of the master deck INSERTs.
+
+        The original linkedit was one job over every segment: a later segment
+        can position csects of an object that entered the link for an
+        earlier phase's INSERT of a sibling section.  A per-phase build must
+        leave those sections to the phase that places them -- auto-placing
+        them here pollutes this phase's image."""
+        root = self.args.concard_root
+        if not self.args.concard or '@' not in root:
+            return set()
+        master, _, ph = root.partition('@')
+        if not ph.isdigit():
+            return set()
+        from ap101Utils import concard
+        deck = concard.ConcardDeck(self.args.concard)
+        order = [nums[0] for nums, _ in concard.phase_segments(deck, master)
+                 if nums]
+        phase = int(ph)
+        if phase not in order:
+            return set()
+        own = {op.operand for op in self._concardLayout()
+               if op.verb in ('INSERT', 'INCLUDE', 'STACK', 'RESERVE')
+               and op.operand}
+        deferred = set()
+        for p in order[order.index(phase) + 1:]:
+            for op in concard.layout_program(deck, f'{master}@{p}'):
+                if op.verb == 'INSERT' and op.operand \
+                        and op.operand not in own:
+                    deferred.add(op.operand)
+        return deferred
+
+    def dropDeferredSections(self):
+        """Remove sections owned by later phases (see _deferredCsects) from
+        the loaded modules; references to them become plain ERs that
+        cross-phase resolution patches against the owning phase's lib."""
+        deferred = self._deferredCsects()
+        if not deferred:
+            return
+        # Modules this job pulled by AUTOMATIC LIBRARY CALL are exempt:
+        # autocall means THIS job resolves the reference with a resident
+        # copy, even when a later phase's deck also INSERTs the csect for
+        # its own configs.
+        autocalled: set[str] = set(self._autocallStems())
+        for module in self.modules:
+            if module.external:
+                continue
+            if module.name in autocalled:
+                continue
+            doomed = [s for s in module.sections.values()
+                      if s.name in deferred]
+            if not doomed:
+                continue
+            doomedIds = {s.esdId for s in doomed}
+            doomedLds = [ld for ld in module.lds if ld.ldId in doomedIds]
+            nameById = {s.esdId: s.name for s in doomed}
+            nameById.update({ld.esdId: ld.name for ld in doomedLds})
+            for s in doomed:
+                del module.sections[s.esdId]
+                if module.sectionsByName.get(s.name) is s:
+                    del module.sectionsByName[s.name]
+            for ld in doomedLds:
+                module.lds.remove(ld)
+                module.ldsByEsdId.pop(ld.esdId, None)
+                if module.sectionsByName.get(ld.name) is ld:
+                    del module.sectionsByName[ld.name]
+            dropIds = doomedIds | {ld.esdId for ld in doomedLds}
+            kept = []
+            for r in module.relocations:
+                if r.posId in doomedIds:
+                    continue           # a site inside dropped content
+                kept.append(r)
+                if r.relId in dropIds and r.relId not in module.externals:
+                    module.addExternal(External(
+                        nameById[r.relId], r.relId, False, module))
+            module.relocations = kept
+            if module.entryPoint and module.entryPoint[0] in dropIds:
+                module.entryPoint = None
+            log.info(f"{module.name}: deferred "
+                     + ", ".join(sorted(s.name for s in doomed))
+                     + " to a later phase")
+
+    def generateZconStubs(self):
+        """Synthesize Z1-pool ZCON csects for referenced-but-absent modules.
+
+        The LE allocates a pool ZCON csect for EVERY referenced ZCON
+        target, even when the owning module is not in the link (per-config
+        display/keyboard modules that only app phases load).  The owning
+        module's #Z section has an invariant shape -- 4 bytes, text
+        00 00 0E 00, one ZCON RLD (flags 0x10) at offset 0 targeting the
+        module's own #C<mod> compool -- so it can be synthesized without
+        the object.  The #C target stays an unresolved ER here (NCAL) and
+        cross-phase resolution patches the pool word against the phase that
+        really carries the module.  Names the co-resident base already
+        defines are excluded (they resolve cross-phase, no stub)."""
+        wanted = [n for n in sorted(self.undefinedSymbols)
+                  if n.startswith('#Z') and n not in self.globalSymbols
+                  and n not in self.phaseDefinedSymbols]
+        if not wanted:
+            return False
+        module = self._getOrCreateSyntheticModule("<generated-zcons>",
+                                                  "<zcons>")
+        for symName in wanted:
+            section = Section(symName, module.nextEsdId(), 'SD',
+                              AddrDisp(0), AddrDisp(4),
+                              module, data=bytearray(b'\x00\x00\x0e\x00'))
+            module.addSection(section)
+            target = '#C' + symName[2:]
+            ext = module.externalsByName.get(target)
+            if ext is None:
+                ext = External(target, module.nextEsdId(), False, module)
+                module.addExternal(ext)
+            module.relocations.append(
+                Relocation(ext.esdId, section.esdId, 0x10, AddrDisp(0),
+                           module))
+            log.info(f"Generated ZCON pool stub '{symName}' -> {target}")
+        self._rebuildSymbolTable()
+        return True
+
+    def patchStackPDEs(self):
+        """Bind each generated @-stack into its program's PDE (#E<prog>).
+
+        The compiler emits the 6-halfword PDE with the stack slot empty and
+        NO relocation for it (both SDL and NOSDL): words 4-5 = 0000 000n.
+        In the real load module the linkage editor fills word 4 with the
+        stack CSECT's halfword address and ORs X'8000' (PREALLOCATED) into
+        word 5.
+
+        Runs AFTER applyRelocations and writes the image directly: the
+        current CON80 layout leaves some zero-filled sections overlapping
+        the PDE region (low-core csects at address 0), so image bytes
+        written during the section-copy phase can be wiped by a later
+        overlapping copy — words 4-5 are rebuilt here from the PDE's own
+        section data, which also restores the compiled 000n tail."""
+        if self.image is None:
+            return
+        patched = 0
+        # Every known @-stack symbol binds its program's PDE — whether the
+        # stack CSECT was generated in this link or its address came from an
+        # --external-syms table (single-module relink must match the full
+        # link byte-for-byte).
+        for name, gsym in list(self.globalSymbols.items()):
+            if not (len(name) > 2 and name[0] == '@'):
+                continue
+            stackAddr = gsym.address
+            if stackAddr is None and gsym.section is not None \
+                    and gsym.section.baseAddress is not None:
+                stackAddr = gsym.section.baseAddress
+            if stackAddr is None:
+                continue
+            pdeName = '#E' + name[2:]
+            pde = self.globalSymbols.get(pdeName)
+            if pde is None or pde.section is None \
+                    or pde.section.type != 'SD' \
+                    or pde.section.baseAddress is None \
+                    or (pde.module is not None and pde.module.external) \
+                    or len(pde.section.data) < 12:
+                continue
+            hw = int(stackAddr) // 2
+            if hw > 0xFFFF:
+                log.warning(f"PDE {pdeName}: stack {name} at "
+                            f"0x{hw:X} hw exceeds 16 bits; not patched")
+                continue
+            data = pde.section.data
+            data[8:10] = hw.to_bytes(2, 'big')
+            data[10] |= 0x80
+            off = int(pde.section.baseAddress - self.imageBase)
+            if 0 <= off and off + 12 <= len(self.image):
+                self.image[off + 8:off + 12] = data[8:12]
+                patched += 1
+                # Record the bind as an applied relocation (2-byte YCON-like,
+                # LL=2 -> flags 0x04) so sym.json consumers (fidelity
+                # comparators, debuggers) see PDE word 4 as a relocated site
+                # rather than opaque content.
+                self.appliedRelocations.append({
+                    "address": int(pde.section.baseAddress) // 2 + 4,
+                    "target": hw,
+                    "targetName": name,
+                    "flags": 0x04,
+                })
+        if patched:
+            log.info(f"Patched {patched} PDE(s) with preallocated stack "
+                     f"addresses")
 
     def processDefinedSymbols(self):
         # handle -D symbols
@@ -1098,9 +1923,166 @@ class Linker:
         if added:
             self._rebuildSymbolTable()
 
+    def loadMapLibs(self):
+        """Resolve the deck's MAP <phase>,<member,...> cards against earlier-
+        phase .lib load modules (--map-lib N=path).
+
+        For each mapped member, the named REGN interval(s) of the phase's
+        load module are imported as an address-only (external) LoadModule:
+        every CESD SD/LD inside the interval becomes a resolvable symbol at
+        its already-loaded address, and the interval is reserved so auto-
+        placement flows around it."""
+        from ap101Utils.libModule import LibModule
+        from ap101Utils.objModule import EsdType
+
+        libs = {}
+        for spec in self.args.map_lib:
+            phase, _, path = spec.partition('=')
+            if not phase.isdigit() or not path:
+                self.errors.append(f"--map-lib expects N=path, got {spec!r}")
+                continue
+            try:
+                libs[int(phase)] = LibModule.read(path)
+            except (OSError, ValueError) as e:
+                self.errors.append(f"--map-lib {spec}: {e}")
+
+        # Region origins from every supplied phase lib (lowest phase wins on
+        # a name collision), for OVERLAY re-opens -- including regions the
+        # deck deliberately does NOT MAP because it replaces their content.
+        for p in sorted(libs):
+            for r in libs[p].regions:
+                self.phaseRegionStarts.setdefault(r.name, r.start)
+
+        # Definitions of the CO-RESIDENT base phases, to suppress duplicate
+        # autocall pulls (see phaseDefinedSymbols in __init__).  Only phases
+        # this deck MAPs count: a MAP card declares the phase as part of this
+        # phase's runtime environment (loaded together in every config that
+        # loads this phase), so its whole symbol table was visible to the
+        # config link's autocall.  Other supplied libs are sibling app
+        # phases -- alternatives that are NEVER co-resident (the config link
+        # never saw them), so their definitions must not suppress this
+        # phase's own library pulls (e.g. PHASE06 needs its own #QACOS even
+        # though PHASE04 also pulls one; each config gets its own pool copy
+        # at a per-config address).
+        mapPhases = self._deckMapPhases()
+        # ... plus the deck-CHAIN phases: segments whose PHASE card lists
+        # this phase carry content that is in THIS phase's job too (OFTMP
+        # "PHASE 2,3,...,18" -> the phase-2 segment is part of every one of
+        # those phases' one-job links), so their state flows here even with
+        # no MAP card at all (e.g. PHASE13's deck has none).  Sibling app
+        # phases list only themselves and stay excluded.
+        selfPhases = self._deckPhaseNumbers()
+        selfPhase = min(selfPhases) if selfPhases else None
+        chainPhases = {p for p in libs
+                       if selfPhase is not None and p != selfPhase
+                       and selfPhase in libs[p].phaseNumbers}
+        if chainPhases - mapPhases:
+            log.info(f"one-job chain phases (no MAP card): "
+                     f"{sorted(chainPhases - mapPhases)}")
+        for p in sorted((mapPhases | chainPhases) & set(libs)):
+            self.phaseDefinedZconNext = max(self.phaseDefinedZconNext,
+                                            self._carriedZconNext(libs[p]))
+            for e in libs[p].cesd:
+                if e.type in (EsdType.SD, EsdType.LD):
+                    self.phaseDefinedSymbols.add(e.name.strip())
+                    if e.type == EsdType.SD and e.address is not None:
+                        name = e.name.strip()
+                        self.phaseDefinedAddrs.setdefault(name, e.address)
+                        self.phaseDefinedSizes.setdefault(name, e.length or 0)
+                        self.phaseDefinedExtents.append(
+                            (e.address, e.address + (e.length or 0)))
+
+        for op in self._concardLayout():
+            if op.verb != 'MAP':
+                continue
+            toks = op.operand.split(',')
+            if not toks or not toks[0].isdigit():
+                self.warnings.append(f"MAP with unparsable operand "
+                                     f"{op.operand!r} ({op.card})")
+                continue
+            phase, members = int(toks[0]), [t for t in toks[1:] if t]
+            lib = libs.get(phase)
+            if lib is None:
+                self.warnings.append(
+                    f"MAP {op.operand}: no --map-lib for phase {phase}; "
+                    f"symbols stay unresolved")
+                continue
+            for member in members:
+                if member == '*':
+                    # `MAP p,*` (the deck's "MAPALL" idiom): map the WHOLE
+                    # phase -- every content extent its load module placed,
+                    # not just named OVERLAY regions (autocalled content
+                    # lands outside any REGN).  Without this the phase's
+                    # occupancy is invisible and new overlays land on top
+                    # of its content.
+                    intervals = lib.occupiedIntervals()
+                else:
+                    intervals = [(r.start, r.end) for r in lib.regions
+                                 if r.name == member]
+                if not intervals:
+                    self.warnings.append(
+                        f"MAP {phase},{member}: no such overlay region in "
+                        f"{lib.name}")
+                    continue
+
+                module = LoadModule(f"<map:{lib.name}/{member}>",
+                                    name=f"{lib.name}/{member}",
+                                    external=True)
+                inside = lambda a: a is not None and any(
+                    lo <= a < hi for lo, hi in intervals)
+                nSyms = 0
+                # `address` (the module-relative field) is set to the lib's
+                # absolute byte address on BOTH the SDs and the LDs so that
+                # _resolveLDLabels' recomputation (owner.baseAddress +
+                # (ld.address - owner.address)) is exact.  Leaving it at the
+                # default 0 collapses every imported LD onto its owner SD's
+                # base, corrupting every link-time cross-phase LD reference.
+                for e in lib.cesd:
+                    if e.type == EsdType.SD and inside(e.address):
+                        module.addSection(Section(
+                            e.name.strip(), e.esdId, 'SD',
+                            address=AddrDisp(e.address),
+                            length=AddrDisp(e.length or 0), module=module,
+                            baseAddress=Addr(e.address)))
+                        nSyms += 1
+                    elif e.type == EsdType.LD and inside(e.address):
+                        module.addSection(Section(
+                            e.name.strip(), e.esdId, 'LD', module=module,
+                            address=AddrDisp(e.address),
+                            baseAddress=Addr(e.address), ldId=e.ldid))
+                        nSyms += 1
+                self.modules.append(module)
+                # Each base content run carries a trailing 2-hw checksum
+                # slot the LE wrote for the protected block; a later
+                # phase's flow placement continues AFTER it (same rule as
+                # the Z1 pool cursor and conlayout's base_occupied ck+2).
+                self.mappedIntervals.extend(
+                    (lo, hi + 4) for lo, hi in intervals)
+                log.info(f"MAP {phase},{member}: {nSyms} symbol(s), "
+                         + ", ".join(f"0x{lo:06X}..0x{hi:06X}"
+                                     for lo, hi in intervals))
+
+    @staticmethod
+    def _carriedZconNext(lib):
+        """The Z1 pool cursor a MAP-carded parent phase carries forward.
+        Prefer the lib's serialized linkState (the exact one-job LE state);
+        a legacy lib written before the LSTA record falls back to a
+        reconstruction from its CESD (pool end + the overlay's closing 2-hw
+        checksum slot)."""
+        nxt = (lib.linkState or {}).get('zconPoolNext')
+        if nxt is not None:
+            return int(nxt)
+        from ap101Utils.objModule import EsdType as _ET
+        ends = [e.address + (e.length or 4) for e in lib.cesd
+                if e.type == _ET.SD and e.address is not None
+                and e.address < int(ZCON_END)
+                and any(e.name.strip().startswith(p) for p, z
+                        in _ZONE_BY_PREFIX if z == 'ZCON')]
+        return max(ends) + 4 if ends else 0
+
     def loadExternalSyms(self, path):
         """
-        Load a JSON containing csect locations and symbol offsets, 
+        Load a JSON containing csect locations and symbol offsets,
         which we can use to perform relocations without loading the
         actual object modules.
 
@@ -1117,11 +2099,11 @@ class Linker:
             }
         },
 
-        adddresses and offsets are in halfwords we accept both decimal and
-        hex numbers.
+        Addresses and offsets are in halfwords; both decimal and hex
+        numbers are accepted.
 
-        We don't it at the moment, but known CSECT types are:
-        
+        We don't use it at the moment, but known CSECT types are:
+
             BCE             | IOP code
             MSC             | IOP code
             DATA
@@ -1185,9 +2167,7 @@ class Linker:
                     else:
                         offsetHW = ldVal
                     offsetAddr = AddrDisp.from_hw(offsetHW)
-                    nextEsdId = max(
-                        (s.esdId for s in module.sections.values()), default=0) + 1
-                    ld = Section(ldName, nextEsdId, 'LD',
+                    ld = Section(ldName, module.nextEsdId(), 'LD',
                                  address=offsetAddr,
                                  module=module,
                                  baseAddress=baseAddr + offsetAddr,
@@ -1198,7 +2178,7 @@ class Linker:
         for module in self.modules:
             if module.external:
                 continue
-            for esdId, section in module.sections.items():
+            for section in module.sections.values():
                 if section.type != 'SD' or section.baseAddress is not None:
                     continue
                 entry = csectTable.get(section.name)
@@ -1208,15 +2188,33 @@ class Linker:
 
         if added:
             self._rebuildSymbolTable()
-            return True
-        return False
+        return added
 
     def link(self):
-        
+
+        if self.nocall:
+            log.info("NOCALLER (NCAL): unresolved externals are tolerated")
+
+        # LE CHANGE cards rename symbols in their INCLUDEd modules; must run
+        # before any symbol table / placement sees the old names.
+        if self.args.concard:
+            self.applyConcardChanges()
+
+        # Sections a LATER phase segment places stay out of this link
+        # entirely (their refs become cross-phase ERs).
+        self.dropDeferredSections()
+
         # Process -D defined symbols first
         log.info("Processing defined symbols...")
         self.processDefinedSymbols()
-        
+
+        # MAP <phase>,<member...> cards resolve against earlier-phase .lib
+        # load modules: import the mapped overlay regions' symbols (address-
+        # only) and reserve their intervals before anything is placed.
+        if getattr(self.args, 'map_lib', None):
+            log.info("Loading MAP phase libraries...")
+            self.loadMapLibs()
+
         log.info("Building global symbol table...")
         self._rebuildSymbolTable()
         
@@ -1231,44 +2229,56 @@ class Linker:
             if self.loadExternalSyms(self.args.external_syms):
                 allResolved = self.resolveExternals(searchLibraries=False)
 
-        # Generate stack sections for undefined @xxx symbols.
-        # Sizes come from SYM STACKEND data
-        if self.undefinedSymbols:
-            hasKnownSizes = any(m.stackSizes for m in self.modules)
-            if hasKnownSizes or self.args.generate_stacks:
-                log.info("Generating stack sections...")
-                self.generateStackSections()
-                allResolved = self.resolveExternals(searchLibraries=False)
-        
+        # Generate the @-stack CSECTs: named by CON80 STACK cards (the only
+        # trigger under SDL, where objects carry no @ ERs) and by undefined
+        # @xxx ERs (NOSDL); sized by the call-chain algorithm.
+        hasKnownSizes = any(m.stackSizes for m in self.modules)
+        if self.stackCsectNames() and (hasKnownSizes or self.args.generate_stacks):
+            log.info("Generating stack sections...")
+            self.generateStackSections()
+            allResolved = self.resolveExternals(searchLibraries=False)
+
+        # Z1-pool stubs for referenced ZCON targets whose owning module is
+        # not in this link (see generateZconStubs) -- only meaningful when a
+        # CON80 deck drives placement (the Z1 pool).
+        if self.args.concard and self.generateZconStubs():
+            allResolved = self.resolveExternals(searchLibraries=False)
+
         if not allResolved:
-            # It looks like the HAL/S-FC compiler can sometimes emit code
-            # that has references to COMPOOLs that aren't present in the
-            # link as long as the code is never executed. e.g, from issue #22,
-            # in an OPS 1 build:
-            #
-            #   IF CGOV_MMODE_CUR_LFE = 201 OR CGOV_MMODE_CUR_LFE = 202 OR
-            #     CGOV_MMODE_CUR_LFE = 801 THEN DO;  
-            #       /* access the un-linked COMPOOL */
-            #   END;
-            #
-            #  CGOV_MM_CUR_LFE will always only have 1xx values, so
-            #  the compiler allows it.
-            #
-            #  Make missing compools warnings, unless --strict-compools
-            #  is passed:
-            #
+            # The HAL/S-FC compiler can emit references to COMPOOLs that are
+            # not in the link when the referencing code can never execute in
+            # the linked configuration (issue #22).  Make missing compools
+            # warnings unless --strict-compools is passed.
             strict = []
             lenient = []
+            nocalled = []
             for sym in sorted(self.undefinedSymbols):
                 if sym.startswith('#P') and not self.args.strict_compools:
                     lenient.append(sym)
+                elif self.nocall:
+                    nocalled.append(sym)
                 else:
                     strict.append(sym)
 
+            # Tolerated undefineds are cross-phase references (the real OFTMP
+            # linkedit resolved them across overlay segments; ours defers to
+            # the phaseresolve pass), so a per-symbol warning wall is noise
+            # by default -- -Wunresolved-phases restores it.
+            perSym = log.warning if getattr(
+                self.args, 'warn_unresolved_phases', False) else log.info
             for sym in lenient:
-                log.warning(
+                perSym(
                     f"Undefined COMPOOL: {sym}, referenced by "
                     f"{self._formatUndefRefs(self.undefinedSymbols[sym])}")
+            for sym in nocalled:
+                perSym(
+                    f"Undefined symbol (left unresolved, NOCALLER): {sym}, "
+                    f"referenced by "
+                    f"{self._formatUndefRefs(self.undefinedSymbols[sym])}")
+            if (lenient or nocalled) and perSym is log.info:
+                log.info(f"{len(lenient) + len(nocalled)} undefined "
+                         f"symbol(s) left for cross-phase resolution "
+                         f"(-Wunresolved-phases lists them)")
             for sym in strict:
                 self.errors.append(
                     f"Undefined symbol: {sym}, referenced by "
@@ -1292,8 +2302,7 @@ class Linker:
             try:
                 mergedConfig = baseConfig.merge(overlayConfig)
             except ValueError as e:
-                error(str(e))  
-                return False
+                error(str(e))
             configErrors = mergedConfig.validate()
             if configErrors:
                 for e in configErrors:
@@ -1319,6 +2328,7 @@ class Linker:
         #
         log.info("Applying relocations...")
         success = self.applyRelocations()
+        self.patchStackPDEs()
 
         self.determineEntryPoint()
 
@@ -1331,8 +2341,170 @@ class Linker:
         
         with open(outputPath, 'wb') as f:
             f.write(self.image)
-        
+
         log.info(f"Wrote {len(self.image)} bytes to {outputPath}")
+
+    def saveLib(self, outputPath):
+        """Write the link result as an AP-101 loadable module (.lib) -- the
+        load-module boundary the real SDL flow stored in a library for the
+        MMU build (MAFGEN's LM=...).  Carries the CESD (resolved symbols),
+        per-extent text, the retained RLD, per-halfword store-protection,
+        CON80 overlay regions, and phase metadata.  See ap101Utils.libModule
+        for the record format."""
+        from datetime import datetime
+
+        from ap101Utils import libModule
+        from ap101Utils.conlayout import default_protected
+
+        if self.image is None:
+            error("No image to write to .lib")
+            return
+
+        lib = libModule.LibModule(
+            name=Path(outputPath).stem[:8].upper(),
+            linkerId=f"LNK101 {_version_string()}"[:16],
+            created=datetime.now().isoformat(timespec='seconds'))
+
+        # -- CESD: placed SDs (address order), then LDs, then unresolved ERs.
+        placedSDs = sorted(self._placedSDs(), key=lambda s: int(s.baseAddress))
+        ids = {}
+        for s in placedSDs:
+            name = s.name.strip()
+            if name in ids:
+                continue
+            ids[name] = len(lib.cesd) + 1
+            lib.cesd.append(libModule.EsdEntry.sd(
+                ids[name], name, int(s.baseAddress), int(s.length)))
+        for m in self.modules:
+            if m.external:
+                continue
+            for ld in m.lds:
+                name = ld.name.strip()
+                if ld.baseAddress is None or name in ids:
+                    continue
+                owner = self._findLDOwner(ld, m)
+                ownerId = ids.get(owner.name.strip(), 1) if owner else 1
+                ids[name] = len(lib.cesd) + 1
+                lib.cesd.append(libModule.EsdEntry.ld(
+                    ids[name], name, int(ld.baseAddress), ownerId))
+        for name in sorted(self.undefinedSymbols):
+            if name not in ids:
+                ids[name] = len(lib.cesd) + 1
+                lib.cesd.append(libModule.EsdEntry.er(ids[name], name))
+
+        # -- TEXT extents: contiguous runs of placed sections (tolerating the
+        # fullword-alignment pad); text comes from the relocated image.  The
+        # PROT bitmap layers per-csect protection: PROT-card ranges where the
+        # source manages it, else the CON80 SET/CLEAR block mark, else the
+        # class default.
+        base = self.imageBase
+        run, runs, runEnd = [], [], 0
+        for s in (s for s in placedSDs if s.length > 0
+                  and s.name.strip() not in self.reservedCsects):
+            if run and int(s.baseAddress) - runEnd > 2:
+                runs.append((run, runEnd))
+                run, runEnd = [], 0
+            run.append(s)
+            runEnd = max(runEnd, int(s.baseAddress + s.length))
+        if run:
+            runs.append((run, runEnd))
+        for run, end in runs:
+            start = int(run[0].baseAddress)
+            bits = [False] * ((end - start + 1) // 2)
+            for s in run:
+                nHw = (int(s.length) + 1) // 2
+                off = (int(s.baseAddress) - start) // 2
+                m, name = s.module, s.name.strip()
+                if m is not None and name in m.protManaged:
+                    for a, b in m.protRangesHw.get(name, []):
+                        for i in range(a, min(b, nHw)):
+                            bits[off + i] = True
+                else:
+                    prot = s.protected if s.protected is not None \
+                        else default_protected(name)
+                    if prot:
+                        for i in range(nHw):
+                            bits[off + i] = True
+            lib.extents.append(libModule.Extent(
+                start, bytes(self.image[start - base:end - base]), bits))
+
+        # -- RLD: retained relocations, positions rebased to absolute bytes.
+        for m in self.modules:
+            if m.external:
+                continue
+            for r in m.relocations:
+                pos = m.sections.get(r.posId)
+                if pos is None or pos.baseAddress is None:
+                    continue
+                target = m.sections.get(r.relId) or m.externals.get(r.relId) \
+                    or m.ldsByEsdId.get(r.relId)
+                tname = ""
+                if target is not None:
+                    resolved = getattr(target, 'resolvedSection', None)
+                    tname = (resolved.name if resolved is not None
+                             else target.name).strip()
+                lib.rlds.append(libModule.LibRld(
+                    r.flags, int(pos.baseAddress) + int(r.address),
+                    ids.get(tname, 0), ids.get(pos.name.strip(), 0)))
+
+        # -- CON80 overlay regions and phase metadata.
+        placement = self._concardPlacement
+        if placement is not None:
+            # One region record per CONTIGUOUS run of an overlay's csects
+            # (tolerating fullword pads and the 2-hw inter-block checksums).
+            # A min/max span per overlay is WRONG: the roll-in pool scatters
+            # an overlay's members across the bank's free gaps, and a
+            # min-max span covering the gaps makes a later phase's MAP of
+            # the region reserve unrelated content, pushing its re-open
+            # content away.  The MAP reader already accepts multiple
+            # intervals per region name.
+            extents = {}
+            for s in placedSDs:
+                ov = placement.overlay_of.get(s.name.strip())
+                if not ov:
+                    continue
+                lo = int(s.baseAddress)
+                extents.setdefault(ov, []).append((lo, lo + int(s.length)))
+            recs = []
+            for ov, spans in extents.items():
+                spans.sort()
+                run_lo, run_hi = spans[0]
+                for lo, hi in spans[1:]:
+                    if lo - run_hi <= 8:            # pad / checksum slack
+                        run_hi = max(run_hi, hi)
+                    else:
+                        recs.append(libModule.Region(
+                            ov, run_lo, run_hi, run_lo // int(SECTOR_SIZE)))
+                        run_lo, run_hi = lo, hi
+                recs.append(libModule.Region(
+                    ov, run_lo, run_hi, run_lo // int(SECTOR_SIZE)))
+            lib.regions = sorted(recs, key=lambda r: r.start)
+        if self.args.concard:
+            lib.phaseRoot = self.args.concard_root
+        lib.phaseNumbers = self._deckPhaseNumbers()
+        # -- LE carried state: the one-job allocation cursor at the end of
+        # this phase's deck segment, cumulative over the MAP-carded parents'
+        # carried state, so the next phase's link CONTINUES it exactly.
+        ownPool = [int(s.baseAddress) + int(s.length) for s in placedSDs
+                   if s.zone == 'ZCON' and int(s.baseAddress) < int(ZCON_END)]
+        zconNext = self.phaseDefinedZconNext
+        if ownPool and max(ownPool) + 4 > zconNext:
+            # this segment placed pool content past the inherited cursor:
+            # advance past it plus the overlay's closing 2-hw checksum slot
+            zconNext = max(ownPool) + 4
+        if zconNext:
+            lib.linkState['zconPoolNext'] = zconNext
+
+        lib.nocall = self.nocall
+        lib.entryAddress = int(self.entryPoint) \
+            if self.entryPoint is not None else None
+        lib.entryName = self.args.entry or next(
+            (m.entryName for m in self.modules if m.entryName), "") or ""
+
+        lib.write(outputPath)
+        nProt = sum(sum(x.protect) for x in lib.extents if x.protect)
+        log.info(f"Wrote load module {outputPath}: {len(lib.cesd)} CESD, "
+                 f"{len(lib.extents)} extent(s), {nProt} hw protected")
     
     @staticmethod
     def _formatUndefRefs(refs, use_basename=False):
@@ -1370,7 +2542,7 @@ class Linker:
         
         totalLength = AddrDisp(0)
         for module in self.modules:
-            for esdId, section in module.sections.items():
+            for section in module.sections.values():
                 if section.type != 'SD' or section.baseAddress is None:
                     continue
                 baseHw = section.baseAddress.hw
@@ -1525,7 +2697,7 @@ class Linker:
             }
             data["modules"].append(modInfo)
             
-            for esdId, section in module.sections.items():
+            for section in module.sections.values():
                 if section.type == 'SD' and section.baseAddress is not None:
                     data["sections"].append({
                         "name": section.name,
@@ -1617,7 +2789,7 @@ class Linker:
         data = {}
 
         for module in self.modules:
-            for esdId, section in module.sections.items():
+            for section in module.allSections():
                 if section.baseAddress is None:
                     continue
                 if section.type == 'SD':
@@ -1643,7 +2815,7 @@ class Linker:
         # Collect all sections with assigned addresses
         allSections = []
         for module in self.modules:
-            for esdId, section in module.sections.items():
+            for section in module.allSections():
                 if section.baseAddress is not None:
                     allSections.append((section, module))
         
