@@ -20,9 +20,9 @@
 # dependency.  COMPOOL-before-importer and INCL80 fragment ordering live in the
 # HAL/S source and the compiler database, not here.  Accordingly:
 # 
-#   * :meth:ConcardGraph.object_modules returns an *unordered* worklist -- the
+#   * ConcardGraph.object_modules returns an *unordered* worklist -- the
 #     set of object/CSECT names a build pulls in; compile them in any order.
-#   * :meth:ConcardGraph.link_order returns the order the object generator
+#   * ConcardGraph.link_order returns the order the object generator
 #     visits cards (pre-order of the INCLUDE tree); that is the only ordering the
 #     cards actually carry.
 # 
@@ -60,17 +60,18 @@ _VERB_RE = re.compile(r"\s*([A-Za-z][A-Za-z0-9]*)\b[ ,]*(.*)")
 _LIBREF_RE = re.compile(r"([A-Z0-9#@$]+)\(([^)]*)\)")
 
 # Verbs that contribute dependency edges.
-EDGE_VERBS = frozenset({"INCLUDE", "INSERT", "LIBRARY"})
+EDGE_VERBS = frozenset({"INCLUDE", "INSERT", "LIBRARY", "RESERVE"})
 # The library name that names *other CON80 cards* (recursed); anything else in
 # an INCLUDE is an external object-module library (leaves).
 CONCARD_LIBRARY = "CONCARDS"
 
-# Verbs that drive the *placement* of object modules in the load's memory image
-# BANK/OVERLAY - set the location counter / region, 
-# INSERT and STACK place a module's csects, and
-# CLEAR/SET pad or realign.
-# XXX CLEAR/SET manage protection
-LAYOUT_VERBS = frozenset({"BANK", "OVERLAY", "INSERT", "CLEAR", "SET", "STACK"})
+# Verbs that drive the *placement* of object modules in the load's memory
+# image: BANK/OVERLAY set the location counter / region, INSERT and STACK
+# place a module's csects, SET/CLEAR declare the preceding block's
+# store-protection, MAP imports an earlier phase's regions, and RESERVE
+# allocates without loading text.
+LAYOUT_VERBS = frozenset({"BANK", "OVERLAY", "INSERT", "CLEAR", "SET",
+                          "STACK", "MAP", "RESERVE"})
 
 
 #
@@ -130,6 +131,45 @@ def parse_cards(text: str) -> list[Directive]:
 
 
 #
+# OFTMP phase segments
+#
+# `PHASE n[,m,...]` cards partition a master deck (OFTMP) into phase
+# segments: the FIRST number is the segment's own phase id (the id MAP cards
+# reference); the rest are the other MMU phases the same content serves
+# (SSW's `PHASE 2,3,...,18` -- resident in every OPS).  A segment's cards
+# run to the next PHASE card; the deck prologue (ADDRMAX, LIBRARY, ...
+# before the first PHASE card) applies to every segment.
+#
+# A phase-scoped virtual member "<member>@<n>" (e.g. "OFTMP@2") is accepted
+# anywhere a root member name is (build_graph, expand_directives,
+# layout_program, lnk101 --concard-root): it reads as the prologue followed
+# by phase n's segment.
+
+def split_phase_root(root: str) -> tuple[str, int | None]:
+    """'OFTMP@2' -> ('OFTMP', 2); a plain member name -> (name, None)."""
+    base, sep, num = root.partition("@")
+    if sep and num.isdigit():
+        return base, int(num)
+    return root, None
+
+
+def phase_numbers(operand: str) -> list[int]:
+    return [int(t) for t in operand.replace(",", " ").split() if t.isdigit()]
+
+
+def phase_segments(deck: 'ConcardDeck', member: str = "OFTMP"):
+    """Ordered [(numbers, [Directive])] per PHASE card of `member`.  The
+    leading entry ([], prologue) holds the cards before the first PHASE;
+    each segment's directive list starts with its own PHASE card."""
+    segs: list[tuple[list[int], list[Directive]]] = [([], [])]
+    for d in deck.read(member):
+        if d.is_directive and d.verb == "PHASE":
+            segs.append((phase_numbers(d.operand), []))
+        segs[-1][1].append(d)
+    return segs
+
+
+#
 # ConcardDeck -- a directory of CON80 members
 #
 
@@ -144,12 +184,24 @@ class ConcardDeck:
         self._cache: dict[str, list[Directive]] = {}
 
     def has(self, name: str) -> bool:
-        return name in self.members
+        base, phase = split_phase_root(name)
+        if phase is None:
+            return base in self.members
+        return base in self.members and any(
+            nums and nums[0] == phase
+            for nums, _ in phase_segments(self, base))
 
     def read(self, name: str) -> list[Directive]:
         if name not in self._cache:
-            text = (self.path / name).read_text(errors="replace")
-            self._cache[name] = parse_cards(text)
+            base, phase = split_phase_root(name)
+            if phase is not None:
+                segs = phase_segments(self, base)
+                body = next((d for nums, d in segs
+                             if nums and nums[0] == phase), [])
+                self._cache[name] = segs[0][1] + body
+            else:
+                text = (self.path / base).read_text(errors="replace")
+                self._cache[name] = parse_cards(text)
         return self._cache[name]
 
 
@@ -330,7 +382,10 @@ def build_graph(deck: ConcardDeck, root: str = "OFTMP") -> ConcardGraph:
             if d.verb not in EDGE_VERBS:
                 continue
 
-            if d.verb == "INSERT":
+            if d.verb in ("INSERT", "RESERVE"):
+                # RESERVE = the LE's allocation-only variant of INSERT
+                # (CR091094): the member is still fetched (for its ESD size),
+                # so it carries the same worklist edge.
                 if not d.operand:
                     continue
                 node(d.operand, "object")
@@ -406,33 +461,67 @@ def _parse_origin(label: str) -> int | None:
         return None
 
 
-def layout_program(deck: ConcardDeck, root: str = "OFTMP") -> list[LayoutOp]:
+def expand_directives(deck: ConcardDeck, root: str = "OFTMP"):
+    """Yield (card, Directive) over `root`'s expansion in execution order,
+    recursing into INCLUDE CONCARDS(...) members exactly as the linkage
+    editor reads them (each member at most once per path)."""
     if not deck.has(root):
         raise KeyError(f"root member {root!r} not in deck {deck.path}")
 
-    ops: list[LayoutOp] = []
     stack: list[str] = []
 
-    def walk(card: str) -> None:
+    def walk(card: str):
         if card in stack:
             return
         stack.append(card)
         for d in deck.read(card):
             if not d.is_directive:
                 continue
+            yield card, d
             if d.verb == "INCLUDE":
                 ref = _library_ref(d.operand)
                 if ref and ref[0] == CONCARD_LIBRARY:
                     for child in ref[1]:
                         if deck.has(child):
-                            walk(child)
-                continue
-            if d.verb in LAYOUT_VERBS or d.verb == "PHASE":
-                ops.append(LayoutOp(d.verb, d.operand, card, d.line_no,
-                                    origin=_parse_origin(d.label)))
+                            yield from walk(child)
         stack.pop()
 
-    walk(root)
+    yield from walk(root)
+
+
+def has_nocall(deck: ConcardDeck, root: str = "OFTMP") -> bool:
+    """True when the linkedit described by `root` carries a NOCALLER card
+    (anywhere in its CONCARDS expansion).  NOCALLER = the linkage editor's
+    NCAL option: automatic library call is disabled and unresolved external
+    references are left in the load module without failing the linkedit."""
+    return any(d.verb == "NOCALLER" for _, d in expand_directives(deck, root))
+
+
+def layout_program(deck: ConcardDeck, root: str = "OFTMP") -> list[LayoutOp]:
+    ops = []
+    for card, d in expand_directives(deck, root):
+        if d.verb in LAYOUT_VERBS or d.verb == "PHASE":
+            ops.append(LayoutOp(d.verb, d.operand, card, d.line_no,
+                                origin=_parse_origin(d.label)))
+        elif d.verb == "INCLUDE":
+            # A LIBRARY include (`INCLUDE SYSLIBL1(member)`) loads the member
+            # at this point in the deck: an INSERT-like sequential placement,
+            # EXCEPT that a member whose csect is already defined (e.g. by an
+            # earlier phase's MAP import) REPLACES it in place.  CONCARDS
+            # includes are the deck expansion itself (handled by
+            # expand_directives), not placements.
+            ref = _library_ref(d.operand)
+            if ref and ref[0] != CONCARD_LIBRARY:
+                for m in ref[1]:
+                    ops.append(LayoutOp("INCLUDE", m, card, d.line_no,
+                                        origin=_parse_origin(d.label)))
+        elif d.verb == "CHANGE":
+            # LE CHANGE oldname(newname): rename an external symbol (SD, LD,
+            # or ER) in the module supplied by the NEXT module-reading card
+            # (an INCLUDE) -- the CESD rename chain applies only to that one
+            # module (LE PLM p.28/35).  The operand keeps the raw `old(new)`
+            # text; the linker parses it.
+            ops.append(LayoutOp("CHANGE", d.operand, card, d.line_no))
     return ops
 
 

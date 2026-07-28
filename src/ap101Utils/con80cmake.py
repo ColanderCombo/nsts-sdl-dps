@@ -14,6 +14,7 @@
 #
 from __future__ import annotations
 
+import os
 import shlex
 from pathlib import Path
 
@@ -28,20 +29,27 @@ def _sh(script: str) -> str:
     return script.replace('"', '\\"')
 
 
+
+
 def emit(outfile: Path, *, root: str, by_type: dict, patches: dict,
          srcdirs, con80_dir: Path, mlib: Path | None, incl80: Path | None,
          deck_root: Path | None, out_root: Path, python: str, halsc: str,
          pass_rel32: Path, tolerable: int, linklibs, concard_root: str,
-         allow_undefined: bool) -> None:
+         allow_undefined: bool, nocall: bool = False) -> None:
     """Write the CMake recipe for the resolved worklist to `outfile`."""
     src_root = Path(__file__).resolve().parent.parent          # .../sdl/src
     srcdirs = [Path(d).resolve() for d in srcdirs]
     asm_sources = by_type["ASM"]
     hal_worklist = by_type["HAL"]
-    displays = by_type["DISPLAY"]
+    # AMT decks (CDAPnn) ride the display recipe: the dfg CLI auto-detects
+    # the deck form and the generate -> preprocess -> halsc flow is shared.
+    displays = by_type["DISPLAY"] + by_type.get("AMT", [])
 
     tree = halorder.tree_units(srcdirs)
-    extra, closure_seeds = halorder.template_closure(hal_worklist, tree)
+    from .con80build import _deck_template_seeds
+    disp_seeds = [d for p in displays for d in _deck_template_seeds(p)]
+    extra, closure_seeds = halorder.template_closure(hal_worklist, tree,
+                                                     disp_seeds)
     order = halorder.topo_order(list(hal_worklist) + list(extra))
     worklist_set = set(hal_worklist)
 
@@ -87,6 +95,19 @@ set(HALSC "{_q(halsc)}" CACHE FILEPATH "halsc compiler wrapper")
 set(PASS_REL32 "{_q(pass_rel32)}" CACHE PATH "PASS.REL32V0 dir")
 set(SRCROOT "{_q(src_root)}" CACHE PATH \
 "sdl/src (PYTHONPATH for PASS helper scripts)")""")
+    # The venv tools run through their installed wrappers (beside halsc)
+    # when present — shorter, readable commands; else `${PYTHON} -m <tool>`.
+    bindir = Path(halsc).parent
+    wrappers = {t: bindir / t for t in ("asm101", "dfg", "lnk101")}
+    wrappers = {t: p for t, p in wrappers.items()
+                if p.is_file() and os.access(p, os.X_OK)}
+    for t, p in sorted(wrappers.items()):
+        w(f'set({t.upper()} "{_q(p)}" CACHE FILEPATH "{t} wrapper")')
+    asm101_cmd = ('"${ASM101}"' if "asm101" in wrappers
+                  else '"${PYTHON}" -m asm101')
+    dfg_cmd = ("'${DFG}'" if "dfg" in wrappers else "'${PYTHON}' -m dfg")
+    lnk101_cmd = ("'${LNK101}'" if "lnk101" in wrappers
+                  else "'${PYTHON}' -m lnk101")
     if mlib is not None:
         w(f'set(MLIB "{_q(Path(mlib).resolve())}" CACHE PATH '
           '"asm101 macro/COPY library")')
@@ -120,7 +141,7 @@ set(INCENV ${CMAKE_COMMAND} -E env PYTHONUTF8=1 \
         src = _q(srcpath.resolve())
         w(f"""\
 add_custom_command(OUTPUT "{obj}"
-  COMMAND ${{PYENV}} "${{PYTHON}}" -m asm101 "--object={obj}" \
+  COMMAND ${{PYENV}} {asm101_cmd} "--object={obj}" \
 "--library=${{MLIB}}" --tolerable={tolerable} "{src}"
   DEPENDS "{src}"
   COMMENT "asm101 {srcpath.name} -> {objstem}.obj" VERBATIM)""")
@@ -136,14 +157,28 @@ add_custom_command(OUTPUT "{obj}"
 # Mirror the extensionless sources as *.hal for the PASS tools, then
 # initialise TEMPLIB/INCLIB.""")
     mirror_dirs = [*srcdirs] + ([Path(incl80).resolve()] if incl80 else [])
-    mirror_loop = ("for d in " + " ".join(f"'{d}'" for d in mirror_dirs)
-                   + "; do b=$(basename $d); mkdir -p '${GEN}/haltree/'$b; "
-                   "for f in $d/*; do [ -f $f ] && ln -sf $f "
-                   "'${GEN}/haltree/'$b/$(basename $f).hal; done; done; true")
+    # The mirror runs through con80build._hal_mirror (not a plain ln -sf
+    # loop) so any build-layer source rewrite (native-CARDTYPE comment
+    # remaps) is materialized as a transformed copy in the mirror.
+    mirror_loop = (
+        "'${PYTHON}' -c 'import sys; "
+        "from ap101Utils.con80build import _hal_mirror; "
+        "_hal_mirror(sys.argv[1:-1], sys.argv[-1])' "
+        + " ".join(f"'{d}'" for d in mirror_dirs)
+        + " '${GEN}/haltree'")
+    # Clearing TEMPLIB invalidates every HAL object: templates are inputs to
+    # every unit, and a stale object would short-circuit the retry pass (its
+    # template never re-enters the fresh TEMPLIB, starving dependent units).
+    hal_objs = " ".join(f'"${{OBJDIR}}/{p.stem}.obj"' for p in order
+                        if p in worklist_set)
     w(f"""\
 add_custom_command(OUTPUT "${{GEN}}/stamps/hal_setup"
-  COMMAND sh -c "{_sh(mirror_loop)}"
-  COMMAND ${{CMAKE_COMMAND}} -E rm -rf "${{GEN}}/TEMPLIB"
+  COMMAND ${{HALENV}} sh -c "{_sh(mirror_loop)}"
+  COMMAND ${{CMAKE_COMMAND}} -E rm -rf "${{GEN}}/TEMPLIB" "${{GEN}}/SDFLIB" \
+"${{GEN}}/tmpl_obj"
+  COMMAND ${{CMAKE_COMMAND}} -E make_directory "${{GEN}}/tmpl_obj" \
+"${{GEN}}/stamps"
+  COMMAND ${{CMAKE_COMMAND}} -E rm -f {hal_objs}
   COMMAND ${{HALENV}} "${{PYTHON}}" "${{PASS_REL32}}/prepareTEMPLIB" \
 --clear""")
     if incl80:
@@ -160,6 +195,7 @@ add_custom_command(OUTPUT "${{GEN}}/stamps/hal_setup"
         stamp = f"${{GEN}}/stamps/seed_{dn}"
         seed_cmd = (f"'${{HALSC}}' '--parm={halorder.get_parms('_seed')}' "
                     f"'--templib=${{GEN}}/TEMPLIB' '--inclib=${{GEN}}/INCLIB' "
+                    f"'--sdf=${{GEN}}/SDFLIB' "
                     f"'--workdir=${{GEN}}/_seed_{dn}.work' "
                     f"-o '${{GEN}}/_seed_{dn}.obj' '${{GEN}}/seeds/{dn}.hal' "
                     "|| true")
@@ -184,15 +220,20 @@ add_custom_command(OUTPUT "{stamp}"
         parm = halorder.get_parms(stem)
         work = f"${{GEN}}/{stem}.work"
         stamp = f"${{GEN}}/stamps/hal_{stem}"
-        pp_cmd = (f"'${{PYTHON}}' '${{PASS_REL32}}/preprocessHALSFC' "
-                  f"'--in={rel}' '--out={pp}' && [ -f '{pp}' ] "
+        # Units compile straight from the .hal mirror (materialized
+        # rewrites included) — no preprocessHALSFC (its include hoisting
+        # is inferred behavior the flight SDL never had; SDF includes
+        # satisfy templates flight-style).
+        pp_cmd = (f"cp '${{GEN}}/haltree/{rel}' '{pp}' "
                   f"|| cp '{_q(p.resolve())}' '{pp}'")
         halsc_cmd = (
             f"'${{HALSC}}' '--parm={parm}' '--templib=${{GEN}}/TEMPLIB' "
-            f"'--inclib=${{GEN}}/INCLIB' '--workdir={work}' -o '{obj}' '{pp}' "
+            f"'--inclib=${{GEN}}/INCLIB' '--sdf=${{GEN}}/SDFLIB' "
+            f"'--workdir={work}' -o '{obj}' '{pp}' "
             f"|| {{ grep -q ZO3 '{work}/opt.rpt' 2>/dev/null && "
             f"'${{HALSC}}' '--parm={parm},X1' '--templib=${{GEN}}/TEMPLIB' "
-            f"'--inclib=${{GEN}}/INCLIB' '--workdir={work}' -o '{obj}' '{pp}'; }} "
+            f"'--inclib=${{GEN}}/INCLIB' '--sdf=${{GEN}}/SDFLIB' "
+            f"'--workdir={work}' -o '{obj}' '{pp}'; }} "
             f"|| echo 'halsc FAIL {stem}'")
         w(f"""\
 add_custom_command(OUTPUT "{stamp}"
@@ -206,33 +247,55 @@ add_custom_command(OUTPUT "{stamp}"
         prev = stamp
 
     w("""\
-# Retry pass: a unit blocked on a producer that only compiled later in
-# pass 1 succeeds here (con80build's multi-pass, unrolled once).  Units
-# whose object already exists are skipped.""")
+# Retry passes: a unit blocked on a producer that only compiled later in
+# pass 1 succeeds here (con80build's multi-pass).  The generated script
+# re-attempts every unit still missing its object, in topological order,
+# round after round until a round makes no progress -- template cycle
+# clusters (e.g. the DM* displays) need several rounds to converge.""")
+    w('file(WRITE "${GEN}/hal_retry.sh" [=[#!/bin/sh')
+    w("""\
+# multi-pass halsc retry (generated; env: HALSC GEN OBJDIR)
+try() {
+  obj="$2/$1.obj"
+  [ -f "$obj" ] && return 0
+  pp="$GEN/pp/$1.hal"; work="$GEN/$1.work"
+  "$HALSC" "--parm=$3" "--templib=$GEN/TEMPLIB" "--inclib=$GEN/INCLIB" \\
+      "--sdf=$GEN/SDFLIB" "--workdir=$work" -o "$obj" "$pp" \\
+    || { grep -q ZO3 "$work/opt.rpt" 2>/dev/null && \\
+         "$HALSC" "--parm=$3,X1" "--templib=$GEN/TEMPLIB" \\
+         "--inclib=$GEN/INCLIB" "--sdf=$GEN/SDFLIB" \\
+         "--workdir=$work" -o "$obj" "$pp"; }
+  [ -f "$obj" ] && progress=1
+  return 0
+}
+units() {""")
     for p in order:
         stem = p.stem
-        dest = "${OBJDIR}" if p in worklist_set else "${GEN}/tmpl_obj"
-        obj = f"{dest}/{stem}.obj"
-        pp = f"${{GEN}}/pp/{stem}.hal"
-        parm = halorder.get_parms(stem)
-        work = f"${{GEN}}/{stem}.work"
-        stamp = f"${{GEN}}/stamps/hal2_{stem}"
-        retry_cmd = (
-            f"[ -f '{obj}' ] || "
-            f"'${{HALSC}}' '--parm={parm}' '--templib=${{GEN}}/TEMPLIB' "
-            f"'--inclib=${{GEN}}/INCLIB' '--workdir={work}' -o '{obj}' '{pp}' "
-            f"|| {{ grep -q ZO3 '{work}/opt.rpt' 2>/dev/null && "
-            f"'${{HALSC}}' '--parm={parm},X1' '--templib=${{GEN}}/TEMPLIB' "
-            f"'--inclib=${{GEN}}/INCLIB' '--workdir={work}' -o '{obj}' '{pp}'; }} "
-            f"|| echo 'halsc FAIL (pass 2) {stem}'")
-        w(f"""\
+        dest = "$OBJDIR" if p in worklist_set else "$GEN/tmpl_obj"
+        w(f'  "$1" {stem} "{dest}" {halorder.get_parms(stem)}')
+    w("""\
+}
+round=1
+while [ "$round" -le 10 ]; do
+  progress=0
+  units try
+  [ "$progress" -eq 0 ] && break
+  round=$((round+1))
+done
+fails=0
+miss() { [ -f "$2/$1.obj" ] || { echo "halsc FAIL (retry) $1"; fails=$((fails+1)); }; }
+units miss
+echo "hal retry: converged after $round round(s), $fails unit(s) missing"
+]=])""")
+    stamp = "${GEN}/stamps/hal_retry"
+    w(f"""\
 add_custom_command(OUTPUT "{stamp}"
-  COMMAND ${{HALENV}} sh -c "{_sh(retry_cmd)}"
+  COMMAND ${{HALENV}} "HALSC=${{HALSC}}" "GEN=${{GEN}}" "OBJDIR=${{OBJDIR}}" \
+sh "${{GEN}}/hal_retry.sh"
   COMMAND ${{CMAKE_COMMAND}} -E touch "{stamp}"
   DEPENDS "{prev}"
-  WORKING_DIRECTORY "${{GEN}}/haltree"
-  COMMENT "halsc retry {stem}" VERBATIM)""")
-        prev = stamp
+  COMMENT "halsc retry (multi-pass, to convergence)" VERBATIM)""")
+    prev = stamp
     w(f'add_custom_target(hal ALL DEPENDS "{prev}")')
     hal_end = prev
     w("")
@@ -240,13 +303,17 @@ add_custom_command(OUTPUT "{stamp}"
     # ---- displays -----------------------------------------------------------
     if displays:
         w("""\
-# ---- display decks (dfg -> preprocess -> halsc vs scratch TEMPLIB) ----
-# halsc's TEMPLATE parm appends each compiled unit's template, so
-# displays compile against a scratch copy; serialized for the same
+# ---- display decks (dfg -> preprocess -> halsc) ----
+# dfg types the deck from the shared SDFLIB, and the compile includes
+# from it too (--sdfi, input-only).  halsc's TEMPLATE parm appends each
+# compiled unit's template, so displays compile against a scratch
+# TEMPLIB copy (also the textual fallback); serialized for the same
 # reason.""")
+        disp_objs = " ".join(f'"${{OBJDIR}}/{p.stem}.obj"' for p in displays)
         w(f"""\
 add_custom_command(OUTPUT "${{GEN}}/stamps/disp_setup"
   COMMAND ${{CMAKE_COMMAND}} -E rm -rf "${{GEN}}/disp_TEMPLIB"
+  COMMAND ${{CMAKE_COMMAND}} -E rm -f {disp_objs}
   COMMAND ${{CMAKE_COMMAND}} -E copy_directory "${{GEN}}/TEMPLIB" \
 "${{GEN}}/disp_TEMPLIB"
   COMMAND ${{CMAKE_COMMAND}} -E touch "${{GEN}}/stamps/disp_setup"
@@ -261,13 +328,12 @@ add_custom_command(OUTPUT "${{GEN}}/stamps/disp_setup"
             stamp = f"${{GEN}}/stamps/disp_{name}"
             deck_opt = " --deck-root '${DECK_ROOT}'" if deck_root else ""
             cmd = (
-                f"'${{PYTHON}}' -m dfg {name} --templib '${{GEN}}/TEMPLIB'"
+                f"{dfg_cmd} {name} --sdflib '${{GEN}}/SDFLIB'"
                 f"{deck_opt} -o '{hal_out}' && "
-                f"{{ '${{PYTHON}}' '${{PASS_REL32}}/preprocessHALSFC' "
-                f"'--in={hal_out}' '--out={pp}' && [ -f '{pp}' ] "
-                f"|| cp '{hal_out}' '{pp}'; }} && "
+                f"cp '{hal_out}' '{pp}' && "
                 f"'${{HALSC}}' '--parm={halorder.get_parms(name)}' "
                 f"'--templib=${{GEN}}/disp_TEMPLIB' '--inclib=${{GEN}}/INCLIB' "
+                f"'--sdfi=${{GEN}}/SDFLIB' "
                 f"'--workdir={work}' -o '{obj}' '{pp}' "
                 f"|| echo 'display FAIL {name}'")
             w(f"""\
@@ -302,10 +368,12 @@ add_custom_command(OUTPUT "{stamp}"
         lnk_flags += f" -L '{_q(Path(lib).resolve())}'"
     if allow_undefined:
         lnk_flags += " --allow-undefined"
+    if nocall:
+        lnk_flags += " --nocall"
     link_cmd = (
         "while read o; do [ -f $o ] && echo $o; done "
         "< '${GEN}/link_objs.txt' > '${GEN}/link_objs.live.txt'; "
-        f"'${{PYTHON}}' -m lnk101 @'${{GEN}}/link_objs.live.txt' {lnk_flags}")
+        f"{lnk101_cmd} @'${{GEN}}/link_objs.live.txt' {lnk_flags}")
     w(f"""\
 add_custom_command(OUTPUT "${{OUT}}/{root}.fcm"
   COMMAND ${{PYENV}} sh -c "{_sh(link_cmd)}"
