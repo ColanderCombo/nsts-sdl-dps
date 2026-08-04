@@ -4,7 +4,7 @@
 #
 # Build an OI flight load (e.g. OI340600/SSW) end to end: resolve+classify the
 # CON80 worklist (--plan), assemble the ASM sources (--assemble), compile the
-# HAL sources in template order (--hal).  Outputs land under <build>/OI340600/.
+# HAL sources in template order (--hal).  Outputs land under the --out root.
 #
 # --python defaults to this venv's interpreter (so the asm101/lnk101 subprocesses
 # resolve), and --halsc is pre-pointed at the configured halsc wrapper below so

@@ -11,7 +11,19 @@
 #   -o FILE          Output object file (default: source.obj)
 #   -v               Verbose output
 #   -k, --keep       Keep intermediate files
-#   --parm=OPTS      Compiler options (e.g. SRN,LISTING2,LIST,NOTABLES,DECK,HALMAT)
+#   --parm=OPTS      Compiler options (e.g. SRN,LISTING2,LIST,NOTABLES,DECK,HALMAT).
+#                    If OPTS has no CARDTYPE=, the upstream HALSFC default is
+#                    supplied (CARDTYPE=UDVMWCXCYCZM; YMZC variant for --bfs).
+#   --sdf=DIR        Save the PASS3-generated SDF library members to DIR,
+#                    and give PASS1 the same directory as its SDF include
+#                    library (--sdfi): D INCLUDE TEMPLATE members whose SDF
+#                    exists there are included from the SDF (as flight did),
+#                    with textual template fallback for the rest.  PASS3
+#                    (SDF generation) runs whenever NOTABLES is absent from
+#                    --parm; it needs the symbol tables.
+#   --sdfi=DIR       SDF include library only (input, nothing written back):
+#                    like --sdf's read side without collecting this unit's
+#                    SDF.  Overrides the directory implied by --sdf.
 #   --bfs            Use BFS variant
 #   --templib=DIR    Template library path
 #   --inclib=DIR     Inclusion library path (D INCLUDE macros; default build/lib/INCLIB)
@@ -30,6 +42,7 @@ HALSFC_LIBDIR="@WRAPPER_LIBDIR@"
 OUTPUT="" VERBOSE=0 KEEP_TEMPS=0 PARM_STRING="" TARGET="PASS"
 TEMPLIB="" INCLIB="" ERRORLIB="${HALSFC_LIBDIR}/ERRORLIB"
 LISTING_FILE="" PASS1_RPT="" PASS2_RPT="" HALMAT_FILE="" LITFILE="" WORKDIR=""
+SDF_DIR="" SDFI_DIR=""
 SOURCE_FILE=""
 
 die() { echo "halsc: $*" >&2; exit 1; }
@@ -54,6 +67,8 @@ while [[ $# -gt 0 ]]; do
         --pass2-rpt=*)  PASS2_RPT="${1#--pass2-rpt=}"; shift ;;
         --halmat=*)     HALMAT_FILE="${1#--halmat=}"; shift ;;
         --litfile=*)    LITFILE="${1#--litfile=}"; shift ;;
+        --sdf=*)        SDF_DIR="${1#--sdf=}"; shift ;;
+        --sdfi=*)       SDFI_DIR="${1#--sdfi=}"; shift ;;
         --workdir=*)    WORKDIR="${1#--workdir=}"; shift ;;
         -h|--help)      sed -n '3,/^[^#]/{ s/^# \?//p }' "$0"; exit 0 ;;
         -*)             die "unknown option: $1" ;;
@@ -76,59 +91,149 @@ OUTPUT="$(abs "${OUTPUT:-${SOURCE_NAME}.obj}")"
 [[ -n "$PASS2_RPT" ]]    && PASS2_RPT="$(abs "$PASS2_RPT")"
 [[ -n "$HALMAT_FILE" ]]  && HALMAT_FILE="$(abs "$HALMAT_FILE")"
 [[ -n "$LITFILE" ]]      && LITFILE="$(abs "$LITFILE")"
+[[ -n "$SDF_DIR" ]]      && SDF_DIR="$(abs "$SDF_DIR")"
+[[ -n "$SDFI_DIR" ]]     && SDFI_DIR="$(abs "$SDFI_DIR")"
+
+# Library paths are used after cd'ing into the workdir, so resolve them now
+[[ -n "$TEMPLIB" ]]  && TEMPLIB="$(abs "$TEMPLIB")"
+[[ -n "$INCLIB" ]]   && INCLIB="$(abs "$INCLIB")"
+[[ -n "$ERRORLIB" ]] && ERRORLIB="$(abs "$ERRORLIB")"
 
 # Compiler executables
 if [[ "$TARGET" == "BFS" ]]; then
     PASS1="${HALSFC_BINDIR}/HALSFC-PASS1B"
     OPT="${HALSFC_BINDIR}/HALSFC-OPTB"
     PASS2="${HALSFC_BINDIR}/HALSFC-PASS2B"
+    PASS3="${HALSFC_BINDIR}/HALSFC-PASS3B"
     TEMPLIB_NAME="TEMPLIBB"
     INCLIB_NAME="INCLIBB"
     CARDS_ARG="--pdso=3,cards.bin,E"
+    DEFAULT_CARDTYPE="CARDTYPE=UDVMWCXCYMZC"
 else
     PASS1="${HALSFC_BINDIR}/HALSFC-PASS1"
     OPT="${HALSFC_BINDIR}/HALSFC-OPT"
     PASS2="${HALSFC_BINDIR}/HALSFC-PASS2"
+    PASS3="${HALSFC_BINDIR}/HALSFC-PASS3"
     TEMPLIB_NAME="TEMPLIB"
     INCLIB_NAME="INCLIB"
     CARDS_ARG="--ddo=3,cards.bin,E"
+    DEFAULT_CARDTYPE="CARDTYPE=UDVMWCXCYCZM"
 fi
 FLO="${HALSFC_BINDIR}/HALSFC-FLO"
 AUXP="${HALSFC_BINDIR}/HALSFC-AUXP"
 
+# Mirror the upstream HALSFC driver: if the caller's parms carry no CARDTYPE,
+# supply the full default alias set (U->D, V->M, W->C, X->C, Y/Z per target)
+# so sources using the virtualagc sample-file card conventions compile.
+if [[ "$PARM_STRING" != *CARDTYPE=* ]]; then
+    [[ -n "$PARM_STRING" ]] && PARM_STRING="${PARM_STRING},"
+    PARM_STRING="${PARM_STRING}${DEFAULT_CARDTYPE}"
+fi
+
+# PASS3 (SDF generation) needs the symbol tables, so — as in the upstream
+# driver — it runs exactly when NOTABLES is absent from the parms.
+RUN_PASS3=0
+[[ "$PARM_STRING" != *NOTABLES* ]] && RUN_PASS3=1
+
 for exe in "$PASS1" "$FLO" "$OPT" "$AUXP" "$PASS2"; do
     [[ -x "$exe" ]] || die "compiler component not found: $exe"
 done
+[[ $RUN_PASS3 -eq 1 && ! -x "$PASS3" ]] && die "compiler component not found: $PASS3"
 
 [[ -z "$TEMPLIB" ]] && TEMPLIB="${HALSFC_LIBDIR}/${TEMPLIB_NAME}"
 [[ -z "$INCLIB" ]] && INCLIB="${HALSFC_LIBDIR}/${INCLIB_NAME}"
-TEMPINC="${HALSFC_LIBDIR}/&&TEMPINC"
-mkdir -p "$INCLIB" "$TEMPINC"
+mkdir -p "$INCLIB"
 
 # Working directory
 if [[ -z "$WORKDIR" ]]; then
     WORKDIR="$(mktemp -d)"; CLEANUP=1
 else
+    WORKDIR="$(abs "$WORKDIR")"
     mkdir -p "$WORKDIR"; CLEANUP=0
 fi
+
+# JCL's &&TEMPINC is a job-temporary dataset: D DEFINE'd macro members must
+# not survive into another compile (or a re-compile), else PASS1 raises XD9
+# "ALREADY EXISTS" and PASS2 abandons the unit with B100.
+TEMPINC="${WORKDIR}/&&TEMPINC"
+rm -rf "$TEMPINC"
+mkdir -p "$TEMPINC"
 trap '[[ $CLEANUP -eq 1 && $KEEP_TEMPS -eq 0 ]] && rm -rf "$WORKDIR"; [[ $KEEP_TEMPS -eq 1 ]] && echo "halsc: intermediates in $WORKDIR" >&2' EXIT
+
+# The compiler reads the include library (file 8) with the E flag, i.e. as
+# 80-byte EBCDIC card images.  If the library holds ASCII text members
+# (e.g. the OI SDL INCL80 tree), convert them into an EBCDIC copy in the
+# workdir and point the compiler there.  Members that are already card
+# images (length a multiple of 80, no newlines) are copied through as-is.
+if [[ -d "$INCLIB" ]] && [[ -n "$(ls -A "$INCLIB" 2>/dev/null)" ]]; then
+    CONVERTED_INCLIB="${WORKDIR}/INCLIB.ebcdic"
+    mkdir -p "$CONVERTED_INCLIB"
+    n_converted=$(python3 - "$INCLIB" "$CONVERTED_INCLIB" <<'PYEOF'
+import codecs, pathlib, shutil, sys
+src, dst = map(pathlib.Path, sys.argv[1:3])
+converted = 0
+for m in sorted(src.iterdir()):
+    if not m.is_file():
+        continue
+    data = m.read_bytes()
+    out = dst / m.name
+    if data and len(data) % 80 == 0 and b'\n' not in data:
+        shutil.copyfile(m, out)         # already EBCDIC card images
+    else:
+        buf = bytearray()
+        for line in data.decode('ascii', 'replace').splitlines():
+            buf += codecs.encode((line + ' ' * 80)[:80], 'cp037')
+        out.write_bytes(bytes(buf))
+        converted += 1
+print(converted)
+PYEOF
+) || die "include library conversion failed for $INCLIB"
+    [[ "$n_converted" -gt 0 ]] && log "Converted $n_converted ASCII INCLIB member(s) to EBCDIC"
+    INCLIB="$CONVERTED_INCLIB"
+fi
+
 cd "$WORKDIR"
+
+# Did a compiler pass fail?  Mirrors HALSFC's passFailed().
+#
+# The passes follow the OS/360 convention the HAL/S-FC XPL is written to: the
+# outermost scope's RETURN value is SHL(MAX_SEVERITY,2) -- 0 clean, 4 warnings,
+# 8 errors, and up.  The compiler's own viability rule is MAX_SEVERITY < 2, so
+# below 8 is tolerable.  Treating 4 as fatal would discard a perfectly good
+# object module and skip PASS3, leaving no SDF for anything downstream to
+# include; OPT's ZO3 warning (SEVERITY_ONE -> PASS2 returns 4) is the common
+# case.  Everything that is not a severity is >= 8 by construction: XCOM-I's
+# runtime abends with 255, XPL's CALL EXIT gives 10, HALSFC reserves 240-254,
+# and a shell reports a fatal signal as 128+N.
+PASS_SEVERITY_FATAL=8
 
 # Run a compiler pass, capturing output to <name>.rpt
 run() {
     local name="$1"; shift
     local rpt="$(echo "$name" | tr '[:upper:]' '[:lower:]').rpt"
+    local rc
     log "[$name] Running..."
-    if ! "$@" > "$rpt" 2>&1; then
-        echo "halsc: $name failed compiling $SOURCE_NAME" >&2
+    "$@" > "$rpt" 2>&1
+    rc=$?
+    if (( rc >= PASS_SEVERITY_FATAL )); then
+        echo "halsc: $name failed compiling $SOURCE_NAME (rc=$rc)" >&2
         cat "$rpt" >&2
         exit 1
     fi
+    (( rc != 0 )) && log "[$name] rc=$rc (severity $(( rc / 4 )), tolerated)"
+    return 0
 }
 
 log "Compiling $SOURCE_FILE..."
 
-run PASS1 "$PASS1" \
+# The SDF include library: members present there are included as SDF
+# binaries (the flight-faithful path, INCSDF.xpl); missing members fall
+# back to textual templates.  --sdfi selects it explicitly (input-only);
+# with --sdf alone the shared collection directory doubles as the library.
+[[ -z "$SDFI_DIR" ]] && SDFI_DIR="$SDF_DIR"
+SDFI_ARG=()
+[[ -n "$SDFI_DIR" && -d "$SDFI_DIR" ]] && SDFI_ARG=("--sdfi=$SDFI_DIR")
+run PASS1 "$PASS1" "${SDFI_ARG[@]}" \
     --parm="$PARM_STRING" \
     --ddi=0,"$SOURCE_FILE" \
     --ddo=2,listing2.txt \
@@ -137,31 +242,59 @@ run PASS1 "$PASS1" \
     --pdsi=8,"$INCLIB",E --pdso=8,"$TEMPINC",E \
     --pdsi=9,"$TEMPINC",E \
     --commono=COMMON0.out \
-    --raf=B,7200,1,halmat.bin --raf=B,1560,2,litfile.bin \
+    --raf=O,7200,1,halmat.bin --raf=B,1560,2,litfile.bin \
     --raf=B,1600,3,icfile.bin --raf=B,3360,6,vmem.bin
 
 run FLO "$FLO" \
     --commoni=COMMON0.out --commono=COMMON1.out --pdsi=5,"$ERRORLIB" \
-    --raf=B,7200,1,halmat.bin --raf=B,1560,2,litfile.bin --raf=B,3360,6,vmem.bin
+    --raf=I,7200,1,halmat.bin --raf=I,1560,2,litfile.bin --raf=B,3360,6,vmem.bin
 
 run OPT "$OPT" \
     --commoni=COMMON1.out --commono=COMMON2.out --pdsi=5,"$ERRORLIB" \
-    --raf=B,7200,1,halmat.bin --raf=B,1560,2,litfile.bin \
-    --raf=B,7200,4,optmat.bin --raf=B,3360,6,vmem.bin
+    --raf=I,7200,1,halmat.bin --raf=B,1560,2,litfile.bin \
+    --raf=O,7200,4,optmat.bin --raf=B,3360,6,vmem.bin
 
 run AUXP "$AUXP" \
     --commoni=COMMON2.out --commono=COMMON3.out --pdsi=5,"$ERRORLIB" \
-    --raf=B,7200,1,auxmat.bin --raf=B,1560,2,litfile.bin \
-    --raf=B,7200,4,optmat.bin --raf=B,3360,6,vmem.bin
+    --raf=O,7200,1,auxmat.bin --raf=I,1560,2,litfile.bin \
+    --raf=I,7200,4,optmat.bin --raf=B,3360,6,vmem.bin
 
 run PASS2 "$PASS2" \
     "$CARDS_ARG" --ddo=4,deck.bin,E --pdsi=5,"$ERRORLIB" --ddo=7,extra.txt \
     --commoni=COMMON3.out --commono=COMMON4.out \
-    --raf=B,7200,1,auxmat.bin --raf=B,1560,2,litfile.bin \
-    --raf=B,1600,3,objcode.bin --raf=B,7200,4,optmat.bin --raf=B,3360,6,vmem.bin
+    --raf=I,7200,1,auxmat.bin --raf=B,1560,2,litfile.bin \
+    --raf=B,1600,3,objcode.bin --raf=I,7200,4,optmat.bin --raf=B,3360,6,vmem.bin
+
+# PASS3: SDF (Simulation Data File) generation.  Writes one <unit>.sdf
+# member into ./SDFLIB (the XCOM-I runtime's default --sdfo directory).
+# PASS3 exits nonzero merely for advisory messages (YA100 etc.), which the
+# severity rule above already tolerates.  We diverge from HALSFC in one way:
+# it aborts when PASS3 fails outright, whereas an SDF failure must not kill an
+# otherwise-complete compile here (the object already exists, and con80 needs
+# it) -- so report and continue.  A missing SDFLIB member is caught below.
+if [[ $RUN_PASS3 -eq 1 ]]; then
+    "$PASS3" \
+        --pdsi=5,"$ERRORLIB" \
+        --commoni=COMMON4.out --commono=COMMON5.out \
+        --raf=B,1560,2,litfile.bin --raf=B,3360,6,vmem.bin \
+        > pass3.rpt 2>&1
+    PASS3_RC=$?
+    if (( PASS3_RC >= PASS_SEVERITY_FATAL )); then
+        echo "halsc: warning: PASS3 (SDF generation) rc=$PASS3_RC for $SOURCE_NAME" >&2
+    fi
+fi
 
 # Copy outputs
 cp cards.bin "$OUTPUT"
+if [[ -n "$SDF_DIR" ]]; then
+    if [[ -d SDFLIB ]]; then
+        mkdir -p "$SDF_DIR"
+        cp SDFLIB/* "$SDF_DIR"/
+        log "SDF members saved to $SDF_DIR"
+    else
+        echo "halsc: warning: --sdf given but no SDFLIB was produced" >&2
+    fi
+fi
 [[ -n "$LISTING_FILE" && -f listing2.txt ]] && cp listing2.txt "$LISTING_FILE"
 [[ -n "$PASS1_RPT"    && -f pass1.rpt    ]] && cp pass1.rpt "$PASS1_RPT"
 [[ -n "$PASS2_RPT"    && -f pass2.rpt    ]] && cp pass2.rpt "$PASS2_RPT"

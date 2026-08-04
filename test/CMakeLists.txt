@@ -280,6 +280,22 @@ set_tests_properties(fpasm_test.exceptions PROPERTIES
 )
 
 # ---------------------------------------------------------------------
+# HAL/S-FC optimizer cross-block CSE regression (XCOM-I RECORD DYNAMIC
+# row-stride fix): compiles two tiny probes with X6 and gates on the
+# optimizer's "CSE'S FOUND" statistics.  See test_halsfc_cse.py.
+add_test(NAME halsfc_cse
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_halsfc_cse.py"
+        "${CMAKE_BINARY_DIR}/bin/halsc"
+        "${CMAKE_CURRENT_BINARY_DIR}/halsfc_cse"
+)
+set_tests_properties(halsfc_cse PROPERTIES
+    LABELS "halsfc"
+    TIMEOUT 120
+    FIXTURES_REQUIRED "ENV_READY"
+)
+
+# ---------------------------------------------------------------------
 # dfg (Display Format Generator) every-deck sweep: full generation of
 # every display deck in the out-of-tree OI301700 + OI340600 code trees
 # (194 decks), gating on zero errors, the pinned honest-refusal sets,
@@ -287,6 +303,46 @@ set_tests_properties(fpasm_test.exceptions PROPERTIES
 # oracle (see test_dfg_decks.py).  SKIPs cleanly when pfs/code is
 # absent.  Run with:  ctest -R dfg_decks   or   make test-dfg
 # ---------------------------------------------------------------------
+# AP-101 loadable-module (.lib) container: record roundtrip + an
+# assemble/link integration gating CESD, extents, layered store-protection
+# (PROT-card ranges over class defaults), and RLD retention.
+add_test(NAME libmodule
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_libmodule.py"
+)
+set_tests_properties(libmodule PROPERTIES
+    LABELS "lnk101"
+    TIMEOUT 120
+)
+
+# ---------------------------------------------------------------------
+# ap101Utils.halorder (con80build template closure inputs): D INCLUDE
+# TEMPLATE card forms (with/without a blank after the col-1 'D'),
+# display-deck INCLUDE= seeding, transitive seed closure, and the
+# CARDTYPE change-flag map ('T' -> main).
+add_test(NAME con80_halorder
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_halorder.py"
+)
+set_tests_properties(con80_halorder PROPERTIES
+    LABELS "ap101Utils"
+    TIMEOUT 60
+)
+
+# ap101Utils.con80build .hal-mirror build-layer rewrites (native-CARDTYPE
+# comment remaps) + the flight-faithful halorder CARDTYPE table for the
+# STRPDT R-card dispositions (the phase-15/16 DQ7/PM1 wave was the guessed
+# R->M default activating INCL80/STRPDT's unqualified NAME declares inside
+# the SM compools; flight compiles them as comments there).
+add_test(NAME con80_mirror
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_con80_mirror.py"
+)
+set_tests_properties(con80_mirror PROPERTIES
+    LABELS "ap101Utils"
+    TIMEOUT 60
+)
+
 add_test(NAME dfg_decks
     COMMAND "${SDL_VENV_PYTHON}"
         "${CMAKE_CURRENT_SOURCE_DIR}/test_dfg_decks.py"

@@ -68,6 +68,7 @@ _configure_wrapper(readlisting.sh.in readlisting)
 _configure_wrapper(ibmobjdump.sh.in ibmobjdump)
 _configure_wrapper(concard.sh.in   concard)
 _configure_wrapper(mmubuild.sh.in  mmubuild)
+_configure_wrapper(mmu2fcm.sh.in   mmu2fcm)
 _configure_wrapper(con80build.sh.in con80build)
 
 # Install-tree wrappers: reconfigure with install-prefix paths

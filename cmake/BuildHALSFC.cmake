@@ -80,7 +80,10 @@ function(build_halsfc_pass PASS_NAME SRC_FOLDER IDENTIFIER CONDITIONS OUTPUT_NAM
     # The generated C also depends on the XCOM-I translator itself: a change to
     # XCOM-I/*.py (e.g. a codegen fix) must force regeneration, otherwise the
     # build keeps emitting stale C and the fix silently never takes effect.
-    file(GLOB XCOM_I_SOURCES "${XCOM_I_DIR}/*.py")
+    # Likewise the runtime framework (runtimeC.c etc.), which XCOM-I copies
+    # into the build dir at regeneration.
+    file(GLOB XCOM_I_SOURCES "${XCOM_I_DIR}/*.py"
+                             "${XCOM_I_DIR}/*.c" "${XCOM_I_DIR}/*.h")
 
     set(XCOM_CMD "${Python3_EXECUTABLE}" "${XCOM_I_SCRIPT}")
     set(PASS_BINARY "HALSFC-${OUTPUT_NAME}${EXE_SUFFIX}")

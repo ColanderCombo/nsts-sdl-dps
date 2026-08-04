@@ -8,6 +8,16 @@ set(RUNASM_DIR "${HALSFC_SRC_DIR}/RUNASM")
 set(ZCONASM_DIR "${HALSFC_SRC_DIR}/ZCONASM")
 set(RUNMAC_DIR "${HALSFC_SRC_DIR}/RUNMAC")
 
+# The assembler's own sources: an object is stale when asm101 changes, not
+# only when its .asm source changes (CONFIGURE_DEPENDS re-globs on rebuild
+# so a new module is picked up without a manual reconfigure).  Without this
+# every runtime .obj silently kept its pre-change encoding across an asm101
+# fix -- the linked library only refreshed on a clean build.
+file(GLOB_RECURSE ASM101_SOURCES CONFIGURE_DEPENDS
+     "${CMAKE_SOURCE_DIR}/src/asm101/*.py"
+     "${CMAKE_SOURCE_DIR}/src/asm101/*.json"
+     "${CMAKE_SOURCE_DIR}/src/asm101/*.lark")
+
 # Assemble a single .asm file
 function(assemble_file ASM_FILE OUTPUT_DIR INSTALL_DIR STAMP_VAR)
     get_filename_component(ASM_NAME "${ASM_FILE}" NAME_WE)
@@ -35,7 +45,7 @@ function(assemble_file ASM_FILE OUTPUT_DIR INSTALL_DIR STAMP_VAR)
                 --tolerable=4
                 "${ASM_FILE}"
         COMMAND ${CMAKE_COMMAND} -E touch "${STAMP_FILE}"
-        DEPENDS "${ASM_FILE}"
+        DEPENDS "${ASM_FILE}" ${ASM101_SOURCES}
         COMMENT "[asm101] Assembling ${ASM_BASENAME}..."
         VERBATIM
     )
