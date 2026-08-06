@@ -221,10 +221,12 @@ def _print_diffs(diff_positions, max_hw_diffs, pad, addr_to_sym, addr_to_rld):
 
 def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
             equiv=None, diff_if_shifted=True, expected_sizes=None,
-            no_data=None):
+            no_data=None, exceptions=None):
     failures = 0
     checked = 0
     no_data_total = 0
+    patched_total = 0
+    stale_exceptions = []
 
     # Compute column width for aligned '@'
     name_width = max((len(name) for name, _, _ in sections), default=0)
@@ -255,6 +257,7 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
 
         diff_positions = []
         no_data_here = 0
+        patched_here = 0
         if a != b:
             for hi in range(size.hw):
                 bo = hi * 2
@@ -270,10 +273,30 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
                     if no_data and hw_b in no_data:
                         no_data_here += 1
                         continue
+                    # Known to have been changed after the build.  Honoured
+                    # only where the reference image actually holds the value
+                    # the exceptions file claims: otherwise the file is stale
+                    # or wrong for this image, and suppressing a real
+                    # difference on the strength of it would be worse than the
+                    # noise it removes.
+                    if exceptions:
+                        here = addr + Addr(hi * 2)
+                        expected = exceptions.get(here.hw)
+                        if expected is not None:
+                            if expected[0] == hw_b:
+                                patched_here += 1
+                                continue
+                            stale_exceptions.append((here.hw, expected[0], hw_b))
                     diff_positions.append((addr + Addr(hi * 2), hw_a, hw_b))
         no_data_total += no_data_here
+        patched_total += patched_here
 
-        suffix = f" [{no_data_here} no reference data]" if no_data_here else ""
+        notes = []
+        if patched_here:
+            notes.append(f"{patched_here} patched after build")
+        if no_data_here:
+            notes.append(f"{no_data_here} no reference data")
+        suffix = f" [{', '.join(notes)}]" if notes else ""
         if not diff_positions:
             print(f"  OK:   {padded} @ {addr.x} {size_str}{suffix}")
         else:
@@ -343,10 +366,53 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
 
             failures += 1
 
+    if patched_total:
+        print(f"\n{patched_total} halfword(s) are listed as changed after the"
+              f" build and were not counted as differing.")
+    if stale_exceptions:
+        print(f"WARNING: {len(stale_exceptions)} exception(s) do not match the"
+              f" reference image and were ignored; the file may be stale:")
+        for address, want, got in stale_exceptions[:8]:
+            print(f"    {address:05X}: expected {want:04X}, image has {got:04X}")
     if no_data_total:
         print(f"\n{no_data_total} halfword(s) had no reference data and were"
               f" neither matched nor counted as differing.")
     return checked, failures
+
+
+def load_exceptions(path):
+    """Read a list of locations known to have been changed after the build.
+
+    Some locations in a memory image do not hold what the build put there:
+    I-LOADs and patches are applied afterwards, so no correct compilation or
+    link reproduces them.  Reporting them as differences buries the real ones
+    under a class that has to be explained away every time the report is read.
+
+    One location per line, whitespace separated, '#' beginning a comment:
+
+        # exceptions-SSW.txt
+        0304A 0005 CDUV_NSP_VEHICLE_ILOAD
+        38266 001D MISSION_ID
+
+    the fields being a halfword address, the value the reference image is
+    expected to hold there, and an optional name.  Both numbers are hex.
+    Returns {address: (value, name)}.
+    """
+    exceptions = {}
+    with open(path) as f:
+        for lineno, line in enumerate(f, 1):
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            fields = line.split()
+            if len(fields) < 2:
+                raise ValueError(f"{path}:{lineno}: expected 'address value [name]'")
+            try:
+                address, value = int(fields[0], 16), int(fields[1], 16)
+            except ValueError:
+                raise ValueError(f"{path}:{lineno}: address and value must be hex")
+            exceptions[address] = (value, fields[2] if len(fields) > 2 else "")
+    return exceptions
 
 
 def collect_diffs(sections, image_a, image_b, equiv=None):
@@ -508,6 +574,18 @@ def main(
             help="Group sections by base program name instead of sorting by address",
         ),
     ] = False,
+    exceptions: Annotated[
+        str,
+        typer.Option(
+            "--exceptions",
+            help="File listing locations known to have been changed after the "
+                 "build (I-LOADs, patches), as 'address value [name]' in hex, "
+                 "one per line. Such halfwords are reported separately rather "
+                 "than as differences, but only where the second image really "
+                 "holds the listed value; a mismatch is warned about and the "
+                 "entry ignored.",
+        ),
+    ] = "",
     no_data: Annotated[
         str,
         typer.Option(
@@ -652,11 +730,15 @@ def main(
 
     no_data_set = frozenset(int(v, 16) for v in no_data.split(",")
                             if v.strip()) or None
+    exceptions_map = load_exceptions(exceptions) if exceptions else None
+    if exceptions_map:
+        print(f"Loaded {len(exceptions_map)} exception(s) from {exceptions}")
 
     checked, failures = compare(
         sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         equiv=equiv_set, diff_if_shifted=diff_if_shifted,
         expected_sizes=expected_sizes, no_data=no_data_set,
+        exceptions=exceptions_map,
     )
 
     # Collect all diffs (no elision) when dumping or when repro needs them
