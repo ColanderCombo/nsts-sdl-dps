@@ -220,9 +220,14 @@ def _print_diffs(diff_positions, max_hw_diffs, pad, addr_to_sym, addr_to_rld):
 
 
 def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
-            equiv=None, diff_if_shifted=True, expected_sizes=None):
+            equiv=None, diff_if_shifted=True, expected_sizes=None,
+            no_data=None, exceptions=None):
     failures = 0
     checked = 0
+    no_data_total = 0
+    patched_total = 0
+    ignored_total = 0
+    stale_exceptions = []
 
     # Compute column width for aligned '@'
     name_width = max((len(name) for name, _, _ in sections), default=0)
@@ -252,6 +257,9 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         checked += 1
 
         diff_positions = []
+        no_data_here = 0
+        patched_here = 0
+        ignored_here = 0
         if a != b:
             for hi in range(size.hw):
                 bo = hi * 2
@@ -260,13 +268,48 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
                 if hw_a != hw_b:
                     if equiv and hw_a in equiv and hw_b in equiv:
                         continue
+                    # A reference halfword the source image never actually
+                    # stated a value for.  Not a match and not a difference:
+                    # there is nothing to compare against.  Counted and
+                    # reported separately so it cannot be mistaken for either.
+                    if no_data and hw_b in no_data:
+                        no_data_here += 1
+                        continue
+                    # Known to have been changed after the build.  Honoured
+                    # only where the reference image actually holds the value
+                    # the exceptions file claims: otherwise the file is stale
+                    # or wrong for this image, and suppressing a real
+                    # difference on the strength of it would be worse than the
+                    # noise it removes.
+                    if exceptions:
+                        here = addr + Addr(hi * 2)
+                        expected = exceptions.get(here.hw)
+                        if expected is not None:
+                            if expected[0] is None:
+                                ignored_here += 1
+                                continue
+                            if expected[0] == hw_b:
+                                patched_here += 1
+                                continue
+                            stale_exceptions.append((here.hw, expected[0], hw_b))
                     diff_positions.append((addr + Addr(hi * 2), hw_a, hw_b))
+        no_data_total += no_data_here
+        patched_total += patched_here
+        ignored_total += ignored_here
 
+        notes = []
+        if patched_here:
+            notes.append(f"{patched_here} patched after build")
+        if ignored_here:
+            notes.append(f"{ignored_here} ignored")
+        if no_data_here:
+            notes.append(f"{no_data_here} no reference data")
+        suffix = f" [{', '.join(notes)}]" if notes else ""
         if not diff_positions:
-            print(f"  OK:   {padded} @ {addr.x} {size_str}")
+            print(f"  OK:   {padded} @ {addr.x} {size_str}{suffix}")
         else:
             print(
-                f"  FAIL: {padded} @ {addr.x} {size_str}"
+                f"  FAIL: {padded} @ {addr.x} {size_str}{suffix}"
                 f" — {len(diff_positions)} halfwords differ"
             )
 
@@ -315,6 +358,13 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
                             if va != vb:
                                 if equiv and va in equiv and vb in equiv:
                                     continue
+                                if no_data and vb in no_data:
+                                    continue
+                                if exceptions:
+                                    e = exceptions.get((addr + Addr(hi * 2)).hw)
+                                    if e is not None and (e[0] is None
+                                                          or e[0] == vb):
+                                        continue
                                 shifted_diffs.append(
                                     (addr + Addr(hi * 2), va, vb))
                     if shifted_diffs:
@@ -329,7 +379,70 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
 
             failures += 1
 
+    if patched_total:
+        print(f"\n{patched_total} halfword(s) are listed as changed after the"
+              f" build and were not counted as differing.")
+    if ignored_total:
+        print(f"{ignored_total} halfword(s) are listed as to be ignored, with no"
+              f" claim about their contents.")
+    if stale_exceptions:
+        print(f"WARNING: {len(stale_exceptions)} exception(s) do not match the"
+              f" reference image and were ignored; the file may be stale:")
+        for address, want, got in stale_exceptions[:8]:
+            print(f"    {address:05X}: expected {want:04X}, image has {got:04X}")
+    if no_data_total:
+        print(f"\n{no_data_total} halfword(s) had no reference data and were"
+              f" neither matched nor counted as differing.")
     return checked, failures
+
+
+def load_exceptions(path):
+    """Read a list of locations known to have been changed after the build.
+
+    Some locations in a memory image do not hold what the build put there:
+    I-LOADs and patches are applied afterwards, so no correct compilation or
+    link reproduces them.  Reporting them as differences buries the real ones
+    under a class that has to be explained away every time the report is read.
+
+    One location per line, whitespace separated, '#' beginning a comment:
+
+        # exceptions-SSW.txt
+        0304A 0005 CDUV_NSP_VEHICLE_ILOAD
+        38266 001D MISSION_ID
+
+    the fields being a halfword address, the value the reference image is
+    expected to hold there, and an optional name.  The address is hex; so is
+    the value, EXCEPT for the special value -1.
+
+    -1 means "ignore this address, no claim about what it holds".  The two
+    cases are different in kind and it is worth keeping them apart.  A value
+    says: this location was changed after the build and here is what it was
+    changed to -- checkable, and checked.  -1 says only: a difference here is
+    expected for a reason recorded elsewhere, and nothing is being asserted
+    about the contents.  Without -1 the only way to express the second case
+    would be to write the reference image's own value into the file, which
+    would "verify" trivially and quietly turn a checkable mechanism into one
+    that can absorb any difference at all.
+
+    Returns {address: (value, name)}, value None for -1.
+    """
+    exceptions = {}
+    with open(path) as f:
+        for lineno, line in enumerate(f, 1):
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            fields = line.split()
+            if len(fields) < 2:
+                raise ValueError(f"{path}:{lineno}: expected 'address value [name]'")
+            try:
+                address = int(fields[0], 16)
+                value = None if fields[1] == "-1" else int(fields[1], 16)
+            except ValueError:
+                raise ValueError(f"{path}:{lineno}: address and value must be "
+                                 f"hex, or the value -1")
+            exceptions[address] = (value, fields[2] if len(fields) > 2 else "")
+    return exceptions
 
 
 def collect_diffs(sections, image_a, image_b, equiv=None):
@@ -491,6 +604,33 @@ def main(
             help="Group sections by base program name instead of sorting by address",
         ),
     ] = False,
+    exceptions: Annotated[
+        str,
+        typer.Option(
+            "--exceptions",
+            help="File listing locations that are not expected to match, as "
+                 "'address value [name]' in hex, one per line. A value says "
+                 "the location was changed after the build (an I-LOAD or "
+                 "patch) and gives what it holds; it is honoured only where "
+                 "the second image really holds that value, and a mismatch is "
+                 "warned about and ignored. A value of -1 instead means "
+                 "'ignore this address, no claim about its contents', for a "
+                 "difference expected on grounds recorded elsewhere. Both are "
+                 "reported separately from differences, and from each other.",
+        ),
+    ] = "",
+    no_data: Annotated[
+        str,
+        typer.Option(
+            "--no-data",
+            help="Comma-separated hex halfwords that mean the SECOND image "
+                 "never stated a value here (e.g. C9FB,C6C6, which "
+                 "unlinkMAFGEN2 synthesises from the address for any halfword "
+                 "the MAFGEN listing did not report). Such halfwords are "
+                 "reported separately, neither matched nor counted as "
+                 "differing. Empty (the default) keeps them as differences.",
+        ),
+    ] = "",
     equiv: Annotated[
         str,
         typer.Option(
@@ -621,10 +761,17 @@ def main(
             f"({len(image_a) // 2} vs {len(image_b) // 2} halfwords)"
         )
 
+    no_data_set = frozenset(int(v, 16) for v in no_data.split(",")
+                            if v.strip()) or None
+    exceptions_map = load_exceptions(exceptions) if exceptions else None
+    if exceptions_map:
+        print(f"Loaded {len(exceptions_map)} exception(s) from {exceptions}")
+
     checked, failures = compare(
         sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         equiv=equiv_set, diff_if_shifted=diff_if_shifted,
-        expected_sizes=expected_sizes,
+        expected_sizes=expected_sizes, no_data=no_data_set,
+        exceptions=exceptions_map,
     )
 
     # Collect all diffs (no elision) when dumping or when repro needs them
