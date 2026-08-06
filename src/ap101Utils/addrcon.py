@@ -233,7 +233,8 @@ class ZCon:
 
     # --- Apply relocations ---
 
-    def apply(self, target: Addr, flag_type: int) -> None:
+    def apply(self, target: Addr, flag_type: int,
+              flags: int | None = None) -> None:
         """Apply a ZCON relocation: update HW0 address and/or HW1 sector bits.
 
         flag_type is the RLD flag byte with sign bit masked (flags & 0x7F):
@@ -241,11 +242,19 @@ class ZCon:
           0x50:       data address — write HW0, patch DSR
           0x20:       BSR-only     — patch BSR in HW1 only
           0x40:       DSR-only     — patch DSR in HW1 only
+
+        flags is the unmasked flag byte: bit 7 is the sign (V), meaning HW0
+        holds the absolute value of a negative displacement, to be subtracted
+        rather than added.  Building the AddrCon from flag_type alone dropped
+        the bit, leaving every negative-displacement ZCON 2*displacement too
+        high.  Defaults to flag_type (unsigned) for callers that omit it.
         """
         sector = target.sector
+        if flags is None:
+            flags = flag_type
 
         if flag_type in (RLD_ZCON_CODE, RLD_ZCON_ADDR, RLD_ZCON_DATA):
-            con = AddrCon(flag_type)
+            con = AddrCon(flags)
             self.hw0 = con.apply(self.hw0, target)
 
         if flag_type == RLD_BSR_ONLY:
