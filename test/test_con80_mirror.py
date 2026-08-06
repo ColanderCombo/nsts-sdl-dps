@@ -26,7 +26,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "src"))
 
 from ap101Utils import halorder
-from ap101Utils.con80build import (_hal_mirror, _mirror_rewrite,
+from con80.con80build import (_hal_mirror, _mirror_rewrite,
                                    _native_comment_chars,
                                    comment_native_cards)
 

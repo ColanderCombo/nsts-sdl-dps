@@ -329,7 +329,7 @@ set_tests_properties(con80_halorder PROPERTIES
     TIMEOUT 60
 )
 
-# ap101Utils.con80build .hal-mirror build-layer rewrites (native-CARDTYPE
+# con80.con80build .hal-mirror build-layer rewrites (native-CARDTYPE
 # comment remaps) + the flight-faithful halorder CARDTYPE table for the
 # STRPDT R-card dispositions (the phase-15/16 DQ7/PM1 wave was the guessed
 # R->M default activating INCL80/STRPDT's unqualified NAME declares inside

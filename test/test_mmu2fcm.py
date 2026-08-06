@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for ap101Utils.mmu2fcm: the GPC load emulation that
+"""Regression tests for tools.mmu2fcm: the GPC load emulation that
 composes phase .lib modules into a memory-configuration .fcm.
 
 Synthetic two-phase fixture exercising: IPL background fill, extent
@@ -18,7 +18,7 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT / 'src'))
 
 from ap101Utils.libModule import Extent, LibModule           # noqa: E402
-from ap101Utils.mmu2fcm import (FILL_SPLIT_HW, MEM_HW, compose,     # noqa: E402
+from tools.mmu2fcm import (FILL_SPLIT_HW, MEM_HW, compose,     # noqa: E402
                                 reportOverlays, unionSym, main)
 from ap101Utils import mmbstamp                              # noqa: E402
 

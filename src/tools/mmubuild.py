@@ -30,7 +30,7 @@ from typing import Annotated, Optional
 os.environ["TYPER_USE_RICH"] = "0"  # disable fancy formatting
 import typer
 
-from . import cards
+from ap101Utils import cards
 
 # card column geometry (0-based slices); same layout as concard cards
 _LABEL = cards.LABEL      # cols 1-8   label / CSECT

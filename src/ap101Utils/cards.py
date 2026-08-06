@@ -16,7 +16,7 @@
 #     asm101.statement/.cardreader  assembler cards (text cols 1-71, col-72
 #                                   flag disambiguated by next-card lookahead)
 #     ap101Utils.concard            CON80 linkage control cards (label 1-8)
-#     ap101Utils.mmubuild           MMU load-build cards (label 1-8, stitched)
+#     tools.mmubuild                MMU load-build cards (label 1-8, stitched)
 #     dfg.deck                      display decks (free-form comma directives)
 #     dfg.compool                   compiler templates (`ebcdic_text` records)
 # 

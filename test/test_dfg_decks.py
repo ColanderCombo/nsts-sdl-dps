@@ -139,7 +139,7 @@ def amt_regression():
         CDAP02-style HAL member stays 'HAL';
       * template_names (the hal() closure seeds): DFB/DMMD + OPGM + SPGM."""
     from dfg import amt
-    from ap101Utils.con80build import classify
+    from con80.con80build import classify
 
     fixture = os.path.join(REPO, "test", "data", "amt")
     if not os.path.isdir(fixture):

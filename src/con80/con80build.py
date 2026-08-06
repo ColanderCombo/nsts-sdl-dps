@@ -30,7 +30,7 @@ from typing import Annotated, Optional
 os.environ["TYPER_USE_RICH"] = "0"  # disable fancy formatting
 import typer
 
-from . import cards, concard, halorder
+from ap101Utils import cards, concard, halorder
 
 
 def _short(tok: str) -> str:
@@ -405,8 +405,8 @@ def autocall_scan(objs, external_defs: set[str],
     return (ordered unresolved-ER names, defined names).  Generated-csect
     name classes (@stacks, #Z zcon stubs, #T checksums, patch/fill areas)
     never resolve from source and are skipped."""
-    from . import objModule
-    from .objModule import EsdType
+    from ap101Utils import objModule
+    from ap101Utils.objModule import EsdType
     defined = set(external_defs)
     order: list[str] = []
     for p in sorted(objs):
@@ -1219,7 +1219,7 @@ def main(
         for i, pid in enumerate(ids, 1):
             print(f"===== phase {pid} ({i}/{len(ids)}) =====", flush=True)
             r = subprocess.run(
-                [python, "-m", "ap101Utils.con80build", "--phase", str(pid),
+                [python, "-m", "con80.con80build", "--phase", str(pid),
                  "--out", out, *steps, *fwd])
             if r.returncode != 0:
                 failed.append(pid)
@@ -1229,7 +1229,7 @@ def main(
                     raise typer.Exit(1)
         print(f"===== cross-phase resolution =====", flush=True)
         r = subprocess.run(
-            [python, "-m", "ap101Utils.con80build", "--resolve-phases",
+            [python, "-m", "con80.con80build", "--resolve-phases",
              "--out", out, "--con80", str(deckdir),
              *(["--Wunresolved-phases"] if warn_unresolved_phases else [])])
         if failed:

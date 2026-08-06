@@ -7,4 +7,4 @@
 # in IPL phase order).  Default composes SSW (= IPL PH=(10,2,13,3)) from
 # build/mmu into build/mmu/SSW; score it with tools/fidelity/cmp_bytes.py.
 
-exec "@SDL_VENV_PYTHON@" -m ap101Utils.mmu2fcm "$@"
+exec "@SDL_VENV_PYTHON@" -m tools.mmu2fcm "$@"

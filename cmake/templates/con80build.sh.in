@@ -12,4 +12,4 @@
 # options, so anything the caller passes after them wins.  The HAL stage
 # also needs --pass-rel32 (the PASS.REL32V0 toolchain dir); pass it when not
 # running from the source tree.
-exec "@SDL_VENV_PYTHON@" -m ap101Utils.con80build --halsc "@WRAPPER_BINDIR@/halsc" "$@"
+exec "@SDL_VENV_PYTHON@" -m con80.con80build --halsc "@WRAPPER_BINDIR@/halsc" "$@"

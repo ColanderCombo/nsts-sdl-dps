@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Tests for ap101Utils.mmubuild: MMU (mass-memory) load-build card parser
+# Tests for tools.mmubuild: MMU (mass-memory) load-build card parser
 # and expansion tree.  Unit tests use synthetic cards; the integration test
 # reconciles against the real OI340600 CON80 deck and skips if it is absent.
 #
@@ -15,7 +15,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "src"))
 
-from ap101Utils.mmubuild import (
+from tools.mmubuild import (
     MMUDeck, build, parse_statements, parse_member_list, _split_params,
 )
 
