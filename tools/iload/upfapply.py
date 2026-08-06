@@ -94,7 +94,10 @@ def main():
 
     a.out.mkdir(parents=True, exist_ok=True)
     (a.out / f"{a.name}.fcm").write_bytes(image)
-    shutil.copy(a.fcm_dir / f"{a.name}.sym.json", a.out / f"{a.name}.sym.json")
+    symSrc = a.fcm_dir / f"{a.name}.sym.json"
+    symDst = a.out / f"{a.name}.sym.json"
+    if not (symDst.exists() and symSrc.samefile(symDst)):
+        shutil.copy(symSrc, symDst)      # chained decks: --fcm-dir == --out
     print(f"applied {stats['appliedRuns']} runs / {stats['appliedHw']} hw; "
           f"skipped (other phases) {stats['skippedRuns']} runs / "
           f"{stats['skippedHw']} hw")
