@@ -1834,14 +1834,21 @@ class Linker:
         self._rebuildSymbolTable()
         return True
 
-    def patchStackPDEs(self):
-        """Bind each generated @-stack into its program's PDE (#E<prog>).
+    # '@' + this + characteristic name is a stack CSECT's name: @0 for a
+    # PROGRAM, @1.. for its TASKs (PROGNAME.xpl's NUMSEQ, continued by
+    # ALPHSEQ past ten).  The sequence char selects the 6-halfword PDE slot.
+    STACK_SEQUENCE = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
-        The compiler emits the 6-halfword PDE with the stack slot empty and
-        NO relocation for it (both SDL and NOSDL): words 4-5 = 0000 000n.
-        In the real load module the linkage editor fills word 4 with the
-        stack CSECT's halfword address and ORs X'8000' (PREALLOCATED) into
-        word 5.
+    def patchStackPDEs(self):
+        """Bind each @-stack into its unit's PDE (#E<characteristic>) slot.
+
+        The compiler emits each 6-halfword PDE slot with the stack address
+        empty and NO relocation for it (both SDL and NOSDL): words 4-5 =
+        0000 000n.  In the real load module the linkage editor fills slot
+        k's word 4 with stack CSECT '@' + STACK_SEQUENCE[k] + name's
+        halfword address and ORs X'8000' (PREALLOCATED) into word 5 —
+        slot k lives at halfword 6*k of the PDE (TERMINAT.xpl's
+        LOCCTR(PCEBASE) = (TASK#+1) * 6).
 
         Runs AFTER applyRelocations and writes the image directly: the
         current CON80 layout leaves some zero-filled sections overlapping
@@ -1852,52 +1859,60 @@ class Linker:
         if self.image is None:
             return
         patched = 0
-        # Every known @-stack symbol binds its program's PDE — whether the
-        # stack CSECT was generated in this link or its address came from an
-        # --external-syms table (single-module relink must match the full
-        # link byte-for-byte).
-        for name, gsym in list(self.globalSymbols.items()):
-            if not (len(name) > 2 and name[0] == '@'):
-                continue
-            stackAddr = gsym.address
-            if stackAddr is None and gsym.section is not None \
-                    and gsym.section.baseAddress is not None:
-                stackAddr = gsym.section.baseAddress
-            if stackAddr is None:
-                continue
-            pdeName = '#E' + name[2:]
-            pde = self.globalSymbols.get(pdeName)
-            if pde is None or pde.section is None \
+
+        def stackHw(name):
+            # A stack linked in (NOSDL, or generateStackSections) is a
+            # global symbol; under SDL a single-module relink may know it
+            # only from the --external-syms csect table (nothing references
+            # a stack, so loadExternalSyms never pulls it in).
+            gsym = self.globalSymbols.get(name)
+            if gsym is not None:
+                addr = gsym.address
+                if addr is None and gsym.section is not None:
+                    addr = gsym.section.baseAddress
+                if addr is not None:
+                    return Addr(int(addr)).sector_encode()
+            entry = self.csectTable.get(name)
+            if isinstance(entry, dict) and 'start' in entry:
+                return Addr.from_hw(int(entry['start'])).sector_encode()
+            return None
+
+        for pdeName, pde in list(self.globalSymbols.items()):
+            if not pdeName.startswith('#E') or pde.section is None \
                     or pde.section.type != 'SD' \
                     or pde.section.baseAddress is None \
-                    or (pde.module is not None and pde.module.external) \
-                    or len(pde.section.data) < 12:
-                continue
-            hw = int(stackAddr) // 2
-            if hw > 0xFFFF:
-                log.warning(f"PDE {pdeName}: stack {name} at "
-                            f"0x{hw:X} hw exceeds 16 bits; not patched")
+                    or (pde.module is not None and pde.module.external):
                 continue
             data = pde.section.data
-            data[8:10] = hw.to_bytes(2, 'big')
-            data[10] |= 0x80
-            off = int(pde.section.baseAddress - self.imageBase)
-            if 0 <= off and off + 12 <= len(self.image):
-                self.image[off + 8:off + 12] = data[8:12]
-                patched += 1
-                # Record the bind as an applied relocation (2-byte YCON-like,
-                # LL=2 -> flags 0x04) so sym.json consumers (fidelity
-                # comparators, debuggers) see PDE word 4 as a relocated site
-                # rather than opaque content.
-                self.appliedRelocations.append({
-                    "address": int(pde.section.baseAddress) // 2 + 4,
-                    "target": hw,
-                    "targetName": name,
-                    "flags": 0x04,
-                })
+            characteristic = pdeName[2:]
+            for k in range(len(data) // 12):
+                if k >= len(self.STACK_SEQUENCE):
+                    break
+                stackName = '@' + self.STACK_SEQUENCE[k] + characteristic
+                hw = stackHw(stackName)
+                if hw is None:
+                    continue
+                at = 12 * k
+                data[at + 8:at + 10] = hw.to_bytes(2, 'big')
+                data[at + 10] |= 0x80
+                off = int(pde.section.baseAddress - self.imageBase) + at
+                if 0 <= off and off + 12 <= len(self.image):
+                    self.image[off + 8:off + 12] = data[at + 8:at + 12]
+                    patched += 1
+                    # Record the bind as an applied relocation (2-byte
+                    # YCON-like, LL=2 -> flags 0x04) so sym.json consumers
+                    # (fidelity comparators, debuggers) see PDE word 4 as a
+                    # relocated site rather than opaque content.
+                    self.appliedRelocations.append({
+                        "address": int(pde.section.baseAddress) // 2
+                                   + 6 * k + 4,
+                        "target": hw,
+                        "targetName": stackName,
+                        "flags": 0x04,
+                    })
         if patched:
-            log.info(f"Patched {patched} PDE(s) with preallocated stack "
-                     f"addresses")
+            log.info(f"Patched {patched} PDE slot(s) with preallocated "
+                     f"stack addresses")
 
     def processDefinedSymbols(self):
         # handle -D symbols
