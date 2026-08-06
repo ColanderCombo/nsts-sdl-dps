@@ -1265,7 +1265,10 @@ class Linker:
                     # ZCON relocation: read both halfwords, apply, write back
                     if imageOffset + 3 < len(self.image):
                         zcon = ZCon.from_image(self.image, imageOffset)
-                        zcon.apply(targetAddr, flagType)
+                        # Unmasked flags too: bit 7 is the sign, without
+                        # which a negative displacement is added, not
+                        # subtracted.
+                        zcon.apply(targetAddr, flagType, reloc.flags)
                         zcon.write_to_image(self.image, imageOffset)
                         log.debug(f"  -> {zcon}")
                 else:

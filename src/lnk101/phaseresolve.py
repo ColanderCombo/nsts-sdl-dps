@@ -127,7 +127,7 @@ def _patchSite(extent, offset, flags, target):
             # (the real LE's behavior, issue #22); clear the marker so the
             # sector-encoding apply does not double-count it.
             zcon.hw0 &= 0x7FFF
-        zcon.apply(target, flagType)
+        zcon.apply(target, flagType, flags)
         zcon.write_to_image(buf, offset)
     else:
         con = AddrCon(flags, length)
