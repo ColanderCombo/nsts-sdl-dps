@@ -76,6 +76,33 @@ def _tool(module: str, python: str) -> list[str]:
     return [python, "-m", module]
 
 
+# lnk101 -L default (also validated up front by _require_dirs).
+_DEFAULT_LINKLIBS = (Path("build") / "lib" / "runtime" / "RUN",
+                     Path("build") / "lib" / "runtime" / "ZCON")
+
+
+def _require_dirs(entries) -> None:
+    """Fail fast when required directories are absent, BEFORE any toolchain
+    call: report EVERY missing one so a single fix-up round suffices.  Most
+    defaults are cwd-relative, so a wrong working directory otherwise
+    surfaces late as thousands of downstream compile errors (e.g. an empty
+    INCLIB when prepareINCLIB's --pass-rel32 dir is unreachable).
+    `entries` are (option, path) pairs; None paths (option not in play)
+    are skipped."""
+    missing = [(opt, Path(p)) for opt, p in entries
+               if p is not None and not Path(p).is_dir()]
+    if not missing:
+        return
+    for opt, p in missing:
+        where = "" if p.is_absolute() else f" (cwd-relative: {p.resolve()})"
+        print(f"con80build: {opt} directory not found: {p}{where}",
+              file=sys.stderr)
+    n = len(missing)
+    print(f"con80build: {n} required director{'y' if n == 1 else 'ies'} "
+          "missing; nothing was run", file=sys.stderr)
+    raise typer.Exit(2)
+
+
 SOURCE_DIRS = ("SSSRC", "APPLSRC")
 _CODED_PREFIX = "#$@"
 # Names that are runtime/library/autocall targets, not buildable flight source.
@@ -1162,6 +1189,7 @@ def main(
         if deckdir is None:
             raise typer.BadParameter(
                 "--resolve-phases needs --root or --con80")
+        _require_dirs([("--con80", deckdir)])
         cmd = [python, "-m", "lnk101.phaseresolve",
                "--con80", str(deckdir), *map(str, libs)]
         if warn_unresolved_phases:
@@ -1186,6 +1214,34 @@ def main(
             else (Path(root) / "CON80" if root else None)
         if deckdir is None:
             raise typer.BadParameter("--build-all needs --root or --con80")
+
+        # Validate every directory the selected steps will need across ALL
+        # phases before phase 1 starts (the per-phase sub-builds re-check,
+        # but by then earlier phases have already run).
+        do_all = not (run_assemble or run_hal or run_display or run_link)
+        tree = Path(root) if root else None
+        need = [("--con80", deckdir)]
+        need += ([("--src", Path(d)) for d in src] if src
+                 else [("--src", tree / d) for d in SOURCE_DIRS] if tree
+                 else [])
+        if gen is not None:
+            need.append(("--gen", Path(gen)))
+        if run_assemble or do_all:
+            need.append(("--mlib", Path(mlib) if mlib
+                         else tree / "MLIB80" if tree else None))
+        if run_hal or run_display or do_all:
+            need.append(("--incl", Path(incl) if incl
+                         else tree / "INCL80" if tree else None))
+            need.append(("--pass-rel32", pass_rel32))
+        if run_display or do_all:
+            need.append(("--deck-root",
+                         Path(deck_root) if deck_root else tree))
+        need += [("--runlib", d) for d in runlibs]
+        if run_link or do_all:
+            need += [("--linklib", Path(d)) for d in
+                     (linklib or _DEFAULT_LINKLIBS)]
+        _require_dirs(need)
+
         ids = [nums[0] for nums, _ in concard.phase_segments(
             concard.ConcardDeck(deckdir), master) if nums]
 
@@ -1300,6 +1356,25 @@ def main(
     out_root = Path(out) / name if phase is not None else Path(out)
     objdir = out_root / "obj"
     gendir = out_root / "gen"
+    linklibs = ([Path(d) for d in linklib] if linklib
+                else list(_DEFAULT_LINKLIBS))
+
+    # Fail fast on missing directories -- everything the selected steps
+    # rely on, all reported at once, before the deck is read or any
+    # toolchain runs.
+    need = [("--con80", con80_dir)] + [("--src", d) for d in srcdirs]
+    if gen is not None:
+        need.append(("--gen", Path(gen)))
+    if run_assemble:
+        need.append(("--mlib", mlib_dir))
+    if run_hal or run_display:
+        need += [("--incl", incl_dir), ("--pass-rel32", pass_rel32)]
+    if run_display:
+        need.append(("--deck-root", deck_root_dir))
+    need += [("--runlib", d) for d in runlibs]
+    if run_link:
+        need += [("--linklib", d) for d in linklibs]
+    _require_dirs(need)
 
     # A nonexistent phase (e.g. 22: OFTMP folds CONCARDS(PHASE22) into the
     # PHASE 21 segment): name the valid phase numbers instead of a raw
@@ -1325,10 +1400,6 @@ def main(
     if unresolved:
         print("  unresolved:", " ".join(sorted(unresolved)[:30]),
               "..." if len(unresolved) > 30 else "")
-
-    linklibs = ([Path(d) for d in linklib] if linklib
-                else [Path("build") / "lib" / "runtime" / "RUN",
-                      Path("build") / "lib" / "runtime" / "ZCON"])
 
     # NOCALLER in the *target's* deck (not the layout root, which is usually
     # the whole-SSW OFTMP) = the linkage editor's NCAL option: this load
