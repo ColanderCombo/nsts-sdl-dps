@@ -173,7 +173,7 @@ def run():
                           dict(name='CC', address=0xA0, size=2, module='CC')],
                        relocations=[dict(address=0x90, flags=0)]))
 
-        image, owner, info = compose(root, [1, 2])
+        image, owner, info, _ops0 = compose(root, [1, 2])
         check('image_size', len(image) == 2 * MEM_HW, f'{len(image)}')
         check('fill_low', image[0:2] == b'\xC9\xFB', image[0:2].hex())
         check('fill_high',
@@ -196,7 +196,12 @@ def run():
         check('union_A', secs['A']['module'] == 'A')
         check('union_B_real', secs['B']['module'] == 'B',
               f"imported marker won: {secs['B']}")
-        check('union_count', len(sym['sections']) == 4, f"{sorted(secs)}")
+        # C's text was fully re-supplied (identical bytes) under CC by the
+        # later phase: flight maps list only the overlay winner, so C is
+        # shadow-dropped and CC listed
+        check('union_shadow', 'C' not in secs and 'CC' in secs,
+              f"{sorted(secs)}")
+        check('union_count', len(sym['sections']) == 3, f"{sorted(secs)}")
         check('reloc_kept',
               [r['address'] for r in sym['relocations']] == [0x80, 0x90],
               str(sym['relocations']))
@@ -212,7 +217,7 @@ def run():
         check('cli_rc', rc == 0, str(rc))
         check('cli_fcm', (out / 'T.fcm').exists())
         j = json.load(open(out / 'T.sym.json'))
-        check('cli_sym', len(j['sections']) == 4 and j['imageSize'] == MEM_HW)
+        check('cli_sym', len(j['sections']) == 3 and j['imageSize'] == MEM_HW)
         check('cli_bytes', (out / 'T.fcm').read_bytes() == image,
               'CLI image differs from compose()')
 
