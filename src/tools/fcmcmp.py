@@ -226,6 +226,7 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
     checked = 0
     no_data_total = 0
     patched_total = 0
+    ignored_total = 0
     stale_exceptions = []
 
     # Compute column width for aligned '@'
@@ -258,6 +259,7 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         diff_positions = []
         no_data_here = 0
         patched_here = 0
+        ignored_here = 0
         if a != b:
             for hi in range(size.hw):
                 bo = hi * 2
@@ -283,6 +285,9 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
                         here = addr + Addr(hi * 2)
                         expected = exceptions.get(here.hw)
                         if expected is not None:
+                            if expected[0] is None:
+                                ignored_here += 1
+                                continue
                             if expected[0] == hw_b:
                                 patched_here += 1
                                 continue
@@ -290,10 +295,13 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
                     diff_positions.append((addr + Addr(hi * 2), hw_a, hw_b))
         no_data_total += no_data_here
         patched_total += patched_here
+        ignored_total += ignored_here
 
         notes = []
         if patched_here:
             notes.append(f"{patched_here} patched after build")
+        if ignored_here:
+            notes.append(f"{ignored_here} ignored")
         if no_data_here:
             notes.append(f"{no_data_here} no reference data")
         suffix = f" [{', '.join(notes)}]" if notes else ""
@@ -352,6 +360,11 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
                                     continue
                                 if no_data and vb in no_data:
                                     continue
+                                if exceptions:
+                                    e = exceptions.get((addr + Addr(hi * 2)).hw)
+                                    if e is not None and (e[0] is None
+                                                          or e[0] == vb):
+                                        continue
                                 shifted_diffs.append(
                                     (addr + Addr(hi * 2), va, vb))
                     if shifted_diffs:
@@ -369,6 +382,9 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
     if patched_total:
         print(f"\n{patched_total} halfword(s) are listed as changed after the"
               f" build and were not counted as differing.")
+    if ignored_total:
+        print(f"{ignored_total} halfword(s) are listed as to be ignored, with no"
+              f" claim about their contents.")
     if stale_exceptions:
         print(f"WARNING: {len(stale_exceptions)} exception(s) do not match the"
               f" reference image and were ignored; the file may be stale:")
@@ -395,8 +411,20 @@ def load_exceptions(path):
         38266 001D MISSION_ID
 
     the fields being a halfword address, the value the reference image is
-    expected to hold there, and an optional name.  Both numbers are hex.
-    Returns {address: (value, name)}.
+    expected to hold there, and an optional name.  The address is hex; so is
+    the value, EXCEPT for the special value -1.
+
+    -1 means "ignore this address, no claim about what it holds".  The two
+    cases are different in kind and it is worth keeping them apart.  A value
+    says: this location was changed after the build and here is what it was
+    changed to -- checkable, and checked.  -1 says only: a difference here is
+    expected for a reason recorded elsewhere, and nothing is being asserted
+    about the contents.  Without -1 the only way to express the second case
+    would be to write the reference image's own value into the file, which
+    would "verify" trivially and quietly turn a checkable mechanism into one
+    that can absorb any difference at all.
+
+    Returns {address: (value, name)}, value None for -1.
     """
     exceptions = {}
     with open(path) as f:
@@ -408,9 +436,11 @@ def load_exceptions(path):
             if len(fields) < 2:
                 raise ValueError(f"{path}:{lineno}: expected 'address value [name]'")
             try:
-                address, value = int(fields[0], 16), int(fields[1], 16)
+                address = int(fields[0], 16)
+                value = None if fields[1] == "-1" else int(fields[1], 16)
             except ValueError:
-                raise ValueError(f"{path}:{lineno}: address and value must be hex")
+                raise ValueError(f"{path}:{lineno}: address and value must be "
+                                 f"hex, or the value -1")
             exceptions[address] = (value, fields[2] if len(fields) > 2 else "")
     return exceptions
 
@@ -578,12 +608,15 @@ def main(
         str,
         typer.Option(
             "--exceptions",
-            help="File listing locations known to have been changed after the "
-                 "build (I-LOADs, patches), as 'address value [name]' in hex, "
-                 "one per line. Such halfwords are reported separately rather "
-                 "than as differences, but only where the second image really "
-                 "holds the listed value; a mismatch is warned about and the "
-                 "entry ignored.",
+            help="File listing locations that are not expected to match, as "
+                 "'address value [name]' in hex, one per line. A value says "
+                 "the location was changed after the build (an I-LOAD or "
+                 "patch) and gives what it holds; it is honoured only where "
+                 "the second image really holds that value, and a mismatch is "
+                 "warned about and ignored. A value of -1 instead means "
+                 "'ignore this address, no claim about its contents', for a "
+                 "difference expected on grounds recorded elsewhere. Both are "
+                 "reported separately from differences, and from each other.",
         ),
     ] = "",
     no_data: Annotated[
