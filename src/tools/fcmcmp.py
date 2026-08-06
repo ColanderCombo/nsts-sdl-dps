@@ -220,9 +220,11 @@ def _print_diffs(diff_positions, max_hw_diffs, pad, addr_to_sym, addr_to_rld):
 
 
 def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
-            equiv=None, diff_if_shifted=True, expected_sizes=None):
+            equiv=None, diff_if_shifted=True, expected_sizes=None,
+            no_data=None):
     failures = 0
     checked = 0
+    no_data_total = 0
 
     # Compute column width for aligned '@'
     name_width = max((len(name) for name, _, _ in sections), default=0)
@@ -252,6 +254,7 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         checked += 1
 
         diff_positions = []
+        no_data_here = 0
         if a != b:
             for hi in range(size.hw):
                 bo = hi * 2
@@ -260,13 +263,22 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
                 if hw_a != hw_b:
                     if equiv and hw_a in equiv and hw_b in equiv:
                         continue
+                    # A reference halfword the source image never actually
+                    # stated a value for.  Not a match and not a difference:
+                    # there is nothing to compare against.  Counted and
+                    # reported separately so it cannot be mistaken for either.
+                    if no_data and hw_b in no_data:
+                        no_data_here += 1
+                        continue
                     diff_positions.append((addr + Addr(hi * 2), hw_a, hw_b))
+        no_data_total += no_data_here
 
+        suffix = f" [{no_data_here} no reference data]" if no_data_here else ""
         if not diff_positions:
-            print(f"  OK:   {padded} @ {addr.x} {size_str}")
+            print(f"  OK:   {padded} @ {addr.x} {size_str}{suffix}")
         else:
             print(
-                f"  FAIL: {padded} @ {addr.x} {size_str}"
+                f"  FAIL: {padded} @ {addr.x} {size_str}{suffix}"
                 f" — {len(diff_positions)} halfwords differ"
             )
 
@@ -315,6 +327,8 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
                             if va != vb:
                                 if equiv and va in equiv and vb in equiv:
                                     continue
+                                if no_data and vb in no_data:
+                                    continue
                                 shifted_diffs.append(
                                     (addr + Addr(hi * 2), va, vb))
                     if shifted_diffs:
@@ -329,6 +343,9 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
 
             failures += 1
 
+    if no_data_total:
+        print(f"\n{no_data_total} halfword(s) had no reference data and were"
+              f" neither matched nor counted as differing.")
     return checked, failures
 
 
@@ -491,6 +508,18 @@ def main(
             help="Group sections by base program name instead of sorting by address",
         ),
     ] = False,
+    no_data: Annotated[
+        str,
+        typer.Option(
+            "--no-data",
+            help="Comma-separated hex halfwords that mean the SECOND image "
+                 "never stated a value here (e.g. C9FB,C6C6, which "
+                 "unlinkMAFGEN2 synthesises from the address for any halfword "
+                 "the MAFGEN listing did not report). Such halfwords are "
+                 "reported separately, neither matched nor counted as "
+                 "differing. Empty (the default) keeps them as differences.",
+        ),
+    ] = "",
     equiv: Annotated[
         str,
         typer.Option(
@@ -621,10 +650,13 @@ def main(
             f"({len(image_a) // 2} vs {len(image_b) // 2} halfwords)"
         )
 
+    no_data_set = frozenset(int(v, 16) for v in no_data.split(",")
+                            if v.strip()) or None
+
     checked, failures = compare(
         sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         equiv=equiv_set, diff_if_shifted=diff_if_shifted,
-        expected_sizes=expected_sizes,
+        expected_sizes=expected_sizes, no_data=no_data_set,
     )
 
     # Collect all diffs (no elision) when dumping or when repro needs them
