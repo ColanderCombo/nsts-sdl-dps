@@ -11,6 +11,8 @@
 # Every `--`/`-` annotation comes from the segment that produced the words, so the
 # source doubles as documentation of the format.
 # 
+import re
+
 from .deck import encodable_directives, read_cards, resolve_deck
 from .model import Padr
 from .resolve import padr_types, alias_body, includes
@@ -234,8 +236,18 @@ def to_hal(enc):
             if isinstance(w, Padr):
                 padr_n += 1
                 ty = ptypes.get(w.name) or "BIT(16)"      # fallback until template built
+                ref = ref_of.get(w.name, w.name)
+                # NAME of an unsubscripted multi-copy structure yields the
+                # copy-0 virtual origin, one node below the data, so point
+                # at copy 1.  The pointer has to stay copyless: a
+                # copiness-matched declare with a subscripted initial
+                # raises the PASS2 DI110 conflict.
+                m = re.search(r"-STRUCTURE\(\d+\)$", ty)
+                if m and "$" not in ref:
+                    ty = ty[:m.start()] + "-STRUCTURE"
+                    ref = ref + "$(1;)"
                 L += _wrap("DECLARE %s%d_%s_PADR NAME %s INITIAL(NAME(%s));"
-                           % (fam, padr_n, tag, ty, ref_of.get(w.name, w.name)))
+                           % (fam, padr_n, tag, ty, ref))
             else:
                 vpd_n += 1
                 L.append(_code("DECLARE %s%d_%s_VPD BIT(16) INITIAL(HEX'%04X');"
