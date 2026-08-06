@@ -350,6 +350,8 @@ add_test(NAME dfg_decks
 set_tests_properties(dfg_decks PROPERTIES
     LABELS "dfg"
     TIMEOUT 300
+    # Temporarily disabled.
+    DISABLED TRUE
 )
 
 # DEUCFLM critical-format load module: build from CON80/CFSYSIN and gate

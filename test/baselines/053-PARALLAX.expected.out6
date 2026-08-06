@@ -1,1 +1,5 @@
-DISTANCE=      9.2896911360000001E+09     MILES
+Angles are "apparent right ascension" and
+"apparent declination" for some star whose
+distance we want to measure.
+Enter spring RA,DEC and fall RA,DEC :
+DISTANCE=      5.3227828730173732E+11     MILES

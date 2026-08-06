@@ -76,9 +76,10 @@ FPTEST   DS    0H
          STH   R7,X'4C'            PSW1 hi (NIA)
          LHI   R7,X'0020'          BSR=2, DSR=0
          STH   R7,X'4D'            PSW1 lo
-*  PSW2: set bit 19 ('w' in DESC2) so handler isn't in wait state
-         LHI   R7,X'0008'
-         STH   R7,X'4E'            PSW2 hi (w-bit set, no masks)
+*  PSW2: set the Run/Wait bit (PSW bit 46 = PSW2 bit 14, mask
+*  X'0002' in the high halfword) so handler isn't in wait state
+         LHI   R7,X'0002'
+         STH   R7,X'4E'            PSW2 hi (run-bit set, no masks)
          LHI   R7,0
          STH   R7,X'4F'            PSW2 lo
 

@@ -85,7 +85,7 @@ def generate(
             print(f"  {'SKIP':20s} {name} (baseline exists)")
             continue
 
-        infile5 = TEST_DIR / f"{name}.in5"
+        infile5 = TEST_DIR / "in5" / f"{name}.in5"
         if not infile5.exists():
             infile5 = None
 
@@ -105,14 +105,16 @@ def generate(
         )
 
         if rc == 0:
-            if tmp_out.exists():
-                tmp_out.rename(baseline)
-            else:
-                baseline.write_text("")
             if out_lines > 0:
+                tmp_out.rename(baseline)
                 ok += 1; tag = "OK"
             else:
-                ok_empty += 1; tag = "OK (no output)"
+                # An empty run is almost always a program that silently did
+                # nothing (missing input, feature not simulated); committing
+                # it as a baseline bakes the failure in.  Keep the old
+                # baseline and flag it.
+                tmp_out.unlink(missing_ok=True)
+                ok_empty += 1; tag = "REFUSED (no output)"
         elif "input" in stderr.lower() or "infile5" in stderr.lower():
             fail_input += 1; tag = "NEED INPUT"
             tmp_out.unlink(missing_ok=True)
@@ -125,7 +127,7 @@ def generate(
 
     print(f"\n=== Summary ===")
     print(f"  With output:    {ok}")
-    print(f"  No output:      {ok_empty}")
+    print(f"  Refused (no output): {ok_empty}")
     print(f"  Need input:     {fail_input}")
     print(f"  Other failures: {fail_other}")
 
