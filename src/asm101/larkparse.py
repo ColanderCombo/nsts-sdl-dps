@@ -93,6 +93,10 @@ class DcSuboperand:
     zdata   True when the Z reloc target is the DATA address subfield
             ('Z(,sym...)' -- code subfield empty), which relocates as
             ZCON/data (RLD 0x50) instead of ZCON/code (0x04)
+    zdexpr  the middle (DATA address) subfield arith of the two-target
+            form 'Z(code,data[,flags])', or None -- it adds a DSR-only
+            RLD (0x40) so the linker patches HW1's DSR with the data
+            target's sector
     flags   the Z flags arith node, or None
     scale   the fixed-point scale modifier (Sn) integer for F/H/E/D, or None
     dup     duplication-factor arith node, or None (filled in by 'dcsub')"""
@@ -102,6 +106,7 @@ class DcSuboperand:
   hexstr: object = None
   zexpr: object = None
   zdata: bool = False
+  zdexpr: object = None
   flags: object = None
   scale: object = None
   dup: object = None
@@ -505,14 +510,16 @@ class _AST(Transformer):
         ariths.append(a)
     if ariths:
       zexpr = ariths[0]
-    return DcSuboperand("Z", length=length, zexpr=zexpr)
+    return DcSuboperand("Z", length=length, zexpr=zexpr,
+                        zdexpr=ariths[1] if len(ariths) > 1 else None)
 
   def dc_z_flags(self, *args):            # ...,flags  (the trailing arith)
-    # First arith = reloc target, last arith = flags, any middle (the ignored
-    # base/length field) is dropped.  Works for both 'Z(tgt,flags)' (2 args)
-    # and 'Z(tgt,base,flags)'.
+    # First arith = reloc target, last arith = flags; a middle arith is the
+    # data-address subfield, kept as zdexpr for its DSR-only RLD.  Works
+    # for both 'Z(tgt,flags)' (2 ariths) and 'Z(tgt,data,flags)'.
     ariths = [a for a in args if getattr(a, "type", None) != "DCLEN"]
-    return DcSuboperand("Z", zexpr=ariths[0], flags=ariths[-1])
+    return DcSuboperand("Z", zexpr=ariths[0], flags=ariths[-1],
+                        zdexpr=ariths[1] if len(ariths) > 2 else None)
 
   def dc_z_data(self, *args):             # Z(,tgt) -- DATA-subfield target
     ariths = [a for a in args if getattr(a, "type", None) != "DCLEN"]

@@ -56,6 +56,10 @@ _FLAG_FOR_TYPE: dict[str, int] = {
     # '=Z(,FPMXQETB+2,0)' links 8B6C 0001: target 0x18B6C, sector 1 -> DSR=1;
     # punching ZCON/code left HW1's DSR unpatched).
     'ZD': RLD_ZCON_DATA,
+    # The two-target form's middle subfield ('Z(code,data,flags)'): a
+    # DSR-only RLD -- no HW0 write, the linker just patches HW1's DSR
+    # with the data target's sector.
+    'ZS': RLD_DSR_ONLY,
 }
 
 
@@ -261,7 +265,9 @@ class ZCon:
             self.set_bsr(sector)
         elif flag_type == RLD_DSR_ONLY:
             self.set_dsr(sector)
-        elif flag_type in (RLD_ZCON_CODE, RLD_ZCON_ADDR) and sector > 0 and self.cb:
+        elif flag_type in (RLD_ZCON_CODE, RLD_ZCON_ADDR) and sector > 0:
+            # not gated on the CB flag bit: a code ZCON resolving into a
+            # non-zero sector takes the BSR patch whether CB is set or not
             self.set_bsr(sector)
         elif flag_type == RLD_ZCON_DATA and sector > 0:
             self.set_dsr(sector)

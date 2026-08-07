@@ -1851,6 +1851,36 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
                 error(stmt, "Complex relocatable expression not "
                       "supported in Z constant")
 
+          # Two-target form Z(code,data,flags): the middle subfield is a
+          # data address whose sector the linkage editor patches into
+          # HW1's DSR through a DSR-only RLD (0x40) at the same ZCON
+          # position.
+          zdexpr = getattr(suboperand, "zdexpr", None)
+          if zdexpr is not None:
+            dName, _dAdd = zRelocTarget(zdexpr)
+            if dName is None:
+              if passCount >= 3:
+                error(stmt, "Unsupported Z-con data-subfield target "
+                      "(expected a symbol +/- a constant addend)")
+            else:
+              dsym = symtab.get(dName)
+              if dsym is None or dsym.type == "EXTERNAL":
+                registerExtrn(dName, stmt.n)
+                if passCount == 3:
+                  appendReloc(relocations, dName, sect,
+                              sects[sect].pos1, 'ZS')
+              elif passCount == 3:
+                dv = evalArithmeticExpression(zdexpr, NO_LOCALS, stmt,
+                                              symtab, currentHash())
+                dSect, dOff = unhash(dv)
+                if dSect is not None:
+                  rldSymbol = resolveCSect(dOff + sectionOffset(dSect),
+                                           sects, dSect, exclude=sect)
+                  appendReloc(relocations, rldSymbol, sect,
+                              sects[sect].pos1, 'ZS')
+                # an absolute (EQU) data target needs no RLD: the flags
+                # byte already carries whatever DSR the source intended
+
           # See 'ZCon.prelink' for the 4-byte ZCON layout; 'flags' is the
           # source flags operand.
           dcBuffer[dcBufferPtr:dcBufferPtr + 4] = \

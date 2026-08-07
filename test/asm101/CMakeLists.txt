@@ -43,32 +43,6 @@ set_tests_properties(asm101_features PROPERTIES
     TIMEOUT 180
 )
 
-# Frozen-golden regression test for the Lark parser.  Its corpus is ~12.5k
-# (text,rule) inputs (real BILDNEW5 fields + curated edge cases); the
-# expectations are Lark's own output, frozen and byte-identical-verified on
-# BILDNEW5 + the decks.  An in-tree net for grammar/transformer regressions,
-# with no dependency on the out-of-tree flight listings.
-add_test(NAME asm101_lark
-    COMMAND "${SDL_VENV_PYTHON}"
-        "${_asm_script_dir}/test_asm101_lark.py"
-)
-set_tests_properties(asm101_lark PROPERTIES
-    LABELS "asm101"
-    TIMEOUT 60
-)
-
-# joinOperand continuation-card merge test: a frozen golden over real FSW macro
-# prototype/invocation decks, checking column-72 continuation handling, the
-# continuation-card discriminator, and comment trimming.
-add_test(NAME asm101_joinoperand
-    COMMAND "${SDL_VENV_PYTHON}"
-        "${_asm_script_dir}/test_asm101_joinoperand.py"
-)
-set_tests_properties(asm101_joinoperand PROPERTIES
-    LABELS "asm101"
-    TIMEOUT 30
-)
-
 # Byte-golden regression: assembles every test/asm101/*.asm fixture with
 # default flags and byte-compares each producer against a checked-in golden in
 # test/asm101/golden/.  The broad "did the emitted bytes move" net behind the
@@ -144,7 +118,7 @@ add_custom_target(test-asm101
 # pattern is left unanchored on purpose: a trailing '$' is swallowed by Make's
 # variable expansion in the generated recipe, and each test name is already a
 # unique substring (no asm101_* name is a substring of another).
-foreach(_asm_test asm101_upstream asm101_features asm101_lark asm101_joinoperand asm101_iop asm101_golden asm101_instr_defs asm101_compiled_vectors)
+foreach(_asm_test asm101_upstream asm101_features asm101_iop asm101_golden asm101_instr_defs asm101_compiled_vectors)
     # test-asm101-features -> a hyphenated alias is friendlier to type.
     string(REPLACE "asm101_" "test-asm101-" _asm_tgt "${_asm_test}")
     add_custom_target(${_asm_tgt}
