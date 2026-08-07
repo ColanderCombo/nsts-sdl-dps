@@ -917,7 +917,12 @@ class Assemble:
           else:
             new_locals[key] = SymbolicVar(value, omitted=False)
 
-        new_locals["&SYSLIST"] = SymbolicVar(syslist)
+        # omitted=False marks &SYSLIST as parameter-valued: a null element
+        # (out-of-range subscript, or an explicitly-empty positional operand)
+        # used arithmetically is 0, not an eval error (Assembler H GC26-3758-3
+        # p.19: "A null value is treated as zero"; HLASM SC26-4940 Table 58
+        # extends the rule to &SYSLIST(n) / &SYSLIST(n,m)).
+        new_locals["&SYSLIST"] = SymbolicVar(syslist, omitted=False)
         new_locals["&SYSLIST0"] = SymbolicVar(syslist0)
         new_locals["&SYSNDX"] = SymbolicVar(self.sysndx)
 

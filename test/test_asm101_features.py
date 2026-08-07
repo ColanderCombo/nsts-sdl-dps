@@ -2206,6 +2206,76 @@ def maclib_tests():
           "expected 0C01 (XL.8'0C',YL.8(FOO-TAB)): the expanded DC must not "
           "be absorbed as a continuation card")
 
+    # virtualagc/virtualagc#1331 (ASM101S macro-processing bugs) as
+    # regression pins.  Multilevel sublists survive verbatim and extra
+    # subscripts index into them (Assembler H GC26-3758-3 p.13); expected
+    # values were cross-checked against z390's mz390 in the issue thread.
+    # ASM101S rendered RON's third invocation as
+    # (10,((,(100,((,,200),(,,300))),)),30).
+    snlst = td / "syslist_nesting.lst"
+    rc, out = assemble(
+        ["--tolerable", "255", "-o", str(td / "syslist_nesting.obj"),
+         "-l", str(snlst), str(FIX / "feat_macro_syslist_nesting.asm")],
+        timeout=60)
+    check("syslist_nesting_assembles", rc == 0,
+          f"rc={rc}\n{out.strip()[-400:]}")
+    sntext = snlst.read_text(errors="replace") if snlst.exists() else ""
+    for want in [
+        "+(10,20,30)",                            # flat sublist verbatim
+        "+(10,(100,200,300),30)",                 # nested + GBLA substitution
+        "SYSLIST(2)     = >(10,(100,200,300),30)<",
+        "SYSLIST(2,1)   = >10<",
+        "SYSLIST(2,2)   = >(100,200,300)<",
+        "SYSLIST(2,2,1) = >100<",
+        "SYSLIST(2,2,3) = >300<",
+        "SYSLIST(2,9)   = ><",                    # past the end -> null
+        "SYSLIST(9)     = ><",
+        "SYSLIST(1,1)   = >1<",                   # scalar = 1-element sublist
+        "N SYSLIST=3 N(1)=1 N(2)=3 N(3)=3",       # omitted elements count
+    ]:
+        check(f"syslist_nesting[{want.strip('+')[:24]}]", want in sntext,
+              f"missing {want!r} in listing")
+
+    # EBCDIC collation ('A'<'1', shorter-is-less), null &SYSLIST(1) = 0 in
+    # arithmetic (the FPMSWTCH `AIF (&SYSLIST(1) LE 0 ...)` guard), keyword
+    # arguments binding (ASM101S dropped ACALL=YES and quoted TITLE=), and
+    # operand scan after the continuation join.
+    mrlst = td / "macro_relations.lst"
+    rc, out = assemble(
+        ["--tolerable", "255", "-o", str(td / "macro_relations.obj"),
+         "-l", str(mrlst), str(FIX / "feat_macro_relations.asm")],
+        timeout=60)
+    check("macro_relations_assembles", rc == 0,
+          f"rc={rc}\n{out.strip()[-400:]}")
+    mrtext = mrlst.read_text(errors="replace") if mrlst.exists() else ""
+    check("macro_relations_collation",
+          "FAIL:" not in mrtext and mrtext.count("OK:") == 3,
+          f"collation MNOTEs wrong: "
+          f"{[l for l in mrtext.splitlines() if 'FAIL:' in l or 'OK:' in l]}")
+    for want, label in [
+        ("CC INVALID: ><", "null_cc_is_zero"),
+        ("CC VALID: >3<", "numeric_cc_in_range"),
+        ("CC INVALID: >8<", "numeric_cc_out_of_range"),
+        ("AMAIN NAME=ACOS ACALL=YES TITLE=", "keyword_arg_binds"),
+        ("AMAIN NAME= ACALL=NO TITLE='PROCESS SWITCH ROUTINE'",
+         "quoted_keyword_arg_binds"),
+        ("IFPROC P1=>(CH,R4,GE,TPCTPRI)< P7=>ZZ< P9=>LAST< NS=10",
+         "continued_invocation_operands"),
+    ]:
+        check(f"macro_relations_{label}", want in mrtext,
+              f"missing {want!r} in listing")
+
+    # A whole sublist used as an arithmetic term is a program error to
+    # diagnose (HLASM SC26-4940 Table 58), not a Python TypeError -- the
+    # opening traceback of the issue.
+    rc, out = assemble(
+        ["-o", str(td / "sublist_diag.obj"),
+         str(FIX / "feat_macro_sublist_arith_diag.asm")], timeout=60)
+    check("sublist_arith_diagnosed",
+          rc != 0 and "Traceback" not in out
+          and "Cannot be interpreted as an integer value" in out,
+          f"want clean intolerable diagnostic: rc={rc}\n{out.strip()[-400:]}")
+
 
 def _xref_value(listing_path, symbol):
   """Pull a symbol's VALUE (hex halfword address) from the cross reference."""
