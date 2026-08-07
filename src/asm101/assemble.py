@@ -1234,12 +1234,30 @@ class Assemble:
                                 s["offset"] if s["offset"] is not None else -1,
                                 s["name"]))
 
+    # Per-suboperand DC/DS statement records (model101 dataStmts):
+    # src/mafgen segments each csect into code and data regions with these
+    # and renders the typed DC lines.  A DSECT record describes a layout,
+    # not storage, so it is dropped.
+    real = {name for name, d in sects.items() if not d.dsect}
+    datastmts = sorted(
+        (list(rec) for rec in self.metadata.get("dataStmts", [])
+         if rec[0] in real),
+        key=lambda r: (r[0], r[1], r[2]))
+
     data = {
-        "version": 1,
+        "version": 2,
         "tool": f"{PROGRAM} {VERSION}",
         "source": self.source_files[-1].stem if self.source_files else None,
         "sections": sections,
         "symbols": symbols,
+        # [section, startByte, endByte, 'DC'|'DS', letter, elements, label]
+        "data": datastmts,
+        # literal-pool slots: [section, startByte, endByte, T, L] -- the
+        # source type of each =constant, for pool-reference comments
+        "literals": sorted(
+            (list(r) for r in self.metadata.get("literals", [])
+             if r[0] in real),
+            key=lambda r: (r[0], r[1])),
     }
     debug_file = self.object_file.with_name(self.object_file.stem + ".asmg.json")
     with open(debug_file, "w") as f:

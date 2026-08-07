@@ -20,8 +20,14 @@ from pathlib import Path
 # bootstrap stub and the program's @0 stack ER (stackless SDL programs receive
 # their stack from FCOS at dispatch; the linkage editor creates the @0 CSECTs
 # from the CON80 STACK cards).  STACKEND SYM data is identical either way.
-_PARM_BASE = ("SREF,LIST,LISTING2,SRN,TEMPLATE,NOLFXI,REGOPT,SDL,"
+_PARM_BASE = ("ADDRS,SREF,LIST,LISTING2,SRN,TEMPLATE,NOLFXI,REGOPT,SDL,"
               "LITSTRINGS=3000,CARDTYPE=")
+# ADDRS stores per-statement code addresses in the SDF statement cells
+# (root ADDR_FLAG); MAFGEN's ST# lines print them, and the DM2APP
+# addresses regenerated from an ADDRS compile match the DASS exactly.
+# Codegen-neutral: object decks compiled with and without it differ only
+# in the SYM HALS/END compile-time stamp (PASS2 EMIT_ADDRS writes the
+# addresses into the statement data file and nowhere else).
 # Option provenance (2026-07-18 audit): NOLFXI is DASS-VERIFIED -- every
 # LFXI in the flight images (~130/config) sits in an ASM csect
 # (FPM*/FIO*/FCM*) or a sourceless Spacelab library member; zero in

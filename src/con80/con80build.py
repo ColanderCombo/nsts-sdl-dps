@@ -625,11 +625,12 @@ def _hal_mirror(dirs, haltree) -> None:
                 if not link.exists():
                     link.write_bytes(data)
             else:
-                if link.exists() and (
-                        not link.is_symlink()      # stale materialized copy
-                        or link.resolve() != f.resolve()):  # stale target
+                if link.is_symlink():
+                    if link.resolve() != f.resolve():   # stale (or dangling)
+                        link.unlink()
+                elif link.exists():                     # stale materialized copy
                     link.unlink()
-                if not link.exists():
+                if not link.is_symlink() and not link.exists():
                     link.symlink_to(f.resolve())
 
 
@@ -867,11 +868,13 @@ def display(sources, objdir: Path, gendir: Path, halsc: str, python: str,
     generate -> preprocess -> compile flow applies (`tag` labels the echo).
 
     Runs AFTER hal(): the displays' INCLUDEd compools must already have SDF
-    members in gen/SDFLIB (--sdfi reads it, nothing written back).  The
-    compile still gets a SCRATCH copy of TEMPLIB — halsc's TEMPLATE parm
-    APPENDS each compiled unit's own template, and display templates
-    (@@CD0001 ...) must never pollute the shared library; it also remains
-    the textual fallback for any include without an SDF.
+    members in gen/SDFLIB.  Each display's own PASS3 SDF member is
+    collected there too (--sdf), which is where SDF consumers such as
+    src/mafgen's #PCD0nnn data-csect walk read them from.  The compile
+    still gets a SCRATCH copy of TEMPLIB — halsc's TEMPLATE parm APPENDS
+    each compiled unit's own template, and display templates (@@CD0001
+    ...) must never reach the shared library; it also remains the textual
+    fallback for any include without an SDF.
     Returns (ok_count, failures)."""
     import shutil
     objdir.mkdir(parents=True, exist_ok=True)
@@ -912,11 +915,18 @@ def display(sources, objdir: Path, gendir: Path, halsc: str, python: str,
             _halt(f"dfg {name} failed")
             continue
         # dfg output compiles as-is (includes resolved via SDF).
+        # --sdf (not --sdfi): same read side, but the display's own PASS3
+        # SDF member is collected into gen/SDFLIB — src/mafgen's data-csect
+        # walk reads ##CD0nnn from there, and nothing INCLUDEs a display,
+        # so the added members change no other compile.  TEMPLIB still gets
+        # the SCRATCH copy: an SDF member is read back only by name, while
+        # a template APPENDed to the shared library is seen by every later
+        # compile.
         src = halout
         obj = objdir / f"{name}.obj"
         r = _run([halsc, f"--parm={halorder.get_parms(name)}",
                   f"--templib={scratch}", f"--inclib={inclib}",
-                  f"--sdfi={(gendir / 'SDFLIB').resolve()}",
+                  f"--sdf={(gendir / 'SDFLIB').resolve()}",
                   f"--workdir={dispdir / (name + '.work')}",
                   "-o", str(obj), str(src)],
                  verbose=verbose, env=env, label=f"halsc {name}")

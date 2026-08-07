@@ -84,6 +84,10 @@ TYPE_REPLACE_LABEL = 9
 
 # SDC flag bytes (flag1..flag4 = ICD field 8, MSB first)
 _F1_COMPOOL = 0x80
+_F1_INPUT_PARM = 0x40      # INCSDF SDF_INPUT_PARM_FLAG "40000000"
+_F1_ASSIGN_PARM = 0x20     # INCSDF SDF_ASSIGN_PARM_FLAG "20000000"
+_F1_TEMPORARY = 0x10       # INCSDF SDF_TEMPORARY_FLAG "10000000"
+_F1_AUTO = 0x08            # INCSDF SDF_AUTO_FLAG "08000000"
 _F1_NAME = 0x04
 _F1_TEMPLATE = 0x02
 _F2_DENSE = 0x40
@@ -121,12 +125,17 @@ class SdfSymbol:
     address: Optional[int] = None      # halfword offset within the csect
     template: Optional[str] = None     # structure template name (instances)
     is_template: bool = False          # a structure-template header
+    compool: bool = False              # declared in (included from) a compool
     name_var: bool = False             # a NAME (pointer) variable
+    parm: bool = False                 # a formal parameter (INPUT/ASSIGN)
+    auto: bool = False                 # AUTOMATIC (stack-frame) storage
+    temporary: bool = False            # TEMPORARY (stack-frame) storage
     constant: bool = False
     initial: bool = False
     remote: bool = False
     rigid: bool = False
     dense: bool = False
+    xrefs: tuple = ()              # citing statement numbers (XREFDATA)
     # internal link fields (symbol index numbers; 0 = none)
     _eldest: int = field(default=0, repr=False)
     _brother: int = field(default=0, repr=False)
@@ -218,9 +227,12 @@ class SdfUnit:
             kind = _LABEL_KINDS.get(r.sym_type)
         # SDC field 12 ((rows<<8)|columns) is the BIT/CHAR width — or, for a
         # STRUCTURE instance, the template's symbol number (resolved by the
-        # caller once every symbol is loaded).
+        # caller once every symbol is loaded).  For MATRIX/VECTOR it keeps
+        # the (rows<<8)|columns shape; for a DENSE-packed BIT terminal the
+        # high byte is the field's right-shift count (0xFF encodes 0).
         f12 = (r.rows << 8) | r.columns
-        width = f12 if kind in ("BIT", "CHARACTER", "STRUCTURE") else None
+        width = f12 if kind in ("BIT", "CHARACTER", "STRUCTURE",
+                                "MATRIX", "VECTOR") else None
         ndims = r.array_dims[0]
         dims = tuple(d for d in r.array_dims[1:1 + ndims])
         # raw-SDC extras (cells never straddle a page, so mv covers the SDC);
@@ -234,8 +246,14 @@ class SdfUnit:
         if r.sym_class == CLASS_LABEL and r.sym_type == TYPE_REPLACE_LABEL:
             replace_ptr = _be32(mv, 20)
         address = None
-        if r.sym_class not in (CLASS_LABEL, CLASS_FUNCTION):
+        if r.sym_class not in (CLASS_LABEL, CLASS_FUNCTION) \
+                or (r.flag1 & _F1_NAME):
+            # a NAME variable declared over a label/function type is
+            # classed with its referent but owns a stored pointer cell:
+            # field 10 is its data offset (DASS #DDM5NEW+0019
+            # DM5V_N_PROG, a NAME..LABEL at halfword 25)
             address = (mv[13] << 16) | (mv[14] << 8) | mv[15]   # field 10
+        xrefs = self._read_xrefs(mv, mv[3]) if mv[3] else ()
         return SdfSymbol(
             # The alphabetically-first index entry's name carries a leading
             # EBCDIC blank (it sorts lowest, anchoring the binary search).
@@ -245,7 +263,11 @@ class SdfUnit:
             kind=kind, precision=precision, width=width, dims=dims,
             address=address,
             is_template=bool(r.flag1 & _F1_TEMPLATE),
+            compool=bool(r.flag1 & _F1_COMPOOL),
             name_var=bool(r.flag1 & _F1_NAME),
+            parm=bool(r.flag1 & (_F1_INPUT_PARM | _F1_ASSIGN_PARM)),
+            auto=bool(r.flag1 & _F1_AUTO),
+            temporary=bool(r.flag1 & _F1_TEMPORARY),
             constant=bool(r.flag2 & _F2_CONSTANT),
             initial=bool(r.flag3 & _F3_INITIAL),
             remote=bool(r.flag2 & _F2_REMOTE),
@@ -254,9 +276,124 @@ class SdfUnit:
             _eldest=0 if eldest == 0xFFFF else eldest,
             _brother=0 if brother == 0xFFFF else brother,
             _replace_ptr=replace_ptr,
+            xrefs=xrefs,
         )
 
+    def _read_xrefs(self, mv, xoff):
+        """XREFDATA walk (DUMPSDF PRINT_XREF_DATA): at SDC byte ``xoff``,
+        halfword 0 = entry count, then halfword entries of
+        (usage flags << 13) | statement number.  A 0xFFFF entry chains to
+        an extension cell: the next fullword-aligned word is its vptr and
+        entries continue at that cell's offset 0."""
+        out = []
+        k = xoff // 2
+        cnt = _be16(mv, 2 * k)
+        k += 1
+        j = 0
+        while j < cnt and len(out) < 8192:
+            item = _be16(mv, 2 * k)
+            if item != 0xFFFF:
+                out.append(item & 0x1FFF)
+                j += 1
+                k += 1
+            else:
+                fw = (k + 2) // 2
+                mv = self._ctx._locate_vptr(_be32(mv, 4 * fw))
+                k = 0
+        return tuple(out)
+
     # -- queries ---------------------------------------------------------------
+    def root_flags(self):
+        """The directory root cell's flag halfword (SRN_FLAG=0x8000,
+        ADDR_FLAG=0x4000, ...; ICD PDF p.34)."""
+        return _be16(self._ctx.locate_root(), 0)
+
+    def literal_area(self):
+        """Halfword offset of the literal area in the unit's #D csect,
+        or None (the SDF stores 65535 when there is none)."""
+        v = _be16(self._ctx.locate_root(), 42)
+        return None if v == 0xFFFF else v
+
+    def initial_literal_area(self):
+        """Inclusive (start, end) hw extent of the #D's LEADING adcon/
+        literal pool -- DUMPSDF's 'START/END OF INITIAL LITERAL AREA
+        (#D)', root halfwords 84/85.  None when absent (end 0/65535):
+        MAFGEN dumps the '??? ADCONS,LITERALS,ETC. ???' region only to
+        this end; the slack up to the first LOCAL BLOCK DATA word
+        (remote-descriptor cons, fill) is skipped entirely."""
+        root = self._ctx.locate_root()
+        s, e = _be16(root, 168), _be16(root, 170)
+        if e == 0xFFFF:
+            return None
+        return (s, e)       # (0, 0) = a real 1-hw pool (DASS #DDUMULK)
+
+    def includes(self):
+        """The unit's INCLUDE list: [(member name, remote, template)].
+
+        DUMPSDF's 'I N C L U D E   D A T A' section: directory-root
+        fullword 16 heads a chain of include cells -- next pointer at
+        +0, INCLIB member name at +4 (8 EBCDIC chars), flag byte at
+        +16 with 0x02 = TEMPLATE, 0x01 = REMOTE (the include carried
+        the REMOTE keyword)."""
+        ptr = _be32(self._ctx.locate_root(), 64)
+        out = []
+        while ptr > 0 and len(out) < 512:
+            mv = self._ctx.locate(ptr)
+            name = bytes(mv[4:12]).decode("cp037").strip()
+            fl = mv[16]
+            out.append((name, bool(fl & 0x01), bool(fl & 0x02)))
+            ptr = _be32(mv, 0)
+        return out
+
+    def read_statements(self):
+        """Executable statements: [(stmt_no, csect_name, addr1, addr2,
+        category, stype, srn, incl_cnt)].
+
+        Statement data cell (ICD PDF p.103): block index (2), statement
+        category (1: bit0 SRN present, bits3-4 subtype, bits5-7 context),
+        statement type (1), label count (1), LHS halfword count (1), then
+        the label and LHS arrays; when the root's ADDR_FLAG is set two
+        3-byte csect-relative code addresses follow, then the original SRN.
+        Declaration statements (negated data pointer) are skipped."""
+        ctx = self._ctx
+        root = ctx.locate_root()
+        flags = _be16(root, 0)
+        has_addr = bool(flags & 0x4000)
+        first, last = _be16(root, 52), _be16(root, 54)
+        csect_of = {}
+        out = []
+        for n in range(first, last + 1):
+            try:
+                r = ctx.find_stmt_by_number(n)
+            except sdfpkg.SdfError:
+                continue                    # null pointer / out of range
+            if not r.is_executable:
+                continue
+            # re-locate the data cell for the fields past sdfpkg's parse
+            sn_mv = ctx._locate_vptr(ctx._ndx2ptr(8, n))
+            if ctx._cur_fcb.flags & sdfpkg.FLAG_HAS_SRNS:
+                sdc_ptr = _be32(sn_mv, 8)
+            else:
+                sdc_ptr = _be32(sn_mv, 0)
+            mv = ctx.locate(sdc_ptr & 0x7FFFFFFF)
+            addr1 = addr2 = None
+            if has_addr:
+                p = 6 + 2 * r.num_labls + 2 * r.num_lhs
+                addr1 = (mv[p] << 16) | (mv[p + 1] << 8) | mv[p + 2]
+                addr2 = (mv[p + 3] << 16) | (mv[p + 4] << 8) | mv[p + 5]
+            blk = r.blk_no
+            if blk not in csect_of:
+                try:
+                    csect_of[blk] = ctx.find_block_by_number(blk).csect_name
+                except sdfpkg.SdfError:
+                    csect_of[blk] = None
+            srn = r.srn.decode("cp037", errors="replace").strip() \
+                if isinstance(r.srn, bytes) else str(r.srn)
+            out.append((n, csect_of[blk], addr1, addr2,
+                        r.stmt_type >> 8, r.stmt_type & 0xFF, srn,
+                        r.incl_cnt))
+        return out
+
     def symbols(self):
         """Every symbol, in symbol-index order."""
         return [self._by_number[i] for i in sorted(self._by_number)]

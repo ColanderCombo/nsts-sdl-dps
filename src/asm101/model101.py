@@ -526,6 +526,12 @@ extrns = {} # For 'EXTRN'.
 rextrns = {} # For 'EXTRN'
 symtab = {}
 relocations = [] # RLD entries
+# Per-suboperand DC/DS statement records from the final compile pass:
+# [sect, startByte, endByte, 'DC'|'DS', type letter, element count, label].
+# src/mafgen needs them to segment a csect into code and data regions and
+# to render typed DC lines; exported through metadata["dataStmts"] into
+# the .asmg.json sidecar.
+dataStmts = []
 metadata = {
     "sects": sects,
     "entries": entries,
@@ -1127,6 +1133,10 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
   # 'emitAddressConstant' nested handlers can share it via 'nonlocal' (the
   # DC/DS handler resets it to 0 per statement before writing).
   dcBufferPtr = 0
+  # Pending DC/DS suboperand capture (dataStmts): handleDcDs arms it per
+  # suboperand, commonProcessing stamps the post-alignment start position,
+  # and toMemory finalizes the record when the item's bytes land.
+  dcPend = None
   # CSECT(True)-vs-DSECT(False) flag for the current section.  Bound here so
   # 'commonProcessing' and the 'handleCsectDsect' handler share it via
   # 'nonlocal'; it is always set (by a CSECT/DSECT line or commonProcessing's
@@ -1139,7 +1149,7 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
   # is a bytearray (DC: the actual bytes) or an int (DS: a byte count to
   # reserve).  Caller must have aligned already.
   def toMemory(bytes, alignment = 1):
-    nonlocal collect, asis, compile, stmt, name, operation
+    nonlocal collect, asis, compile, stmt, name, operation, dcPend
     if sect is None or sect not in sects:
       return
     pos1 = sects[sect].pos1
@@ -1179,6 +1189,12 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
       sects[sect].pos1 += bytes
     if sects[sect].pos1 > sects[sect].used:
       sects[sect].used = sects[sect].pos1
+    if dcPend is not None and "start" in dcPend:
+      dataStmts.append([dcPend["sect"], dcPend["start"],
+                        int(sects[sect].pos1), dcPend["form"],
+                        dcPend["letter"], dcPend["count"],
+                        dcPend.get("label", "")])
+      dcPend = None
 
   # Common processing for all instructions. The 'alignment' argument is one
   # of 1 (byte), 2 (halfword), 4 (word), 8 (doubleword).
@@ -1222,7 +1238,14 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
         sects[sect].pos1 = pos1
         if pos1 > sects[sect].used:
           sects[sect].used = pos1
-        
+
+    # DC/DS statement capture: the post-alignment position is the item's
+    # start (alignment fill is NOT part of the item -- MAFGEN renders it
+    # as its own ALIGNMENT GAP rows).
+    if dcPend is not None and "start" not in dcPend:
+      dcPend["sect"] = sect
+      dcPend["start"] = int(sects[sect].pos1)
+
     # Add 'name' (if any) to the symbol table.  Runs in the collect passes
     # (which build the table) and again in compile: passes 1-2 only
     # over-estimate label addresses (forward branches not yet condensed
@@ -1303,11 +1326,16 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
   # AL.16 == a 2-byte Y reloc); in a sub-byte field it is assembled absolute
   # and flagged (severity 0), since the linker cannot patch sub-byte fields.
   def packBitLengthDC(stmt, operation, flattened):
+    stmtLabel = name              # statement label, first suboperand only
     commonProcessing(1)
     if sect is None or sect not in sects:
       return
     startBytePos = sects[sect].pos1
     acc = {"bits": 0, "nbits": 0}
+    # per-suboperand (type, count, firstBit, lastBit) for the asmg data
+    # records: MAFGEN prints one row per packed field, spanning the
+    # halfword(s) its bits fall in
+    subRecs = []
 
     def fieldBits(stype, width, isBits):
       if isBits:
@@ -1326,6 +1354,7 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
       acc["nbits"] += width
 
     for suboperand in flattened:
+      subBit0 = acc["nbits"]
       if suboperand.dup is None:
         dup = 1
       else:
@@ -1423,6 +1452,9 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
                     "assembled as absolute (no RLD emitted)", 0)
               v = combinedOffset
           appendBits(v, fwidth)
+      if acc["nbits"] > subBit0:
+        subRecs.append((stype, dup * max(1, len(contributions)),
+                        subBit0, acc["nbits"]))
 
     pad = (-acc["nbits"]) % 8
     acc["bits"] <<= pad
@@ -1435,6 +1467,13 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
       toMemory(out)
     else:
       toMemory(nbytes)
+    if compile:
+      # one data record per packed field (statement label on the first):
+      # each spans the bytes its bits touch
+      for i, (stype, count, b0, b1) in enumerate(subRecs):
+        dataStmts.append([sect, int(startBytePos) + b0 // 8,
+                          int(startBytePos) + (b1 + 7) // 8, operation,
+                          stype, count, stmtLabel if i == 0 else ""])
     
   # Evaluate a single suboperand of the operand of an instruction like 
   # RR, RS, SRS, SI, RI.  Returns a pair (err,value).  The 'err' is 
@@ -1622,6 +1661,7 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
                 
 
   def handleMSC_BCE():
+    nonlocal dcPend
     # IOP (MSC/BCE) encoding, descriptor-driven via iop_instr
     # (validated by test_asm101_iop).  The IOP runs
     # inline in the CPU instruction stream, sharing this section's LOC,
@@ -1645,6 +1685,10 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
     if desc is None:
       error(stmt, f"Unimplemented IOP pseudo-op {operation}")
       return
+    # record the statement for src/mafgen: IOP code renders as raw hex
+    # rows (MAFGEN never disassembled BCE/MSC programs)
+    if compile:
+      dcPend = {"form": "IOP", "letter": "", "label": name, "count": 1}
     commonProcessing(2)
     base, forced = iop_instr.IOP.resolve(operation)
     fields = dict(forced)
@@ -1706,6 +1750,7 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
   def handleDcDs():
     nonlocal name
     nonlocal dcBufferPtr
+    nonlocal dcPend
     ast = stmt.ast
     if ast == None:
       error(stmt, f"Cannot parse {operation} operand")
@@ -1757,7 +1802,12 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
         usesBitLength = True
         break
     if usesBitLength:
+      # packBitLengthDC emits one record PER SUBOPERAND: MAFGEN prints a
+      # row per packed field, each spanning its bits' halfword(s) (DASS
+      # FCMBMTPG+000C: 'DC XL1  9236' AND 'DC Y' for the one halfword of
+      # 'DC XL.8'..',YL.8(..)')
       packBitLengthDC(stmt, operation, flattened)
+      dcPend = None
       return
 
     # Carry the DC's label on the FIRST suboperand only.  Each type handler
@@ -1783,6 +1833,15 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
           error(stmt, "Could not evaluate duplication factor")
           continue
       suboperandType = suboperand.type
+      if compile:
+        # element count = dup x nominal values ('DC 2F' = 2, a 7-value
+        # 'DC H'0,1,...'' = 7, 'DS 0F' = 0); the byte extent lands in the
+        # record when toMemory fires.  'name' is the statement label on
+        # the first suboperand, '' after (the loop's label-carry above).
+        dcPend = {"form": operation, "letter": suboperandType,
+                  "label": name,
+                  "count": duplicationFactor
+                  * max(1, len(suboperand.values or []))}
 
       # Z-type (ZCON), DC Z(symbol,,flags): a 4-byte fullword-aligned
       # external reference with relocation -- a different layout from the
@@ -2107,8 +2166,11 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
         error(stmt,
               f"Unsupported DC/DS type {suboperandType}")
         continue
+    # a record left armed by an error path must not attach to the next
+    # statement's toMemory
+    dcPend = None
     return
-            
+
 
   def handleSrsOrRs():
     nonlocal operation
@@ -3051,6 +3113,10 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
     sect = None
     using = [None]*8
     literalPoolNumber = 0
+    # each compile pass re-derives the DC/DS statement records from its own
+    # (possibly shorter) layout; the final pass's set is the one exported
+    dataStmts.clear()
+    dcPend = None
 
     # SPON/SPOFF store-protect capture.  The directives toggle a persistent
     # per-halfword protect state (the real PSA interleaves them PSW cell by
@@ -3343,4 +3409,14 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
   protClose()                     # a deck with no END card still closes out
   metadata["protManaged"] = sorted(protManaged)
   metadata["protRanges"] = {s: sorted(r) for s, r in protRanges.items()}
+  metadata["dataStmts"] = list(dataStmts)
+  # literal-pool slots for the listing regenerator: a pool reference
+  # comments with the literal's SOURCE type (=X'00007FFF', not a
+  # width-guessed =F), so record [sect, startByte, endByte, T, L]
+  metadata["literals"] = [
+      [pool.sect, int(pool.offset) + int(o),
+       int(pool.offset) + int(o) + lit.L - 1, lit.T, lit.L]
+      for pool in literalPools
+      if pool.literals and pool.sect and pool.offset is not None
+      for o, lit in zip(pool.offsets, pool.literals)]
   return metadata
