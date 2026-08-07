@@ -1240,7 +1240,21 @@ class Linker:
                 #     the IBM linker still sets bit 15 of HW0.
                 #     HW1 (BSR/DSR) is left untouched since RF is unknown.
                 #   YCON / ACON / BSR-only / DSR-only: TXT untouched.
-                if not resolved:
+                # A section the CSECT table does not name is not part of the
+                # configuration that table describes, so the build being
+                # reproduced had nothing to resolve the reference against and
+                # left it alone.  We would otherwise place the section at
+                # whatever address came next and patch a fabricated value,
+                # which cannot match the image the table came from.  Treat it
+                # exactly as an unresolved reference, which is what it is.
+                # Truthiness, not "is not None": csectTable defaults to {}, so
+                # a link with no table would otherwise find every section
+                # absent.
+                absent = (bool(self.csectTable)
+                          and targetSection is not None
+                          and targetSection.name.strip() not in self.csectTable)
+
+                if not resolved or absent:
                     flagType = reloc.flags & 0x7F
                     if flagType in (RLD_ZCON_CODE, RLD_ZCON_ADDR, RLD_ZCON_DATA) \
                             and imageOffset < len(self.image):
