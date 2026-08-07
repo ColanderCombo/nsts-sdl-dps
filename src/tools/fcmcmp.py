@@ -224,6 +224,7 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
             no_data=None, exceptions=None):
     failures = 0
     checked = 0
+    size_mismatches = []
     no_data_total = 0
     patched_total = 0
     ignored_total = 0
@@ -238,6 +239,8 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         padded = name.ljust(name_width)
         exp_hw = expected_sizes.get(name) if expected_sizes else None
         size_str = _format_size(size.hw, exp_hw)
+        if exp_hw is not None and exp_hw != size.hw:
+            size_mismatches.append((name, size.hw, exp_hw))
 
         if offset + length > len(image_a):
             print(
@@ -393,7 +396,7 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
     if no_data_total:
         print(f"\n{no_data_total} halfword(s) had no reference data and were"
               f" neither matched nor counted as differing.")
-    return checked, failures
+    return checked, failures, size_mismatches
 
 
 def load_exceptions(path):
@@ -604,6 +607,16 @@ def main(
             help="Group sections by base program name instead of sorting by address",
         ),
     ] = False,
+    strict_sizes: Annotated[
+        bool,
+        typer.Option(
+            "--strict-sizes",
+            help="Treat a section whose size disagrees with the CSECT table "
+                 "as a failure. Such a section is only compared over the "
+                 "overlap, so it can otherwise be reported OK while being "
+                 "short. Off by default; the mismatches are always listed.",
+        ),
+    ] = False,
     exceptions: Annotated[
         str,
         typer.Option(
@@ -767,7 +780,7 @@ def main(
     if exceptions_map:
         print(f"Loaded {len(exceptions_map)} exception(s) from {exceptions}")
 
-    checked, failures = compare(
+    checked, failures, size_mismatches = compare(
         sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         equiv=equiv_set, diff_if_shifted=diff_if_shifted,
         expected_sizes=expected_sizes, no_data=no_data_set,
@@ -795,8 +808,22 @@ def main(
     if check_repro:
         tracker.print_check(check_repro)
 
-    if failures:
-        print(f"\nFAIL: {failures}/{checked} section(s) differ")
+    # A section whose size disagrees with the CSECT table is only compared
+    # over the overlap, so it can be reported OK while being short.  That is
+    # worth saying out loud: a section short by six halfwords is not a match,
+    # it is a match over the part that exists.
+    if size_mismatches:
+        print(f"\n{len(size_mismatches)} section(s) differ in size from the "
+              f"CSECT table; only the overlap was compared:")
+        for name, got, want in size_mismatches:
+            print(f"    {name}: {got} halfwords, table says {want} "
+                  f"({got - want:+d})")
+
+    if failures or (strict_sizes and size_mismatches):
+        if failures:
+            print(f"\nFAIL: {failures}/{checked} section(s) differ")
+        else:
+            print(f"\nFAIL: {len(size_mismatches)} section(s) differ in size")
         raise typer.Exit(1)
     else:
         print(f"\nPASS: all {checked} sections match")
