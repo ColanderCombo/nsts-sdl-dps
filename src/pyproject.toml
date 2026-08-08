@@ -18,6 +18,7 @@ dependencies = [
 asm101 = "asm101.cli:main"
 lnk101 = "lnk101.cli:main"
 dfg = "dfg.cli:main"
+mafgen = "mafgen.__main__:main"
 fcmcmp = "tools.fcmcmp:app"
 ibmobjdump = "tools.objdump:app"
 
@@ -25,4 +26,4 @@ ibmobjdump = "tools.objdump:app"
 # package.  `tools` is a PEP 420 namespace package (no __init__.py) so it
 # coexists with the repo-root tools/ used by the test harness.
 [tool.hatch.build.targets.wheel]
-packages = ["asm101", "lnk101", "dfg", "ap101Utils", "con80", "tools"]
+packages = ["asm101", "lnk101", "dfg", "ap101Utils", "con80", "mafgen", "tools"]

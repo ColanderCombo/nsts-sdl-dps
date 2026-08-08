@@ -70,6 +70,7 @@ _configure_wrapper(concard.sh.in   concard)
 _configure_wrapper(mmubuild.sh.in  mmubuild)
 _configure_wrapper(mmu2fcm.sh.in   mmu2fcm)
 _configure_wrapper(con80build.sh.in con80build)
+_configure_wrapper(mafgen.sh.in    mafgen)
 
 # Install-tree wrappers: reconfigure with install-prefix paths
 set(WRAPPER_BINDIR "${SDL_INSTALL_BINDIR}")
