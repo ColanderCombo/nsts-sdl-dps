@@ -607,16 +607,6 @@ def main(
             help="Group sections by base program name instead of sorting by address",
         ),
     ] = False,
-    strict_sizes: Annotated[
-        bool,
-        typer.Option(
-            "--strict-sizes",
-            help="Treat a section whose size disagrees with the CSECT table "
-                 "as a failure. Such a section is only compared over the "
-                 "overlap, so it can otherwise be reported OK while being "
-                 "short. Off by default; the mismatches are always listed.",
-        ),
-    ] = False,
     exceptions: Annotated[
         str,
         typer.Option(
@@ -811,7 +801,7 @@ def main(
     # A section whose size disagrees with the CSECT table is only compared
     # over the overlap, so it can be reported OK while being short.  That is
     # worth saying out loud: a section short by six halfwords is not a match,
-    # it is a match over the part that exists.
+    # it is a match over the part that exists, and that is a failure.
     if size_mismatches:
         print(f"\n{len(size_mismatches)} section(s) differ in size from the "
               f"CSECT table; only the overlap was compared:")
@@ -819,10 +809,10 @@ def main(
             print(f"    {name}: {got} halfwords, table says {want} "
                   f"({got - want:+d})")
 
-    if failures or (strict_sizes and size_mismatches):
+    if failures or size_mismatches:
         if failures:
             print(f"\nFAIL: {failures}/{checked} section(s) differ")
-        else:
+        if size_mismatches:
             print(f"\nFAIL: {len(size_mismatches)} section(s) differ in size")
         raise typer.Exit(1)
     else:
