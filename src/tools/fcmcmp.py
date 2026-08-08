@@ -3,7 +3,9 @@
 # Compare two FCM images section-by-section.
 #
 
+import collections
 import json
+import re
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -221,13 +223,14 @@ def _print_diffs(diff_positions, max_hw_diffs, pad, addr_to_sym, addr_to_rld):
 
 def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
             equiv=None, diff_if_shifted=True, expected_sizes=None,
-            no_data=None, exceptions=None):
+            no_data=None, exceptions=None, exception_kinds=None):
     failures = 0
     checked = 0
     size_mismatches = []
     no_data_total = 0
     patched_total = 0
     ignored_total = 0
+    marked_total = collections.Counter()
     stale_exceptions = []
 
     # Compute column width for aligned '@'
@@ -263,6 +266,7 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         no_data_here = 0
         patched_here = 0
         ignored_here = 0
+        marked_here = collections.Counter()
         if a != b:
             for hi in range(size.hw):
                 bo = hi * 2
@@ -288,8 +292,9 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
                         here = addr + Addr(hi * 2)
                         expected = exceptions.get(here.hw)
                         if expected is not None:
-                            if expected[0] is None:
+                            if expected[0] < 0:
                                 ignored_here += 1
+                                marked_here[expected[0]] += 1
                                 continue
                             if expected[0] == hw_b:
                                 patched_here += 1
@@ -299,6 +304,7 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         no_data_total += no_data_here
         patched_total += patched_here
         ignored_total += ignored_here
+        marked_total.update(marked_here)
 
         notes = []
         if patched_here:
@@ -365,7 +371,7 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
                                     continue
                                 if exceptions:
                                     e = exceptions.get((addr + Addr(hi * 2)).hw)
-                                    if e is not None and (e[0] is None
+                                    if e is not None and (e[0] < 0
                                                           or e[0] == vb):
                                         continue
                                 shifted_diffs.append(
@@ -387,7 +393,11 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
               f" build and were not counted as differing.")
     if ignored_total:
         print(f"{ignored_total} halfword(s) are listed as to be ignored, with no"
-              f" claim about their contents.")
+              f" claim about their contents:")
+        for kind in sorted(marked_total, reverse=True):
+            what = (exception_kinds or {}).get(
+                kind, f"known discrepancy of type {kind}")
+            print(f"    {marked_total[kind]:6d}  {what}")
     if stale_exceptions:
         print(f"WARNING: {len(stale_exceptions)} exception(s) do not match the"
               f" reference image and were ignored; the file may be stale:")
@@ -397,6 +407,11 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         print(f"\n{no_data_total} halfword(s) had no reference data and were"
               f" neither matched nor counted as differing.")
     return checked, failures, size_mismatches
+
+
+# "# -1 = Probable version-change related difference", declaring what a marker
+# means so the report can say it.  Optional: an undeclared kind still works.
+KIND_DECL_RE = re.compile(r"\s*(-\d+)\s*=\s*(.+)")
 
 
 def load_exceptions(path):
@@ -415,24 +430,42 @@ def load_exceptions(path):
 
     the fields being a halfword address, the value the reference image is
     expected to hold there, and an optional name.  The address is hex; so is
-    the value, EXCEPT for the special value -1.
+    the value, EXCEPT that ANY negative number is a marker rather than a value.
 
-    -1 means "ignore this address, no claim about what it holds".  The two
-    cases are different in kind and it is worth keeping them apart.  A value
-    says: this location was changed after the build and here is what it was
-    changed to -- checkable, and checked.  -1 says only: a difference here is
-    expected for a reason recorded elsewhere, and nothing is being asserted
-    about the contents.  Without -1 the only way to express the second case
-    would be to write the reference image's own value into the file, which
-    would "verify" trivially and quietly turn a checkable mechanism into one
-    that can absorb any difference at all.
+    A value says: this location was changed after the build and here is what it
+    was changed to -- checkable, and checked.  A marker says only that a
+    difference here is expected, and asserts nothing about the contents; the
+    particular negative number says which KIND of expectation, and the file
+    itself decides what the kinds mean.  Without markers the only way to express
+    that would be to write the reference image's own value into the file, which
+    would "verify" trivially and turn a checkable mechanism into one that
+    absorbs any difference at all.
 
-    Returns {address: (value, name)}, value None for -1.
+    fcmcmp does not interpret the kinds, and deliberately does not enumerate
+    them: a producer can introduce one without this tool changing.  It reports
+    them separately from each other so the mix stays visible, and a file may
+    declare what its kinds mean in a comment, which is then used verbatim in the
+    report:
+
+        # -1 = Probable version-change related difference
+        # -2 = Probable floating-point bug in original compiler
+
+    Anything not declared is reported as "known discrepancy of type -n", which
+    is also what an accidental -10 looks like -- it is counted and shown under
+    its own heading rather than silently joining the -1s.
+
+    Returns ({address: (value, name)}, {kind: description}), the value being a
+    non-negative int or a negative int marker.
     """
     exceptions = {}
+    kinds = {}
     with open(path) as f:
         for lineno, line in enumerate(f, 1):
-            line = line.split("#", 1)[0].strip()
+            body, _, comment = line.partition("#")
+            declared = KIND_DECL_RE.match(comment)
+            if declared:
+                kinds[int(declared.group(1))] = declared.group(2).strip()
+            line = body.strip()
             if not line:
                 continue
             fields = line.split()
@@ -440,12 +473,14 @@ def load_exceptions(path):
                 raise ValueError(f"{path}:{lineno}: expected 'address value [name]'")
             try:
                 address = int(fields[0], 16)
-                value = None if fields[1] == "-1" else int(fields[1], 16)
+                # Negative is a marker, in decimal; anything else is a hex value.
+                value = (int(fields[1], 10) if fields[1].startswith("-")
+                         else int(fields[1], 16))
             except ValueError:
-                raise ValueError(f"{path}:{lineno}: address and value must be "
-                                 f"hex, or the value -1")
+                raise ValueError(f"{path}:{lineno}: address must be hex, and the "
+                                 f"value hex or a negative marker")
             exceptions[address] = (value, fields[2] if len(fields) > 2 else "")
-    return exceptions
+    return exceptions, kinds
 
 
 def collect_diffs(sections, image_a, image_b, equiv=None):
@@ -766,7 +801,8 @@ def main(
 
     no_data_set = frozenset(int(v, 16) for v in no_data.split(",")
                             if v.strip()) or None
-    exceptions_map = load_exceptions(exceptions) if exceptions else None
+    exceptions_map, exception_kinds = (load_exceptions(exceptions) if exceptions
+                                       else (None, {}))
     if exceptions_map:
         print(f"Loaded {len(exceptions_map)} exception(s) from {exceptions}")
 
@@ -774,7 +810,7 @@ def main(
         sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         equiv=equiv_set, diff_if_shifted=diff_if_shifted,
         expected_sizes=expected_sizes, no_data=no_data_set,
-        exceptions=exceptions_map,
+        exceptions=exceptions_map, exception_kinds=exception_kinds,
     )
 
     # Collect all diffs (no elision) when dumping or when repro needs them
