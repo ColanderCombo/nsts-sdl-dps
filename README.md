@@ -94,7 +94,7 @@ Build targets:
 Tests can also be run directly with `ctest --test-dir build` (add `-R
 <pattern>` for a subset, `-j8` to parallelize).  Built tools land in
 `build/bin/` (`halsc`, `asm101`, `lnk101`, `con80build`, `mmu2fcm`,
-`gpc`, `fcmcmp`, ...).
+`mafgen`, `gpc`, `fcmcmp`, ...).
 
 Contents
 --------
@@ -121,6 +121,7 @@ these trees, symlinks elsewhere in the tree point into the `ext/` tree.
         handling, CON80 deck parsing, link-order pins, ...)
       - `con80`: con80build, the CON80-deck-driven tree builder
       - `dfg`: Display Format Generator
+      - `mafgen`: DASS-style listing regeneration
       - `tools`: object-file and listing utilities (fcmcmp,
         ibmobjdump, mmu2fcm, mmubuild, delist, ...)
       - `XCOM-I`: link to virtualagc/XCOM-I
@@ -223,6 +224,32 @@ core (halfwords 0x1C and 0x20) — they are load-time values, not part of
 any load module, so omitting them leaves the words zero.
 `--stamp-phase-tables` additionally generates and stamps the
 mass-memory phase tables into the image.
+
+### Disassembling/Listing a build image: mafgen
+
+MAFGEN was a period program that printed a build's memory map and
+annotated disassembly "DASS" listings.  Our `mafgen` attempts to 
+duplicate this functionality to generate a .ASC that can be used
+to browse the contents of the image or to compare images
+
+```
+build/bin/mafgen SSW --mmu build/OI340600 -o build/mafgen/SSW.ASC
+```
+
+Three sections come out (`--sections index,extent,dump`): the
+alphabetical csect→address index, the address-ordered csect extent list,
+and the memory dump — AP-101 disassembly for code csects, typed `DC`
+rows for HAL and assembler data, with names resolved from the phase SDF
+libraries and the assembler's `.asmg.json` sidecars.
+
+Our mafgen doesn't yet output *every* section output by the original
+MAFGEN, and doesn't currently output page headers/footers.  If you
+wanted to ensure two .ASC files are diff'able, you can use `--strip FILE` 
+to normalize FILE to be in our expected format.
+
+Given a second FILE.ASC in normal format,  `--score FILE` generates 
+and then reports the exact-line match rate per line class 
+(index / header / code / data / other).
 
 ### Generating display compools: dfg
 

@@ -4,10 +4,10 @@ Generate a DASS-style listing from a composed config build:
     mafgen G2 -o build/mafgen/G2.ASC
 
 Normalize a real MAFGEN listing for diffing:
-    mafgen --strip ../pfs/PFS/mafgen/DASS_G2.ASC -o g2.ref
+    mafgen --strip DASS_G2.ASC -o g2.ref
 
 Generate + compare in one shot (the fidelity metric):
-    mafgen G2 --score ../pfs/PFS/mafgen/DASS_G2.ASC
+    mafgen G2 --score DASS_G2.ASC
 """
 import json
 import re
@@ -170,7 +170,7 @@ def generate(
         help="rebuild the SDF block-name cache")] = False,
     deck: Annotated[Optional[str], typer.Option("--deck", metavar="MAFTWO",
         help="MAFGEN control deck for csect AS TYPE classification "
-             "(default: the pfs TOOLIN copy)")] = None,
+             "(default: the source tree's TOOLIN copy)")] = None,
     base: Annotated[Optional[str], typer.Option("--base", metavar="FCM",
         help="unpatched reference image: halfwords that differ print the "
              "'*' patch marker")] = None,

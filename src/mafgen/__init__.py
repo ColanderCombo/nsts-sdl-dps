@@ -3,7 +3,7 @@
 Reads a composed memory-configuration image (mmu2fcm's <CFG>.fcm +
 <CFG>.sym.json) plus the per-phase build sidecars (PHASEnn sym.json, SDFLIB)
 and emits a DASS-style listing that can be diffed against the flight MAFGEN
-listings in pfs/PFS/mafgen/DASS_*.ASC.
+listings (DASS_*.ASC).
 
 Sections emitted:
   * the alphabetical csect -> address index
