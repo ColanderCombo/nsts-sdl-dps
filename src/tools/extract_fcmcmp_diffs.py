@@ -23,7 +23,11 @@ def extract_diffs(text):
             current_section = m.group(1)
             continue
 
-        if stripped.startswith('OK:') or stripped.startswith('SKIP:'):
+        # "N/A:" closes a section as surely as OK: does.  It is emitted for a
+        # section that differs but is not in the configuration, so no diff lines
+        # follow it; without it here, a preceding FAIL would stay current and the
+        # next stray "@ addr" line would be filed under the wrong section.
+        if stripped.startswith(('OK:', 'SKIP:', 'N/A:')):
             current_section = None
             continue
 
