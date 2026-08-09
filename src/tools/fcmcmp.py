@@ -917,6 +917,15 @@ def main(
             print(f"    {name}: {got} halfwords, table says {want} "
                   f"({got - want:+d})")
 
+    # Before the verdict, not after it.  This used to sit below the exit, where
+    # a run with any failure never reached it -- and a section reported N/A is
+    # most worth accounting for precisely when something else in the same unit
+    # failed, since that is when the reader is deciding what the failure means.
+    if skipped:
+        print(f"\n{len(skipped)} section(s) differ but are not in this "
+              f"configuration, so the difference is against memory belonging to "
+              f"another section and no claim is made: {', '.join(skipped)}")
+
     if failures or size_mismatches:
         if failures:
             print(f"\nFAIL: {failures}/{checked} section(s) differ")
@@ -925,10 +934,6 @@ def main(
         raise typer.Exit(1)
     else:
         print(f"\nPASS: all {checked} sections match")
-    if skipped:
-        print(f"{len(skipped)} section(s) differ but are not in this "
-              f"configuration, so the difference is against memory belonging to "
-              f"another section and no claim is made: {', '.join(skipped)}")
 
 
 if __name__ == "__main__":
