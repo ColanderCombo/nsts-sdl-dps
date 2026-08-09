@@ -97,6 +97,44 @@ def load_expected_sizes(csect_table_path):
     return sizes
 
 
+def load_not_in_config(csect_table_path):
+    """Sections the CSECT table says this configuration does not contain, mapped
+    to the section that owns their span instead.
+
+    A CSECT table may deliberately carry sections the configuration does not
+    contain.  The linker needs their addresses: a configuration can hold a
+    module's ZCON without holding the module, and the ZCON must point at the
+    address that code has in the configuration where the overlay IS loaded.  So
+    the section gets placed, and is then compared against whatever the reference
+    image happens to hold there -- unrelated memory.  The resulting
+    "differences" are not differences; the comparison was never meaningful.  In
+    G3, DKFCM2 reported "FAIL: 2/3 section(s) differ" with 14 and 61 differing
+    halfwords, and neither section is in G3 at all.
+
+    The value carries "spanOwner": the name of a different section, in this
+    configuration's own index, covering the same address.  It is required, not
+    decorative, and the reason is that "inConfig": false is weak evidence.  A
+    configuration can hold both the ZCON and the module, so a section marked
+    absent may be present after all.  Measured across eight PASS
+    configurations, 79 marked sections MATCH the reference image, and 59 of them
+    verify content that the --no-data patterns do not account for -- up to 477
+    halfwords, in SSW's #DDCDDG3.  Those are real agreements about real memory.
+
+    So a mark alone is never allowed to suppress anything.  A spanOwner says
+    what the memory demonstrably belongs to instead, and only then is a
+    difference known to be meaningless.  In G3, 0xB728 lies inside #PCGZFLD; in
+    SSW that same address is unclaimed, and there #DDKFCM2 matches.
+
+    Nothing is inferred.  An entry without the field is in-configuration, so a
+    table that does not use it behaves exactly as before.
+    """
+    with open(csect_table_path) as f:
+        data = json.load(f)
+    return {name: info.get("spanOwner")
+            for name, info in data.items()
+            if isinstance(info, dict) and info.get("inConfig") is False}
+
+
 def _format_size(size_hw, expected_hw):
     """Return '(N halfwords)' or '(N halfwords vs M expected)' if mismatched."""
     if expected_hw is not None and expected_hw != size_hw:
@@ -223,10 +261,12 @@ def _print_diffs(diff_positions, max_hw_diffs, pad, addr_to_sym, addr_to_rld):
 
 def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
             equiv=None, diff_if_shifted=True, expected_sizes=None,
+            not_in_config=None,
             no_data=None, exceptions=None, exception_kinds=None):
     failures = 0
     checked = 0
     size_mismatches = []
+    skipped = []
     no_data_total = 0
     patched_total = 0
     ignored_total = 0
@@ -316,6 +356,36 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         suffix = f" [{', '.join(notes)}]" if notes else ""
         if not diff_positions:
             print(f"  OK:   {padded} @ {addr.x} {size_str}{suffix}")
+        elif not_in_config and not_in_config.get(name.strip()):
+            # This section is not in the configuration, and another section in
+            # the configuration's own index owns the span, so the halfwords just
+            # compared belong to that one.  A difference against it says nothing.
+            #
+            # The order of these branches is the safety property, not a matter of
+            # style.  The test comes AFTER the comparison and after the
+            # no-difference case, so a section marked absent that nevertheless
+            # MATCHES is still reported as OK.  It has to be: the mark says where
+            # an address came from, not that the section is gone.  Skipping on the
+            # mark alone was tried first, and on the eight PASS configurations it
+            # silenced 36 sections that match -- 28 of them verifying content the
+            # --no-data patterns do not cover, 296 halfwords in all.  Hiding
+            # agreement is a worse fault than the noise this removes.
+            #
+            # Downgrading only a failure, and only where the span has a named
+            # owner, cannot lose a match however wrong the mark is.
+            #
+            # "N/A:" and not a word of its own, for two reasons.  It occupies the
+            # same 8-column field as "OK:" and "FAIL:", so the section names stay
+            # in one column down the whole report; and it does not read as an
+            # alarm.  A failure count is the first thing anyone looks at here, and
+            # a non-zero one is disturbing whether or not it means anything.
+            print(f"  N/A:  {padded} @ {addr.x} {size_str}{suffix}"
+                  f" — not in this configuration;"
+                  f" this span belongs to {not_in_config[name.strip()]}")
+            skipped.append(name.strip())
+            # Not counted among the sections checked: the run makes no claim
+            # about it, so it must not swell a "PASS: all N sections match".
+            checked -= 1
         else:
             print(
                 f"  FAIL: {padded} @ {addr.x} {size_str}{suffix}"
@@ -406,7 +476,7 @@ def compare(sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
     if no_data_total:
         print(f"\n{no_data_total} halfword(s) had no reference data and were"
               f" neither matched nor counted as differing.")
-    return checked, failures, size_mismatches
+    return checked, failures, size_mismatches, skipped
 
 
 # "# -1 = Probable version-change related difference", declaring what a marker
@@ -757,6 +827,7 @@ def main(
 
     addr_to_sym, addr_to_rld = load_annotations(sym_json, csect_table)
     expected_sizes = load_expected_sizes(csect_table) if csect_table else None
+    not_in_config = load_not_in_config(csect_table) if csect_table else None
 
     # --diff-json mode: compare FCM_A against recorded reference values
     if diff_json:
@@ -806,11 +877,12 @@ def main(
     if exceptions_map:
         print(f"Loaded {len(exceptions_map)} exception(s) from {exceptions}")
 
-    checked, failures, size_mismatches = compare(
+    checked, failures, size_mismatches, skipped = compare(
         sections, image_a, image_b, max_hw_diffs, addr_to_sym, addr_to_rld,
         equiv=equiv_set, diff_if_shifted=diff_if_shifted,
         expected_sizes=expected_sizes, no_data=no_data_set,
         exceptions=exceptions_map, exception_kinds=exception_kinds,
+        not_in_config=not_in_config,
     )
 
     # Collect all diffs (no elision) when dumping or when repro needs them
@@ -853,6 +925,10 @@ def main(
         raise typer.Exit(1)
     else:
         print(f"\nPASS: all {checked} sections match")
+    if skipped:
+        print(f"{len(skipped)} section(s) differ but are not in this "
+              f"configuration, so the difference is against memory belonging to "
+              f"another section and no claim is made: {', '.join(skipped)}")
 
 
 if __name__ == "__main__":
