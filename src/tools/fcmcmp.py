@@ -59,13 +59,27 @@ def load_annotations(sym_json_path, csect_table_path=None):
         addr_to_sym[s["address"]] = s["name"]
 
     for r in sym_data.get("relocations", []):
-        hw_addr = r["address"]
         target = Addr.from_hw(r["target"])
         sym = r.get("symbol", "")
         targetName = r.get("targetName", "")
         flags = r.get("flags", 0)
+        con = AddrCon(flags)
+        # KEY ON THE HALFWORD THAT HOLDS THE ADDRESS, not on the first halfword
+        # of the relocated field.  A 4-byte ACON begins with the opcode
+        # halfword, which is identical however the site resolved, so an
+        # annotation attached there is never printed beside a difference.
+        # OI340600's G9 shows it: FIOPDSPG differs at 1E4B3 and 1E4BF while its
+        # two relocations start at 1E4B2 and 1E4BE, so the two lines that
+        # needed explaining printed bare --
+        #
+        #     @ 1E4B3 05C0 vs 0000
+        #     @ 1E4BF 05C4 vs 0000
+        #
+        # -- while the "RLD TFCMPFD1 -> F20005C0" that explains them sat on a
+        # halfword that always matches and so was never shown.
+        hw_addr = r["address"] + (con.length // 2 - 1)
         label = f"{targetName} ({sym})" if targetName and sym and targetName != sym else (sym or targetName)
-        neg = " (negative disp.)" if AddrCon(flags).is_negative else ""
+        neg = " (negative disp.)" if con.is_negative else ""
         addr_to_rld[hw_addr] = f"RLD {label} -> {target.x}{neg}"
 
     if csect_table_path:
