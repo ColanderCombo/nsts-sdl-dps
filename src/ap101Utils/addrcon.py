@@ -130,6 +130,14 @@ class AddrCon:
             return target.sector_encode()
         return target.hw
 
+    # The address field of a 4-byte ACON.  A fullword relocation is also how
+    # the BCE long-format instructions carry their operand -- the opcode is the
+    # top byte and the address the low 24 bits -- because the format has no
+    # relocation of that width: YCON is 2 bytes, ACON is 4, and nothing lies
+    # between.  Adding leaves the opcode alone, so the unsigned case has always
+    # worked; negating the whole word does not.
+    _ACON_ADDRESS = 0x00FFFFFF
+
     def apply(self, existing: int, target: Addr) -> int:
         """Apply this relocation: compute new value from existing and target.
 
@@ -138,16 +146,38 @@ class AddrCon:
         number.  S (direction) is the direction of relocation.  So:
             result = (V==0 ? +existing : -existing)
                    + (S==0 ? +value : -value)
+
+        A SIGNED FULLWORD NEGATES ITS ADDRESS FIELD, NOT ITS TOP BYTE.  The
+        rule above is written for a YCON, where the whole field is the
+        constant.  A 4-byte ACON may carry an opcode in its top byte, and
+        negating that too corrupts the instruction: `#LBR@ FIOBRE-2` assembles
+        FA000002, and with FIOBRE at 8BC6 the whole-word negation gives
+        06008BC4 -- the address right and FA00 destroyed -- where the original
+        build has FA008BC4.  Only the low 24 bits are the constant, so only
+        they are negated.  This changes nothing for a value that fits in 24
+        bits, which every AP-101 address does, so an ordinary signed ACON is
+        unaffected; it changes only the case where the top byte is non-zero,
+        and a displacement of 16M is not one.
         """
         value = self.encode(target)
-        signed_existing = -existing if self.sign else existing
         signed_value = -value if self.direction else value
+        if self.sign and self.length == 4:
+            field = existing & self._ACON_ADDRESS
+            return ((existing & ~self._ACON_ADDRESS)
+                    | ((signed_value - field) & self._ACON_ADDRESS)) & self.mask
+        signed_existing = -existing if self.sign else existing
         return (signed_existing + signed_value) & self.mask
 
     def reverse(self, existing: int, result: int, sector: int = 0) -> int:
         """Reverse this relocation: given existing and result, recover
         the target halfword address.  For sector 1+ ZCONs, pass the
         sector register value to fully decode."""
+        if self.sign and self.length == 4:
+            # The inverse of the address-field form above.
+            signed_value = ((result & self._ACON_ADDRESS)
+                            + (existing & self._ACON_ADDRESS)) \
+                           & self._ACON_ADDRESS
+            return (-signed_value & self.mask) if self.direction else signed_value
         signed_existing = -existing if self.sign else existing
         signed_value = (result - signed_existing) & self.mask
         target_raw = (-signed_value & self.mask) if self.direction else signed_value

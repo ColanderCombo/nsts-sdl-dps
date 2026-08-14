@@ -178,5 +178,57 @@ class TestAddrConReverse(unittest.TestCase):
                 self._roundtrip(sign, direction, 0x0019, 0x448F8)
 
 
+class TestSignedAconAddressField(unittest.TestCase):
+    """A signed 4-byte ACON negates its ADDRESS FIELD, not its top byte.
+
+    The BCE long-format instructions carry their operand in a fullword whose
+    top byte is the opcode and whose low 24 bits are the address, because the
+    format has no relocation of that width -- YCON is 2 bytes, ACON is 4, and
+    nothing lies between.  Adding leaves the opcode alone, so V=0 has always
+    worked; negating the whole word does not.
+
+    FIOMDPPG is the case.  Its contemporary assembly listing gives
+
+        00006 FA00 0002      0002    33    #LBR@ FIOBRE-2
+
+    -- the magnitude, opcode intact -- and DASS_G9 has FA00 8BC4 with FIOBRE
+    at halfword 8BC6.
+    """
+
+    def test_lbr_negative_displacement_keeps_opcode(self):
+        con = AddrCon(0x9C)
+        self.assertEqual(con.length, 4)
+        self.assertEqual(con.sign, 1)
+        self.assertEqual(con.apply(0xFA000002, Addr.from_hw(0x8BC6)),
+                         0xFA008BC4)
+
+    def test_mout_negative_displacement_keeps_opcode(self):
+        con = AddrCon(0x9C)
+        self.assertEqual(con.apply(0xFD000002, Addr.from_hw(0x8C94)),
+                         0xFD008C92)
+
+    def test_unsigned_acon_is_unchanged(self):
+        # V=0 adds, which is how every positive `#LBR@ SYM+n` already links.
+        con = AddrCon(0x1C)
+        self.assertEqual(con.apply(0xFA000002, Addr.from_hw(0x8BC6)),
+                         0xFA008BC8)
+
+    def test_signed_acon_without_an_opcode_byte_is_unchanged(self):
+        # An ordinary signed adcon, top byte zero: identical to whole-word
+        # arithmetic, because every AP-101 address fits in 24 bits.
+        con = AddrCon(0x9C)
+        self.assertEqual(con.apply(0x00000001, Addr.from_hw(0x271A)), 0x2719)
+
+    def test_roundtrip(self):
+        con = AddrCon(0x9C)
+        for existing, target_hw in ((0xFA000002, 0x8BC6),
+                                    (0xFD000002, 0x8C94),
+                                    (0x00000001, 0x271A)):
+            result = con.apply(existing, Addr.from_hw(target_hw))
+            self.assertEqual(con.reverse(existing, result), target_hw,
+                             f"existing=0x{existing:08X} "
+                             f"target=0x{target_hw:05X}")
+
+
 if __name__ == "__main__":
     unittest.main()
