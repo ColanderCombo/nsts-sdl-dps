@@ -36,8 +36,10 @@ def _rld_type(flags):
     return f"{con.kind}({'-' if con.is_negative else '+'})"
 
 
-def _print_sym_table(symbols):
-    """Print the decoded SYM symbol table."""
+def _sym_table_lines(symbols):
+    """The decoded SYM symbol table, as a list of lines."""
+    out = []
+    print = out.append  # noqa: A001 -- collect rather than emit
     print(f"{'=' * 60}")
     print(f"SYM table: {len(symbols)} symbols")
     print(f"{'=' * 60}")
@@ -62,13 +64,32 @@ def _print_sym_table(symbols):
             parts.append("CLUSTER")
         print("  ".join(parts))
     print(f"{'=' * 60}")
+    return out
 
 
-def dump_obj(filename, hex_dump=False, show_sym=False):
+def dump_obj(filename, hex_dump=False, show_sym=False, normalize=False):
     of = objModule.ObjectFile(str(filename))
 
+    # NORMALIZED OUTPUT EXISTS SO THAT TWO OBJECTS CAN BE COMPARED.  An
+    # assembler is free to emit its ESD entries in any order -- ASM101S keeps
+    # ENTRY and EXTRN symbols in Python sets, so the order varies from one run
+    # to the next, and assembling one module three times gave three different
+    # files with no difference in meaning.  Nothing else in the file is
+    # positional: TXT, RLD and END all name their section, and the ESD index is
+    # merely where the entry happened to land.  So dropping the index columns
+    # and sorting is lossless, and it turns "are these two objects the same
+    # program" back into a question `diff` can answer.
+    blocks = []  # (kind, sortKey, [lines]); kind orders the groups
+
+    def emit(lines, kind=3, key=""):
+        if normalize:
+            blocks.append((kind, key, lines))
+        else:
+            for line in lines:
+                print(line)
+
     for err in (e for m in of.modules for e in m.errors):
-        print(f"  {err}")
+        emit([f"  {err}"])
 
     symbols = [s for m in of.modules for s in m.symbols]
     esd_names = {}  # esdId -> name
@@ -79,33 +100,39 @@ def dump_obj(filename, hex_dump=False, show_sym=False):
 
         # Print SYM table after the last SYM card
         if show_sym and not sym_table_printed and typ != "SYM" and symbols:
-            _print_sym_table(symbols)
+            emit(_sym_table_lines(symbols))
             sym_table_printed = True
 
         if isinstance(rec, ControlRecord):
-            print(f"CTL  {rec.text.rstrip()}")
+            emit([f"CTL  {rec.text.rstrip()}"])
 
         elif isinstance(rec, EsdRecord):
             for e in rec.esdEntries:
                 name = e.name.strip()
                 esd_names[e.esdId] = name
 
-                parts = [f"ESD  [{e.esdId:3d}] {e.typeName:2s} {name:8s}"]
+                index = "     " if normalize else f"[{e.esdId:3d}] "
+                parts = [f"ESD  {index}{e.typeName:2s} {name:8s}"]
                 if e.address is not None:
                     parts.append(f"addr={Addr(e.address).x}")
                 if e.length is not None:
                     parts.append(f"len={AddrDisp(e.length).hw} hw")
                 if e.ldid is not None:
-                    parts.append(f"ldid={e.ldid}")
+                    # An LD cites the SD it belongs to by index, which moves
+                    # with the ESD order; its name does not.
+                    parts.append(f"ldid={esd_names.get(e.ldid, e.ldid)}"
+                                 if normalize else f"ldid={e.ldid}")
                 if e.remote:
                     parts.append("REMOTE")
-                print("  ".join(parts))
+                line = "  ".join(parts)
+                emit([line], kind=0, key=line)
 
         elif isinstance(rec, TxtRecord):
             tr = rec.textRecord
             size = len(tr.data)
             name = esd_names.get(tr.esdId, f"#{tr.esdId}")
-            print(f"TXT  [{tr.esdId:3d}] {name:8s}  addr={Addr(tr.address).x}  {size} bytes")
+            index = "     " if normalize else f"[{tr.esdId:3d}] "
+            lines = [f"TXT  {index}{name:8s}  addr={Addr(tr.address).x}  {size} bytes"]
             if hex_dump and size > 0:
                 for off in range(0, size, 16):
                     chunk = tr.data[off:min(off + 16, size)]
@@ -116,18 +143,20 @@ def dump_obj(filename, hex_dump=False, show_sym=False):
                             hwords.append(f"{chunk[h]:02X}{chunk[h+1]:02X}")
                         else:
                             hwords.append(f"{chunk[h]:02X}")
-                    print(f"       {Addr(tr.address + off).x}: {' '.join(hwords)}")
+                    lines.append(f"       {Addr(tr.address + off).x}: {' '.join(hwords)}")
+            emit(lines, kind=1, key=f"{name} {tr.address:08X}")
 
         elif isinstance(rec, RldRecord):
             for r in RldEntry.expand([rec.payload], []):
                 rname = esd_names.get(r.relId, f"#{r.relId}")
                 pname = esd_names.get(r.posId, f"#{r.posId}")
                 rtype = _rld_type(r.flags)
-                print(f"RLD  {rtype:12s}  {rname:8s} -> {pname:8s}"
-                      f"  addr={Addr(r.address).x}  flags={r.flags:02X}")
+                line = (f"RLD  {rtype:12s}  {rname:8s} -> {pname:8s}"
+                        f"  addr={Addr(r.address).x}  flags={r.flags:02X}")
+                emit([line], kind=2, key=line)
 
         elif isinstance(rec, SymRecord):
-            print(f"SYM  {rec.numBytesData} bytes")
+            emit([f"SYM  {rec.numBytesData} bytes"])
 
         elif isinstance(rec, EndRecord):
             end = rec.endInfo
@@ -138,17 +167,25 @@ def dump_obj(filename, hex_dump=False, show_sym=False):
                 parts.append(f"entryName={end.entryName.strip()}")
             if end.esdId is not None:
                 name = esd_names.get(end.esdId, f"#{end.esdId}")
-                parts.append(f"esdid={end.esdId}({name})")
+                parts.append(f"esdid={name}" if normalize
+                             else f"esdid={end.esdId}({name})")
             if end.length is not None:
                 parts.append(f"len={end.length}")
             if end.translator and end.translator.strip():
                 parts.append(f"translator={end.translator.strip()}")
             if end.processor and end.processor.strip():
                 parts.append(f"processor={end.processor.strip()}")
-            print("  ".join(parts))
+            emit(["  ".join(parts)])
 
         else:
-            print(f"???  type={typ}")
+            emit([f"???  type={typ}"])
+
+    if normalize:
+        # Stable sort, so the groups that are NOT reordered -- CTL, SYM, END --
+        # keep the order they were read in.
+        for _, _, lines in sorted(blocks, key=lambda b: (b[0], b[1])):
+            for line in lines:
+                print(line)
 
 
 def extract_txt(filename, out_dir):
@@ -197,6 +234,11 @@ def main(
         help="Include hex dump of TXT record data")] = False,
     show_sym: Annotated[bool, typer.Option("--show-sym-table", "-s",
         help="Show decoded SYM symbol table")] = False,
+    normalize: Annotated[bool, typer.Option("--normalize", "-n",
+        help="Canonical form for comparing two objects: drop the ESD index "
+             "columns, which are positional, and sort the ESD, TXT and RLD "
+             "groups.  Implies --hex, since a comparison that ignored the "
+             "code would call two unrelated modules equal.")] = False,
     extract: Annotated[Optional[Path], typer.Option("--extract-txt",
         help="Extract each CSECT's TXT data to a .bin file in this directory"
     )] = None,
@@ -221,7 +263,8 @@ def main(
         if extract is not None:
             extract_txt(obj_file, extract)
         else:
-            dump_obj(obj_file, hex_dump=hex_dump, show_sym=show_sym)
+            dump_obj(obj_file, hex_dump=hex_dump or normalize,
+                     show_sym=show_sym, normalize=normalize)
 
     if repro:
         tracker.print_summary()
