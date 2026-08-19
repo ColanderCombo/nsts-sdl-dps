@@ -2,26 +2,19 @@
 """mmu2fcm -- emulate the GPC IPL/SSL load, composing a memory-configuration
 image from the linked phase load modules (.lib).
 
-The flight loader chain (GPCIPL -> FCMBOOT -> FCMINSSL/FCMMOVE/FCMINMMR)
-reads the MMU phase table and places each phase's load blocks at their GPC
-main-memory addresses, in IPL order, later phases overlaying earlier ones
-(FCOS overlay).  Our load blocks ARE the .lib TEXT extents, already at
-absolute linked addresses, so the composition reads the .lib files
-directly.
+The loader chain reads the MMU phase table and places each phase's load
+blocks at their GPC main-memory addresses, in IPL order, later phases
+overlaying earlier ones (FCOS overlay).  Our load blocks are the .lib TEXT
+extents, already at absolute linked addresses, so the composition reads the
+.lib files directly.
 
-Memory not covered by any load block keeps the IPL hardware background fill:
-C9FB in hw 0x00000-0x1FFFF, C6C6 in hw 0x20000-0x7FFFF (banks 0-3 vs 4-15).
-Alloc-only csects (the load-block RESERVE bit -- no data on tape) have no
-TEXT extent and correctly stay as background fill.
+Memory not covered by any load block and alloc-only blocks keep the
+IPL hardware background fill:
+    C9FB in hw 0x00000-0x1FFFF,
+    C6C6 in hw 0x20000-0x7FFFF (banks 0-3 vs 4-15).
 
 Each checksum-group run (TEXT extent) is followed on tape by its 2-hw
-fullword-aligned CHECKSUM slot, INCLUDED in the load block (mmbstamp rule:
-lb_len = roundup_fullword(extent_end) - extent_start + 2, capped at the
-bank boundary).  The MMB stages tape blocks from an INIT=C6C6 buffer, so an
-unstamped slot loads as C6C6 -- NOT the IPL background (the flight DASS
-shows C6C6 at every unstamped slot below hw 0x20000, where the IPL
-background would be C9FB).  compose() therefore fills each extent's
-trailing pad+slot halfwords with C6C6 wherever no phase's TEXT owns them.
+fullword-aligned CHECKSUM slot, included in the load block.
 
 Output is a phase-dir-shaped pair <out>/<NAME>.fcm + <NAME>.sym.json (the
 union of the constituent phases' sym.json, overlay-aware).
@@ -33,8 +26,8 @@ import sys
 from pathlib import Path
 
 from ap101Utils.concard import ConcardDeck, layout_program, phase_numbers
-from ap101Utils.libModule import LibModule
-from ap101Utils.mcconfigs import (CONFIG_NAMES, McConfigError,
+from ap101Utils.libModule import LibModule, regionIntervals
+from ap101Utils.mcconfigs import (CONFIG_NAMES, IPL_PHASES, McConfigError,
                                   listConfigs, load_configs)
 from ap101Utils.objModule import EsdType
 from ap101Utils import psaIdent
@@ -47,6 +40,11 @@ FILL_SPLIT_HW = 0x20000              # C9FB below, C6C6 at/above
 BANK_HW = 0x8000                     # 32K-hw bank; a checksum slot never
                                      # crosses into the next bank
 SLOT_FILL = b"\xC6\xC6"              # MMB INIT=C6C6 staging buffer
+
+
+def slotHalfwords(endHW: int) -> range:
+    cap = ((endHW - 1) // BANK_HW + 1) * BANK_HW
+    return range(endHW, min((endHW + 1) // 2 * 2 + 2, cap, MEM_HW))
 
 
 def phaseName(n: int) -> str:
@@ -74,15 +72,9 @@ def loadPhase(mmuRoot: Path, n: int):
 
 
 def iplMfbRegions(deck: ConcardDeck, phase: int):
-    """The GNC-decouple cut (CR90717 OI25.04): the IPL image stages the
-    MFB phase's load blocks only for the regions its structure member --
-    the deck member carrying the phase's BANK cards (MFB3) -- declares
-    BEFORE the first BANK card (IM1IH1 "ALL MC'S", FCOSFIO1 "SET UP IN
-    PHASE 2").  Everything banked is OPS-transition content (MFB3: "THE
-    UPPER MEMORY LOAD BLOCKS MUST BE LAST IN THE PHASE"), as are the
-    phase's patch space and Z-pool contribution, which come from other
-    members (PATCH03, PHASE03).  DASS_SSW is empty at exactly these
-    regions, while G2/G16/G8/G9 carry them at identical addresses.
+    """The IPL image stages the MFB phase's load blocks only for the
+    regions its structure member -- the deck member carrying the phase's
+    BANK cards -- declares before the first BANK card.
 
     Returns ([regionName, ...], structureMember); ([], None) when the
     phase's segment has no BANK card (no cut)."""
@@ -101,13 +93,60 @@ def iplMfbRegions(deck: ConcardDeck, phase: int):
     return [], None
 
 
+def configMapRegions(deck: ConcardDeck, pgmPhases) -> list[str] | None:
+    """PHASE02 regions a memory configuration keeps mapped: the union of
+    the `MAP 2,<region...>` cards in the OPS-transition phases' layout
+    programs.
+
+    Returns None (no cut) when a phase member is missing or a bare
+    `MAP 2` card maps the whole phase."""
+    names: set[str] = set()
+    for p in pgmPhases:
+        member = f"PHASE{p:02d}"
+        if not deck.has(member):
+            log.warning(f"configMapRegions: no {member} deck member -- "
+                        f"PHASE02 staged uncut")
+            return None
+        for op in layout_program(deck, member):
+            if op.verb != "MAP" or not op.operand:
+                continue
+            parts = [t.strip() for t in op.operand.split(",")]
+            if not parts[0].isdigit() or int(parts[0]) != 2:
+                continue
+            regs = [t for t in parts[1:] if t]
+            if not regs:
+                return None          # bare MAP 2: whole phase mapped
+            names.update(regs)
+    return sorted(names)
+
+
+def chainReopenedRegions(deck: ConcardDeck, pgmPhases,
+                         phase2Regions) -> set[str]:
+    """PHASE02 region names re-OVERLAY'd (an origin-less OVERLAY card
+    naming a known PHASE02 region) in the config chain's layout programs.
+
+    `MAP 2,<region>` grants only the region's extent; when a chain phase
+    re-opens the region with its own OVERLAY, the PHASE02 copies inside it
+    are never loaded, so compose must cut PHASE02 there even though the
+    region is mapped."""
+    out: set[str] = set()
+    for p in pgmPhases:
+        member = f"PHASE{p:02d}"
+        if not deck.has(member):
+            continue
+        for op in layout_program(deck, member):
+            if op.verb != "OVERLAY" or not op.operand:
+                continue
+            name = op.operand.split(",")[0].strip()
+            if getattr(op, "origin", None) is None and name in phase2Regions:
+                out.add(name)
+    return out
+
+
 def reservedByPhase(deck: ConcardDeck) -> dict[int, list[str]]:
-    """RESERVE-carded csects per phase segment (CON80 OPS0: `RESERVE
-    #PCVNMMU`).  The link allocates without text, but the MMB still
-    stages the allocation as a ZEROED tape block: DASS_SSW walks
-    #PCVNMMU's body as UNSTARRED zeros and puts a checksum slot right
-    after its end (0x3432C) -- both only possible if a block was staged.
-    The listing brackets such csects `*** BEGIN/END RESERVED CSECT ***`."""
+    """RESERVE-carded csects per phase segment.  The link allocates
+    without text, but the MMB stages the allocation as a zeroed tape
+    block."""
     out: dict[int, list[str]] = {}
     if not deck.has("OFTMP"):     # no layout program -> no RESERVE cards
         return out
@@ -121,14 +160,24 @@ def reservedByPhase(deck: ConcardDeck) -> dict[int, list[str]]:
     return out
 
 
-def compose(mmuRoot: Path, phases: list[int], iplCut=None, deck=None):
+def compose(mmuRoot: Path, phases: list[int], iplCut=None, deck=None,
+            regionCuts=None):
     """IPL fill + overlay each phase's TEXT extents in load order.
     Returns (image bytes, owner bytearray, per-phase info list).
     owner[hw] = 0 for background fill, else 1-based index into phases.
 
     iplCut = (phaseNum, [regionNames]): stage only that phase's extents
     intersecting the named regions' REGN intervals (the IPL image's
-    GNC-decouple cut -- see iplMfbRegions)."""
+    GNC-decouple cut -- see iplMfbRegions).
+
+    regionCuts = {phaseNum: [regionNames]}: same region-gated staging for
+    other phases (the OPS configs' PHASE02 config-map cut -- see
+    configMapRegions)."""
+    cuts: dict[int, tuple[str, list[str], bool]] = {
+        ph: ("config-map cut", names, True)
+        for ph, names in (regionCuts or {}).items()}
+    if iplCut:
+        cuts[iplCut[0]] = ("IPL cut", iplCut[1], False)
     image = bytearray(FILL_LOW * FILL_SPLIT_HW +
                       FILL_HIGH * (MEM_HW - FILL_SPLIT_HW))
     owner = bytearray(MEM_HW)
@@ -136,12 +185,16 @@ def compose(mmuRoot: Path, phases: list[int], iplCut=None, deck=None):
     for idx, n in enumerate(phases, start=1):
         name, lib, sym = loadPhase(mmuRoot, n)
         rangesHW = None
-        if iplCut and n == iplCut[0]:
-            ivals = [(r.start, r.end) for r in lib.regions
-                     if r.name in iplCut[1]]
-            missing = set(iplCut[1]) - {r.name for r in lib.regions}
+        if n in cuts:
+            label, regionNames, extend = cuts[n]
+            # The config-map cut extends each mapped interval to the next
+            # REGN record (linker-grown pool space belongs to its region);
+            # the IPL cut keeps the records exactly, its regions being
+            # OVERLAY-declared.  See libModule.regionIntervals.
+            ivals = regionIntervals(lib, regionNames, extend=extend)
+            missing = set(regionNames) - {r.name for r in lib.regions}
             if missing:
-                log.warning(f"{name}: no REGN record for IPL-staged "
+                log.warning(f"{name}: no REGN record for staged "
                             f"region(s) {sorted(missing)}")
             kept = [x for x in lib.extents
                     if any(x.address < e and x.address + len(x.data) > s
@@ -151,9 +204,11 @@ def compose(mmuRoot: Path, phases: list[int], iplCut=None, deck=None):
                         if x not in kept) // 2
             lib.extents = kept
             rangesHW = [[s // 2, e // 2] for s, e in sorted(ivals)]
-            log.info(f"{name}: IPL cut -- staging only "
-                     f"{'/'.join(iplCut[1])}; {cut} extents ({cutHW} hw) "
-                     f"deferred to OPS transition")
+            tail = ("deferred to OPS transition" if label == "IPL cut"
+                    else "OPS0-only, not loaded by this MC")
+            log.info(f"{name}: {label} -- staging only "
+                     f"{len(ivals)}/{len(regionNames)} mapped regions; "
+                     f"{cut} extents ({cutHW} hw) {tail}")
         placed = overlaid = 0
         for x in lib.extents:
             if x.address % 2 or x.address + len(x.data) > 2 * MEM_HW:
@@ -174,12 +229,17 @@ def compose(mmuRoot: Path, phases: list[int], iplCut=None, deck=None):
 
     # RESERVE-carded csects: stage the zeroed MMB block (see
     # reservedByPhase) over background/boot residue -- later phases'
-    # real text wins.  Runs before the display load so the reserve's
-    # space reads occupied to its allocator, and before the slot pass
-    # so the block's trailing checksum slot appears (DASS 0x3432C).
+    # real text wins.
     if deck is not None and info:
         bootRes = info[0]["index"]
         resv = reservedByPhase(deck)
+        tailHW = set()
+        for ph in info:
+            if ph["index"] == bootRes or ph["lib"] is None:
+                continue
+            for x in ph["lib"].extents:
+                tailHW.update(
+                    slotHalfwords((x.address + len(x.data)) // 2))
         for ph in info:
             for nm in resv.get(ph["phase"], []):
                 sec = next((s for s in ph["sym"].get("sections", [])
@@ -190,6 +250,8 @@ def compose(mmuRoot: Path, phases: list[int], iplCut=None, deck=None):
                 a, n = sec["address"], sec["size"]
                 zeroed = 0
                 for i in range(a, min(a + n, MEM_HW)):
+                    if i in tailHW:
+                        continue      # another block's checksum slot/pad
                     if owner[i] in (0, bootRes):
                         image[2 * i:2 * i + 2] = b"\x00\x00"
                         owner[i] = ph["index"]
@@ -209,11 +271,7 @@ def compose(mmuRoot: Path, phases: list[int], iplCut=None, deck=None):
     # CHECKSUM slots: the tape block staged for each extent run carries the
     # trailing fullword-aligned 2-hw slot (plus the odd-end pad halfword)
     # from the MMB's INIT=C6C6 buffer.  Fill them wherever no LATER phase's
-    # TEXT claimed the bytes -- the boot phase's residue is dead memory a
-    # staged slot overwrites just like staged text (DASS: the display
-    # load's 0x5E0/0x4D38 slots sit inside GPCIPL's extent).  Run after
-    # ALL phases so a slot halfword supplied as real content by a later
-    # phase is never clobbered.
+    # TEXT claimed the bytes.
     bootIdx = info[0]["index"] if info else 0
     slot_hw = set()
     for ph in info:
@@ -223,8 +281,7 @@ def compose(mmuRoot: Path, phases: list[int], iplCut=None, deck=None):
                 if ph["lib"] is not None else [])
         ends += [a + n for a, n in ph.get("extentsHW", [])]
         for end in ends:
-            cap = ((end - 1) // BANK_HW + 1) * BANK_HW
-            for i in range(end, min((end + 1) // 2 * 2 + 2, cap, MEM_HW)):
+            for i in slotHalfwords(end):
                 if owner[i] in (0, bootIdx):
                     image[2 * i:2 * i + 2] = SLOT_FILL
                     slot_hw.add(i)
@@ -235,22 +292,7 @@ def compose(mmuRoot: Path, phases: list[int], iplCut=None, deck=None):
 
 def ops0DisplayLoad(mmuRoot: Path, image: bytearray, owner: bytearray,
                     info: list[dict], bootPhase: int) -> dict | None:
-    """Stage the SSW/OPS0 display roll-in (DASS_SSW 0x5CE/0x4C70 families).
-
-    The base keeps the display SPEC processors' CODE resident (#CDSPSPC,
-    #CDPDSPC, #CDXRDMM, #CDXCCCS ride PHASE02's SMDSPPRO/ROLLINPR/CARGOPRO
-    regions in every config) but their #D/#X data blocks ship with the SM
-    MFB.  Post-IPL, the DMM stages those blocks from the PHASE14 members
-    into free memory -- content VERBATIM (adcons keep their phase-14-link
-    values; DASS_SSW #DDSPSPC's pool words point at 0x3BBC-family S2
-    addresses), placed smallest-first / deck-order ties / fullword-aligned
-    first-fit over the config-map free space: the IPL phase's residue is
-    dead memory (0x5CE sits inside GPCIPL), the Z-pool region is reserved,
-    prospective checksum slots are not free.  The six placements land at
-    DASS_SSW's 0x5CE/0x5D0/0x5D2 and 0x4C70/0x4CAA/0x4CE4.
-
-    Mutates image/owner and appends a pseudo-phase entry to info; returns
-    the repro record ({name: [addrHW, sizeHW]}, extents) or None."""
+    """Stage the SSW/OPS0 display roll-in."""
     # data-less display processors of the composed base
     have_c, have_d = set(), set()
     for ph in info:
@@ -305,9 +347,7 @@ def ops0DisplayLoad(mmuRoot: Path, image: bytearray, owner: bytearray,
         if ph["index"] in bootIdx:
             continue
         for x in ph["lib"].extents:
-            end = (x.address + len(x.data)) // 2
-            cap = ((end - 1) // BANK_HW + 1) * BANK_HW
-            for i in range(end, min((end + 1) // 2 * 2 + 2, cap, MEM_HW)):
+            for i in slotHalfwords((x.address + len(x.data)) // 2):
                 if owner[i] == 0 or owner[i] in bootIdx:
                     slots.add(i)
 
@@ -363,10 +403,6 @@ def ops0DisplayLoad(mmuRoot: Path, image: bytearray, owner: bytearray,
     # symbol addresses rebase by each section's move delta
     delta = {n: placedSecs[n][0] - secs14[n]["address"] for n in placedSecs}
 
-    # the stager relocates adcons whose RLD target is within the moved
-    # family (self-pointers, #D -> its #X slot: DASS_SSW #DDSPSPC+1C =
-    # 05CE, the moved slot); external targets keep their phase-14-link
-    # values (#DDSPSPC+0 stays 3BB8-family)
     def home(hw):
         for n, (a, size, _m) in placedSecs.items():
             src = secs14[n]["address"]
@@ -452,8 +488,33 @@ def reportOverlays(image: bytes, owner: bytearray, info: list[dict]) -> int:
     return damaged
 
 
+def ownerRuns(owner: bytearray, info: list[dict]) -> list[list[int]]:
+    """Run-length encode compose()'s per-halfword load ownership.
+
+    Returns [[startHW, phase], ...] ascending, each run reaching to the next
+    run's start; `phase` is the phase number whose text the composed image
+    holds there, 0 for background/staging fill no phase placed, and -1 for a
+    compose-time pseudo phase (the OPS0 display roll-in).
+
+    The patch chain needs this: a UPF deck patches one phase's tape load
+    block, and a later phase may overlay part of it, so the patched content
+    must not appear where a later phase owns the halfword
+    (tools/iload/upfapply.py)."""
+    byIndex = {ph["index"]: (ph["phase"] if ph["phase"] is not None else -1)
+               for ph in info}
+    runs: list[list[int]] = []
+    prev = None
+    for h, o in enumerate(owner):
+        v = byIndex.get(o, 0) if o else 0
+        if v != prev:
+            runs.append([h, v])
+            prev = v
+    return runs
+
+
 def unionSym(cfgName: str, owner: bytearray, info: list[dict],
-             ops0: dict | None = None) -> dict:
+             ops0: dict | None = None,
+             mcfPhases: 'frozenset[int] | None' = None) -> dict:
     """Merge the constituent phases' sym.json overlay-aware:
     - sections/symbols: entries whose module carries text (no '>' marker)
       beat imported markers; among text-bearing duplicates the later-loaded
@@ -476,15 +537,11 @@ def unionSym(cfgName: str, owner: bytearray, info: list[dict],
 
     def shadowed(ph, e):
         """True for a section whose own TEXT a different-named later
-        phase's text fully overwrote: flight maps list only the overlay
-        winner (DASS_SSW has MFBZFILL not $X030001 at 0x654; G2 the
-        reverse; neither lists PHASE02's 1-hw #PCVMS8C under PHASE13).
-        Text-less sections (stacks, RESERVEs) always survive."""
+        phase's text fully overwrote.  Text-less sections (stacks,
+        RESERVEs) always survive."""
         if imported(e) or ph["lib"] is None:
             return False
         a, n = e["address"], max(e.get("size", 1), 1)
-        # a staged RESERVE counts as text: an MC whose content covers the
-        # whole allocation lists its own csects there, not the reserve
         had = e.get("reserved") or any(
             x.address < 2 * (a + n) and x.address + len(x.data) > 2 * a
             for x in ph["lib"].extents)
@@ -516,11 +573,28 @@ def unionSym(cfgName: str, owner: bytearray, info: list[dict],
                      f"dropped")
         if shadow:
             log.info(f"{len(shadow)} sections fully overlaid by later "
-                     f"phases dropped (flight maps list the winner)")
+                     f"phases dropped (only the winner is listed)")
         return [e for _, e in out.values()]
 
     sections = mergeNamed("sections")
     symbols = mergeNamed("symbols")
+
+    if mcfPhases is not None:
+        def _marker(e):
+            m = e.get("module", "")
+            return m.endswith(">") and not m.startswith("<")
+        listed = {e["name"] for ph in info
+                  if ph["phase"] is None or ph["phase"] in mcfPhases
+                  for e in ph["sym"].get("sections", [])
+                  if staged(ph, e) and not _marker(e)}
+        marked = 0
+        for s in sections:
+            if s["name"] not in listed:
+                s["residue"] = True
+                marked += 1
+        if marked:
+            log.info(f"{marked} section(s) marked MCF residue "
+                     f"(phases outside {sorted(mcfPhases)})")
 
     modules, seen = [], set()
     relocations, unresolved = [], []
@@ -545,10 +619,12 @@ def unionSym(cfgName: str, owner: bytearray, info: list[dict],
                  f"unresolved at sites overlaid by later phases")
 
     iplCutRepro = {}
-    for ph in info:
-        if ph.get("loadRangesHW") is not None:
-            iplCutRepro["iplCut"] = {"phase": ph["phase"],
-                                     "rangesHW": ph["loadRangesHW"]}
+    cutList = [{"phase": ph["phase"], "rangesHW": ph["loadRangesHW"]}
+               for ph in info if ph.get("loadRangesHW") is not None]
+    if cutList:
+        # legacy single-cut key (kept for older readers) + the full list
+        iplCutRepro["iplCut"] = cutList[-1]
+        iplCutRepro["regionCuts"] = cutList
     if ops0:
         iplCutRepro["ops0Display"] = ops0
 
@@ -567,6 +643,7 @@ def unionSym(cfgName: str, owner: bytearray, info: list[dict],
             "tool": "mmu2fcm",
             "config": cfgName,
             "phases": [ph["phase"] for ph in info if ph["phase"] is not None],
+            **({"mcfPhases": sorted(mcfPhases)} if mcfPhases else {}),
             **iplCutRepro,
             "constituents": {ph["name"]: ph["sym"].get("repro", {})
                              for ph in info if ph["phase"] is not None},
@@ -577,11 +654,9 @@ def unionSym(cfgName: str, owner: bytearray, info: list[dict],
 def stampIdentifiers(image, systemId=None, iloadId=None):
     """Write the IPL-set low-core identifiers into a composed image.
 
-    The GPC's IPL loader writes the PASS System Identifier (hw 0x1C) and the
-    I-Load Identifier (hw 0x20); the load module only RESERVES them (they
-    read 0000).
-
-    Returns the image (unchanged object when nothing was asked for)."""
+    The GPC's IPL loader writes the PASS System Identifier (hw 0x1C) and
+    the I-Load Identifier (hw 0x20); the image comes back unchanged when
+    neither was asked for."""
     wanted = [(n, t, b, e) for n, t, b, e in (
         ("system", systemId, psaIdent.SYSTEM_ID_HW, psaIdent.parse_system_id),
         ("iload", iloadId, psaIdent.ILOAD_ID_HW, psaIdent.parse_iload_id))
@@ -596,6 +671,86 @@ def stampIdentifiers(image, systemId=None, iloadId=None):
         log.info(f"stamped {name} identifier {text} at hw {base:#06x} "
                  f"({raw.hex().upper()}) -- post-IPL memory, NOT load module")
     return bytes(buf)
+
+
+def stampChecksums(image, owner, info, mmuRoot: Path, src, skip: set,
+                   ops0: dict | None = None
+                   ) -> tuple[bytes, list[int], list[list[int]]]:
+    """--stamp-checksums: write each tape load block's trailing checksum.
+
+    The MMB computes it over the block as written to tape -- the phase's
+    own text with the INIT=C6C6 staging fill in every pad/gap halfword --
+    and stores (0000, sum16) in the block's closing 2-hw slot.
+
+    Values are summed from the uncut .lib on disk (the tape carries the
+    whole phase; a config's region cut only decides what the loader
+    places), over [start, slot): the slot itself is excluded.  A slot is
+    written only where no non-boot phase supplied text (same guard as the
+    C6C6 slot pass; boot residue is dead memory a staged slot overwrites).
+
+    A tail whose slot immediately precedes an OPS0 display roll-in
+    placement is left C6C6: the DMM stages those blocks post-IPL with
+    content only, and the tape-record boundary the roll-in displaced is an
+    earlier one.
+
+    Returns (image, sorted slot addresses stamped, [[hw, phase], ...]).
+    The addresses go to the composed manifest so the listing can star
+    them: memory differs from the load module there.
+    """
+    from ap101Utils import mmbstamp
+    buf = bytearray(image)
+    bootIdx = info[0]["index"] if info else 0
+    rollin = {a for a, _ in (ops0 or {}).get("extentsHW", [])}
+    stamped: dict[int, int] = {}
+    lbSlot: dict[int, int] = {}      # slot hw -> assigned phase closing it
+    for ph in info:
+        n = ph["phase"]
+        if n is None or n in skip or (n != 2 and n not in src.assigned):
+            continue                  # OPS0DSP pseudo-phase / boot / IPL-cut
+        # phase_load_blocks, not a private derive_load_blocks call: it
+        # is the single definition of a phase's load-block partition,
+        # because it also runs fit_budget, which backs a bank tail up to
+        # keep the phase inside its ALLOC BLKS.  It reads the .lib fresh
+        # off disk, i.e. uncut, which is also deliberate -- the MMB sums a
+        # block over the tape's own record, not over what this
+        # configuration ends up loading.
+        lbs = mmbstamp.phase_load_blocks(Path(mmuRoot), n, src)[0]
+        # The tape record, not the .lib: an auto-generated @-stack is
+        # allocation with no tape text, so the MMB's staging fill covers
+        # it (mmbstamp.stack_holes).
+        text = mmbstamp.tape_text(Path(mmuRoot), n)
+        wrote = 0
+        for lb in lbs:
+            slot = lb.start + lb.length - 2
+            # Same test as fcmImage._checksum_slots' `owner[a] < order`,
+            # deliberately: a configuration loads phase by phase and a
+            # later phase's block tail overwrites an earlier phase's
+            # text, so only text at or after this block's own load order
+            # can take the slot away.  A stamped value that happens to
+            # equal the C6C6 staging fill is not a memory-vs-load-module
+            # difference; listing.py's fill test leaves it unstarred.
+            if (slot + 2 > MEM_HW
+                    or owner[slot] >= ph["index"]
+                    or owner[slot + 1] >= ph["index"]):
+                continue              # a later phase's text owns the slot
+            if n in src.assigned:
+                lbSlot[slot] = lbSlot[slot + 1] = n   # later phase wins
+            if slot + 2 in rollin:
+                continue              # OPS0 roll-in boundary: stays C6C6
+            s = 0
+            for h in range(lb.start, slot):
+                s += text.get(h, mmbstamp.FILL)
+            stamped[slot] = s & 0xFFFF    # load order: later phase wins
+            wrote += 1
+        log.info(f"PHASE{n:02d}: {wrote}/{len(lbs)} load-block checksums "
+                 f"stamped")
+    for slot, v in stamped.items():
+        buf[2 * slot:2 * slot + 4] = bytes(2) + v.to_bytes(2, "big")
+    if stamped:
+        log.info(f"stamped {len(stamped)} load-block checksum slots -- "
+                 f"Mass-Memory-Build tape content, NOT load module")
+    return (bytes(buf), sorted(stamped),
+            [[a, lbSlot[a]] for a in sorted(lbSlot)])
 
 
 def main(argv=None):
@@ -618,22 +773,24 @@ def main(argv=None):
                     help="output directory (default: <mmu>/<config>)")
     ap.add_argument("--system-id", metavar="MM.NNP.JJA",
                     help="stamp the PASS System Identifier at hw 0x1C "
-                         "(e.g. 29.01A.01B); default: leave it zero")
+                         "(e.g. 29.01A.01B);")
     ap.add_argument("--iload-id", metavar="XX.Y.Z.AS.BB",
                     help="stamp the I-Load Identifier at hw 0x20 "
-                         "(e.g. 29.1.0.00.0B); default: leave it zero")
-    # The ground Mass Memory Build stamps the #PFCMGPT/#PCDCPHA phase
-    # tables into the phase-2 image on the tape (their load-module content
-    # is initial zeros/-1).  Off by default: opt-in tape emulation
-    # (ap101Utils.mmbstamp generates the values from the phase .libs and
-    # the CON80 MMU decks).
-    ap.add_argument("--stamp-phase-tables", action="store_true",
-                    help="generate and stamp the Mass-Memory-Build phase "
-                         "tables (#PFCMGPT, #PCDCPHA) into the composed "
-                         "image; default: leave the load-module initials")
+                         "(e.g. 29.1.0.00.0B)")
+    ap.add_argument("--stamp-phase-tables",
+                    action=argparse.BooleanOptionalAction, default=False,
+                    help="generate and stamp the Mass-Memory-Build tape "
+                         "tables (#PFCMGPT, #PCDCPHA, FCMG3DAT) into the "
+                         "composed image.")
+    ap.add_argument("--stamp-g3dat", action="store_true",
+                    help="stamp ONLY the G3 archive destination address "
+                         "table (FCMG3DAT); redundant with "
+                         "--stamp-phase-tables, which now includes it")
+    ap.add_argument("--stamp-checksums",
+                    action=argparse.BooleanOptionalAction, default=False,
+                    help="compute and stamp each tape load block's checksum")
     ap.add_argument("--con80", type=Path, required=True,
-                    help="CON80 deck directory (memory-configuration "
-                         "registry and --stamp-phase-tables)")
+                    help="CON80 deck directory")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -643,8 +800,6 @@ def main(argv=None):
         deck = ConcardDeck(args.con80)
     except NotADirectoryError as e:
         ap.error(str(e))
-    # an explicit --phases list needs only the deck (RESERVE cards, the
-    # IPL-cut member), not the memory-configuration registry
     if args.list_configs or not args.phases:
         try:
             configs = load_configs(deck)
@@ -662,9 +817,6 @@ def main(argv=None):
         ap.error(f"unknown config {args.config!r} (known: "
                  f"{', '.join(configs)}) and no --phases given")
 
-    # The IPL set stages its MFB (the last IPL phase) only up to the
-    # GNC-decouple cut; every MC re-loads the full MFB at OPS transition,
-    # so only the post-IPL SSW composition is affected.
     iplCut = None
     if args.config == "SSW":
         mfb = phases[-1]
@@ -674,16 +826,41 @@ def main(argv=None):
                      f"{'/'.join(names)}")
             iplCut = (mfb, names)
 
+    regionCuts = None
+    if not args.phases and args.config != "SSW" and args.config in configs:
+        pgm = [p for p in phases if p not in IPL_PHASES]
+        names = configMapRegions(deck, pgm)
+        if names and 2 in phases:
+            p2lib = args.mmu / "PHASE02.lib"
+            if p2lib.exists():
+                p2names = {r.name
+                           for r in LibModule.read(p2lib).regions}
+                reopened = chainReopenedRegions(deck, pgm, p2names)
+                dropped = sorted(set(names) & reopened)
+                if dropped:
+                    log.info(f"config-map cut ({args.config}): "
+                             f"{len(dropped)} mapped region(s) re-opened "
+                             f"by the chain, PHASE02 copies not loaded: "
+                             f"{'/'.join(dropped)}")
+                    names = sorted(set(names) - reopened)
+            log.info(f"config-map cut ({args.config}): PHASE02 stages "
+                     f"only {len(names)} mapped regions")
+            regionCuts = {2: names}
+
     out = args.out or (args.mmu / args.config)
     out.mkdir(parents=True, exist_ok=True)
 
     image, owner, info, ops0 = compose(args.mmu, phases, iplCut=iplCut,
-                                       deck=deck)
+                                       deck=deck, regionCuts=regionCuts)
     damaged = reportOverlays(image, owner, info)
     if damaged:
         log.warning(f"{damaged} cross-phase csect collisions (see above) -- "
                     f"composed bytes there are the later phase's text")
-    sym = unionSym(args.config, owner, info, ops0)
+    mcf = None
+    if not args.phases and args.config in configs:
+        mcf = configs[args.config].mcf_phases
+    sym = unionSym(args.config, owner, info, ops0, mcfPhases=mcf)
+    sym["ownerPhaseRunsHW"] = ownerRuns(owner, info)
     try:
         image = stampIdentifiers(image, args.system_id, args.iload_id)
     except psaIdent.IdentError as e:
@@ -697,9 +874,41 @@ def main(argv=None):
             ap.error(str(e))
         for n in tables.notes:
             log.debug(f"mmbstamp: {n}")
-        log.info(f"stamped {mmbstamp.GPT_CSECT} ({mmbstamp.GPT_SIZE} hw) and "
-                 f"{mmbstamp.CPHA_CSECT} ({mmbstamp.CPHA_SIZE} hw) -- "
-                 f"Mass-Memory-Build tape content, NOT load module")
+        from ap101Utils import g3dat as _g3
+        _extra = (f" and {_g3.G3DAT_CSECT} ({_g3.G3DAT_SIZE} hw)"
+                  if tables.g3dat else
+                  f" (no {_g3.G3DAT_CSECT}: see notes)")
+        log.info(f"stamped {mmbstamp.GPT_CSECT} ({mmbstamp.GPT_SIZE} hw), "
+                 f"{mmbstamp.CPHA_CSECT} ({mmbstamp.CPHA_SIZE} hw)"
+                 f"{_extra} -- Mass-Memory-Build tape content, NOT load "
+                 f"module")
+    if args.stamp_g3dat:
+        from ap101Utils import g3dat as g3datmod
+        from ap101Utils import mmbstamp
+        try:
+            dat = g3datmod.generate(args.mmu, args.con80)
+            image = g3datmod.stamp(image, sym, dat)
+        except mmbstamp.StampError as e:      # incl. g3dat.G3DatError
+            ap.error(str(e))
+        for n in dat.notes:
+            log.debug(f"g3dat: {n}")
+        log.info(f"stamped {g3datmod.G3DAT_CSECT} ({g3datmod.G3DAT_SIZE} hw, "
+                 f"{len(dat.entries)} entries) -- Mass-Memory-Build tape "
+                 f"content, NOT load module")
+    if args.stamp_checksums:
+        from ap101Utils import mmbstamp
+        try:
+            csrc = mmbstamp.load_phase_source(args.con80)
+        except mmbstamp.StampError as e:
+            ap.error(str(e))
+        skip = {phases[0]}                    # boot-block tails: unlisted
+        if iplCut:
+            skip.add(iplCut[0])               # IPL load deposits no tails
+        image, slots, lbSlots = stampChecksums(image, owner, info, args.mmu,
+                                               csrc, skip, ops0=ops0)
+        # the listing stars these rows: memory differs from the load module
+        sym["stampedChecksums"] = slots
+        sym["lbSlotPhases"] = lbSlots
 
     fcm = out / f"{args.config}.fcm"
     fcm.write_bytes(image)

@@ -1,24 +1,38 @@
 #!/usr/bin/env python3
 #
-# MMU (mass-memory) load-build cards: parser and expansion tree.
-# 
+# Mass Memory Unit (MMU) build cards
+#
 # Format:
-# 
+#
 #   * Statement cards: [LABEL] VERB,KEY=VAL,...; terminated by ; and
 #     optionally continued across cards (non-blank col 72).  LABEL (cols 1-8) is
 #     the CSECT/symbol the statement acts on.  Verbs: ALLOC, ALOCDESC, DIRECTRY,
 #     DATA, PHASE, COPY, DATASET, SYSTEM, DMMD, BUILD, IPL, LOADMOD, NOLMDATA.
 #   * Member-list cards: rows of MEMBER [SYSID|flag] [description] -- one
 #     member name per row, naming another card to expand.
-# 
-# Three-level content expansion, rooted at the master list MMXMEM:
-# 
-#     MMXMEM ─▶ MMX<system> lists ─▶ MMUDAT*/MMUSYS* statement members
-# 
-# A LOADMOD,MEMBER=X statement pulls a CONCARD output member into the MMU image
-# 
-# Note: ADDR / MMDIR / RPL values are kept as raw tokens.
 #
+# Three-level content expansion, rooted at the master list MMXMEM:
+#
+#     MMXMEM ─▶ MMX<system> lists ─▶ MMUDAT*/MMUSYS* statement members
+#
+# A LOADMOD,MEMBER=X statement pulls a CONCARD output member into the MMU image
+#
+# DIRECTRY: a table the mass-memory build writes.  The statement declares the
+# shape and is followed, under the same label, by the statement that fills it:
+#
+#   DMMD=NO   a free-standing MMU-resident directory, filled by a DATA card
+#             (HDATA= is its tape-image address; ENTRY=(first,step)).
+#   DMMD=YES  a directory that lives inside a linked phase -- CSECT= names the
+#             csect and OFFSET= the halfword within it -- filled by a DMMD card
+#             whose PN= list is ((content, phase), ...) pairs.  Each entry
+#             resolves the phase to its own ALLOC address and length, so the
+#             table can only be built once the tape layout is known; the linked
+#             load module carries the csect's plain INITIAL values and the
+#             build stamps this over them.
+#
+# `Directory.image()` renders a DMMD table.  Neither the csect's own initials
+# nor the value an unused slot is filled with are anywhere in the cards, so
+# the fill is a caller-supplied parameter and defaults to zero.
 from __future__ import annotations
 
 import os
@@ -31,6 +45,7 @@ os.environ["TYPER_USE_RICH"] = "0"  # disable fancy formatting
 import typer
 
 from ap101Utils import cards
+from ap101Utils.mmbstamp import mm16
 
 # card column geometry (0-based slices); same layout as concard cards
 _LABEL = cards.LABEL      # cols 1-8   label / CSECT
@@ -153,6 +168,151 @@ def parse_statements(text: str, source: str = "") -> list[Statement]:
             st.params, st.args = _split_params(operand)
         stmts.append(st)
     return stmts
+
+
+#
+# Directories
+#
+
+HW_PER_BLOCK = 512        # halfwords in one mass-memory block
+
+_PN_RE = re.compile(r"\(\s*(\d+)\s*,\s*(\d+)\s*\)")
+
+
+@dataclass
+class Directory:
+    """A DIRECTRY statement together with the statement that fills it.
+
+    `filler` is the DATA card of a DMMD=NO directory or the DMMD card of a
+    DMMD=YES one, matched by label within the same member.
+    """
+
+    directry: Statement
+    filler: Optional[Statement] = None
+
+    # --- the DIRECTRY card
+
+    @property
+    def label(self) -> str:
+        return self.directry.label
+
+    @property
+    def source(self) -> str:
+        return self.directry.source
+
+    @property
+    def csect(self) -> str:
+        """The csect the table is stamped into, '' for a free-standing one."""
+        return self.directry.params.get("CSECT", "")
+
+    @property
+    def offset(self) -> int:
+        return int(self.directry.params.get("OFFSET", 0))
+
+    @property
+    def size(self) -> int:
+        """Halfwords per entry."""
+        return int(self.directry.params["SIZE"])
+
+    @property
+    def entries(self) -> int:
+        """Slot capacity -- the table is this many entries whatever it holds."""
+        return int(self.directry.params["ENTRIES"])
+
+    @property
+    def phase(self) -> int:
+        return int(self.directry.params["PH"])
+
+    @property
+    def is_dmmd(self) -> bool:
+        return self.directry.params.get("DMMD", "NO").upper().startswith("Y")
+
+    # --- the DMMD card
+
+    @property
+    def pn(self) -> list[tuple[int, int]]:
+        """The DMMD PN= list as (content number, phase) pairs, in card order."""
+        if self.filler is None or self.filler.verb != "DMMD":
+            return []
+        return [(int(a), int(b))
+                for a, b in _PN_RE.findall(self.filler.params.get("PN", ""))]
+
+    @property
+    def ident(self) -> Optional[int]:
+        """The DMMD ID= -- the entry size the table's own header repeats."""
+        v = self.filler.params.get("ID") if self.filler else None
+        return int(v) if v is not None else None
+
+    @property
+    def fmts(self) -> Optional[int]:
+        """The DMMD FMTS= -- how many of the slots the card fills."""
+        v = self.filler.params.get("FMTS") if self.filler else None
+        return int(v) if v is not None else None
+
+    @property
+    def lengths(self) -> bool:
+        """LNG=YES -- an entry carries its content's length as a third field."""
+        if self.filler is None:
+            return False
+        return self.filler.params.get("LNG", "NO").upper().startswith("Y")
+
+    # --- the table
+
+    def header(self) -> list[int]:
+        """The four halfwords ahead of the slots.
+
+        The declaring csect is two halfwords of (capacity, entry size) and the
+        build overwrites the capacity with the count it actually filled; the
+        directory block proper then opens with its own (entry size, count),
+        which is exactly the DMMD card's own ID= and FMTS=.  Nothing in the
+        cards says why the pair is repeated in the opposite order.
+        """
+        n = len(self.pn)
+        return [n, self.size, self.ident if self.ident is not None else self.size, n]
+
+    def image(self, phase_alloc: dict, fill=None,
+              hw_per_block: int = HW_PER_BLOCK) -> list[int]:
+        """The stamped table: header, one entry per PN pair, then `fill`.
+
+        `phase_alloc` is phase -> (mm16 tape address, blocks) for the PASS
+        area this directory's system builds -- `MMUBuild.phase_allocations`.
+        An entry is (content number, tape address) and, with LNG=YES, the
+        content's length in halfwords, which is its allocation's blocks.
+        `fill` is the unused-slot value, one entry wide; it defaults to zero.
+        """
+        if fill is None:
+            fill = (0,) * self.size
+        if not self.is_dmmd:
+            raise ValueError(f"{self.label}: DIRECTRY,DMMD=NO carries no PN "
+                             f"list; its content comes from its DATA card")
+        pn = self.pn
+        if len(pn) > self.entries:
+            raise ValueError(f"{self.label}: {len(pn)} entries will not fit "
+                             f"{self.entries} slots")
+        if self.fmts is not None and self.fmts != len(pn):
+            raise ValueError(f"{self.label}: FMTS={self.fmts} but the PN list "
+                             f"holds {len(pn)} entries")
+        if len(fill) != self.size:
+            raise ValueError(f"{self.label}: unused-slot fill is {len(fill)} "
+                             f"halfwords, entries are {self.size}")
+        words = self.header()
+        for content, phase in pn:
+            if phase not in phase_alloc:
+                raise ValueError(f"{self.label}: no ALLOC for phase {phase}")
+            addr, blks = phase_alloc[phase]
+            entry = [content, addr]
+            if self.lengths:
+                entry.append(blks * hw_per_block)
+            if len(entry) != self.size:
+                raise ValueError(f"{self.label}: built a {len(entry)}-halfword "
+                                 f"entry for SIZE={self.size}")
+            words += entry
+        words += list(fill) * (self.entries - len(pn))
+        want = len(self.header()) + self.size * self.entries
+        if len(words) != want:
+            raise ValueError(f"{self.label}: built {len(words)} halfwords, "
+                             f"expected {want}")
+        return words
 
 
 #
@@ -297,6 +457,54 @@ class MMUBuild:
     def loadmods(self) -> list[Statement]:
         """LOADMOD statements -- cross-links to CONCARD linkedit members."""
         return self._by_verb("LOADMOD")
+
+    def directories(self, member: str | None = None) -> list[Directory]:
+        """DIRECTRY statements paired with the DATA/DMMD card that fills them.
+
+        The pairing is by label within one member: a directory's filler is the
+        next DATA (DMMD=NO) or DMMD (DMMD=YES) statement of the same label.
+        """
+        out: list[Directory] = []
+        stmts = self.statements(member)
+        for i, st in enumerate(stmts):
+            if st.verb != "DIRECTRY":
+                continue
+            want = "DMMD" if st.params.get("DMMD", "NO").upper().startswith("Y") \
+                else "DATA"
+            filler = next((s for s in stmts[i + 1:]
+                           if s.label == st.label and s.source == st.source
+                           and s.verb == want), None)
+            out.append(Directory(st, filler))
+        return out
+
+    def phase_allocations(self, sysid: str) -> dict[int, tuple[int, int]]:
+        """phase -> (mm16 tape address, ALLOC blocks) for one SYSID.
+
+        A PHASE card names the member a phase is built from; the ALLOC card of
+        the same label in the SYSID's own MMUDAT member gives that member its
+        place on the tape.  Roll-in phases share one label across the systems,
+        so the SYSID filter is what separates the three PASS copies.
+        """
+        phase_of: dict[str, int] = {}
+        for st in self._by_verb("PHASE"):
+            if "PH" not in st.params or not st.label:
+                continue
+            ph = int(st.params["PH"])
+            if phase_of.setdefault(st.label, ph) != ph:
+                raise ValueError(f"{st.label} is phase {phase_of[st.label]} in "
+                                 f"one system and {ph} in another")
+        out: dict[int, tuple[int, int]] = {}
+        for st in self.allocations():
+            if st.params.get("SYSID") != sysid or "ADDR" not in st.params:
+                continue
+            ph = phase_of.get(st.label)
+            if ph is None:
+                continue
+            entry = (mm16(st.params["ADDR"]), int(st.params.get("BLKS", 1)))
+            if out.setdefault(ph, entry) != entry:
+                raise ValueError(f"phase {ph} has two {sysid} allocations: "
+                                 f"{out[ph]} and {entry}")
+        return out
 
     def sysids(self) -> list[str]:
         s = {st.params["SYSID"] for st in self.statements()
@@ -461,6 +669,12 @@ def main(
         help="list LOADMOD links to linkedit (CONCARD) members")] = False,
     datasets: Annotated[bool, typer.Option("--datasets",
         help="list DATASET statements")] = False,
+    directories: Annotated[bool, typer.Option("--directories",
+        help="list DIRECTRY statements and the cards that fill them")] = False,
+    image: Annotated[Optional[str], typer.Option("--image", metavar="LABEL",
+        help="render one DMMD directory's table as halfwords")] = None,
+    sysid: Annotated[str, typer.Option("--sysid", metavar="SYSID",
+        help="which PASS copy --image resolves phase addresses in")] = "SYS1",
     orphans: Annotated[bool, typer.Option("--orphans",
         help="MMU members not reached from the root")] = False,
     dot: Annotated[bool, typer.Option("--dot", help="emit Graphviz DOT")] = False,
@@ -471,10 +685,11 @@ def main(
     import sys
 
     if sum((tree, statements, alloc, systems, loadmods, datasets, orphans,
-            dot, as_json)) > 1:
+            directories, image is not None, dot, as_json)) > 1:
         raise typer.BadParameter(
             "--tree/--statements/--alloc/--systems/--loadmods/--datasets/"
-            "--orphans/--dot/--json are mutually exclusive")
+            "--directories/--image/--orphans/--dot/--json are mutually "
+            "exclusive")
     if member is not None and not statements:
         raise typer.BadParameter("--member only applies with --statements")
 
@@ -511,6 +726,27 @@ def main(
     elif datasets:
         for st in b.datasets():
             print(f"{st.source}:{st.line_no}: {_fmt(st)}", file=out)
+    elif directories:
+        for d in b.directories():
+            kind = "DMMD" if d.is_dmmd else "DATA"
+            where = f"{d.csect}+{d.offset:04X}" if d.csect else "(free-standing)"
+            print(f"{d.source}:{d.directry.line_no}: {d.label:8} {where} "
+                  f"PH={d.phase} SIZE={d.size} ENTRIES={d.entries} {kind}"
+                  + (f" filled={len(d.pn)}" if d.is_dmmd else "")
+                  + ("" if d.filler else "  NO FILLER CARD"), file=out)
+    elif image is not None:
+        d = next((x for x in b.directories() if x.label == image), None)
+        if d is None:
+            raise typer.BadParameter(f"no DIRECTRY statement labelled {image}")
+        try:
+            words = d.image(b.phase_allocations(sysid))
+        except ValueError as e:
+            raise typer.BadParameter(str(e)) from None
+        print(f"{d.label} {d.csect or '(free-standing)'}+{d.offset:04X}  "
+              f"{len(words)} halfwords  ({sysid})", file=out)
+        for i in range(0, len(words), 8):
+            print(f"  +{i:04X}  " + " ".join(f"{w:04X}"
+                                             for w in words[i:i + 8]), file=out)
     elif orphans:
         for m in sorted(b.unreached):
             print(m, file=out)

@@ -20,7 +20,8 @@ sys.path.insert(0, str(ROOT / 'src'))
 from ap101Utils.libModule import Extent, LibModule           # noqa: E402
 from tools.mmu2fcm import (FILL_SPLIT_HW, MEM_HW, compose,     # noqa: E402
                                 reportOverlays, unionSym, main)
-from ap101Utils import mmbstamp                              # noqa: E402
+from ap101Utils import g3dat, mmbstamp                       # noqa: E402
+from ap101Utils.fcmImage import FcmImage                      # noqa: E402
 
 _failures, _passes = [], 0
 
@@ -49,12 +50,12 @@ def makePhase(root: Path, n: int, extents, sym):
 
 
 def runMmbstamp():
-    """mmbstamp unit checks: MMU address decode, MM packing (flight PHASE04/
-    PHASE05 load-block lengths as fixtures -- SOT placement, track-skip
-    accounting, multi-track flag), load-block derivation from a synthetic
+    """mmbstamp unit checks: MMU address decode, MM packing (phase-shaped
+    load-block length fixtures -- SOT placement, track-skip accounting,
+    multi-track flag), load-block derivation from a synthetic
     .lib (pool cursor + re-supply drop, checksum-slot merge, 16K merge cap,
     bank split, protection split, HIMEM drop), and the stamp() overlay."""
-    # -- ALLOC ADDR=FTSBB decode (verified sites from MMUDAT1/3) ------------
+    # -- ALLOC ADDR=FTSBB decode -------------------------------------------
     check('mm16_g9r', mmbstamp.mm16('56000') == 0x2E00)
     check('mm16_mfb', mmbstamp.mm16('33600') == 0x1BC0)
     check('mm16_ipl3', mmbstamp.mm16('03530') == 0x03BE)
@@ -64,9 +65,9 @@ def runMmbstamp():
     except mmbstamp.StampError:
         check('mm16_range', True)
 
-    # -- MM packing: flight PHASE04 LB lengths from ALLOC 0x2C00 ------------
-    # (SSW DASS: SOT on LB20 only; NUM_CONT = 404 data + 10 skipped = 414
-    # with the multi-track flag)
+    # -- MM packing: a 28-block phase allocated at 0x2C00 ------------------
+    # SOT falls on LB20 alone; NUM_CONT = 404 data + 10 skipped = 414, and
+    # the run crosses a track, so the multi-track flag is set
     ph4 = [626, 94, 82, 3214, 6234, 7088, 16024, 1876, 16382, 16138, 2306,
            3056, 2698, 2278, 16382, 16352, 478, 766, 9662, 16378, 1766,
            4246, 12142, 14170, 8090, 16350, 4598, 1682]
@@ -76,7 +77,7 @@ def runMmbstamp():
           f'{ncont},{crossed}')
     check('pack_ph4_sot', [i for i, lb in enumerate(lbs) if lb.sot] == [19],
           str([i for i, lb in enumerate(lbs) if lb.sot]))
-    # flight PHASE05 from ALLOC+PHTAB 0x2905: SOT on LB23, NUM_CONT 292
+    # a 29-block phase at 0x2905: SOT on LB23, NUM_CONT 292
     ph5 = [418, 94, 82, 242, 1662, 1304, 6234, 7676, 15576, 1736, 1020,
            16378, 14866, 2156, 3194, 2724, 2278, 16368, 16366, 504, 772,
            10790, 9538, 1334, 336, 1882, 2620, 2262, 1262]
@@ -123,6 +124,117 @@ def runMmbstamp():
           == [(0x1000, 8200), (0x3008, 8200)],
           str([(hex(lb.start), lb.length) for lb in lbs2]))
 
+    # -- the fullword pad after an odd-length csect is not load-module text
+    # (the linker leaves a hole), but it is inside one checksum group, so
+    # the derivation must coalesce it before the 16384-hw cap is applied
+    libp = LibModule(name='PHASE95')
+    libp.extents = [Extent(2 * 0x1000, b'\xC1' * 2 * 0x0B),   # 11 hw: odd
+                    Extent(2 * 0x100C, b'\xC2' * 2 * 0x10)]   # after the pad
+    lbsp = mmbstamp.derive_load_blocks(libp, 0, lambda hw: False, False)
+    check('lb_odd_pad', [(lb.start, lb.length) for lb in lbsp]
+          == [(0x1000, 0x1E)],          # 0x1000..0x101C incl. the checksum
+          str([(hex(lb.start), hex(lb.length)) for lb in lbsp]))
+
+    # -- FillRule: the LE's pad past an auto-placed group tail ---------------
+    lib3 = LibModule(name='PHASE97')
+    lib3.extents = [
+        Extent(2 * 0x1000, b'\xA1' * 2 * 0x10),   # tail LIBDATA: auto-placed
+        Extent(2 * 0x1800, b'\xA2' * 2 * 0x10),   # pinned patch csect
+        Extent(2 * 0x2000, b'\xA3' * 2 * 0x10),   # tail INSERTED: no pad
+        Extent(2 * 0x5000, b'\xA4' * 2 * 0x10),   # pinned, > 2048 hw away
+    ]
+    fill = mmbstamp.FillRule(
+        sections=[(0x1000, 0x1010, 'LIBDATA'), (0x1800, 0x1810, '$Y097001'),
+                  (0x2000, 0x2010, 'INSERTED'), (0x5000, 0x5010, '$Y097002')],
+        deck_placed=frozenset({'INSERTED'}),
+        origins=frozenset({0x1800, 0x5000}))
+    lbs3 = mmbstamp.derive_load_blocks(lib3, 0, lambda hw: False, False,
+                                       fill=fill)
+    check('lb_fill', [(lb.start, lb.length) for lb in lbs3] == [
+        (0x1000, 0x812),      # pad reaches the pinned csect: one group
+        (0x2000, 0x12),       # deck-INSERTed tail: no pad
+        (0x5000, 0x12),
+    ], str([(hex(lb.start), hex(lb.length)) for lb in lbs3]))
+    # move the patch csect past pad range: the run before it now pads 2048 hw
+    # and closes on its own checksum, and the 0x1000 run loses its pad (the
+    # next content of ours is the INSERTed csect, which pins nothing)
+    lib3.extents[1] = Extent(2 * 0x2800, b'\xA2' * 2 * 0x10)
+    fill.sections[1] = (0x2800, 0x2810, '$Y097001')
+    fill.origins = frozenset({0x2800, 0x5000})
+    lbs4 = mmbstamp.derive_load_blocks(lib3, 0, lambda hw: False, False,
+                                       fill=fill)
+    check('lb_fill_pad', [(lb.start, lb.length) for lb in lbs4] == [
+        (0x1000, 0x12), (0x2000, 0x12),
+        (0x2800, mmbstamp.FILL_PAD_HW + 0x12), (0x5000, 0x12),
+    ], str([(hex(lb.start), hex(lb.length)) for lb in lbs4]))
+
+    # -- the merge cap counts the pad the merged block will then carry.
+    # A group ending 250 hw below the cap cannot absorb a next unit whose
+    # tail pads 2048 hw: the LB would run to 0x5202, well past 16384.
+    libc = LibModule(name='PHASE93')
+    libc.extents = [Extent(2 * 0x1000, b'\xE1' * 2 * 0x3F00),  # 16128 hw
+                    Extent(2 * 0x4F02, b'\xE2' * 2 * 0x10),    # auto-placed
+                    Extent(2 * 0x5800, b'\xE3' * 2 * 0x10)]    # pinned
+    fillc = mmbstamp.FillRule(
+        sections=[(0x1000, 0x4F00, 'BULK'), (0x4F02, 0x4F12, 'LIBDATA'),
+                  (0x5800, 0x5810, '$Y093001')],
+        deck_placed=frozenset({'BULK'}), origins=frozenset({0x5800}))
+    lbsc = mmbstamp.derive_load_blocks(libc, 0, lambda hw: False, False,
+                                       fill=fillc)
+    check('lb_cap_counts_pad', [(lb.start, lb.length) for lb in lbsc] == [
+        (0x1000, 0x3F02),                     # closes on its own checksum
+        (0x4F02, 0x10 + mmbstamp.FILL_PAD_HW + 2),
+        (0x5800, 0x12),
+    ], str([(hex(lb.start), hex(lb.length)) for lb in lbsc]))
+
+    # -- a bank's last block backs up over free memory in 1024-hw steps
+    # until the remainder fits one 2048-hw load block
+    libt = LibModule(name='PHASE94')
+    libt.extents = [Extent(2 * 0x1000, b'\xD1' * 2 * 0x10),      # content
+                    Extent(2 * 0x7FEA, b'\xD2' * 2 * 0x14)]      # bank tail
+    fillt = mmbstamp.FillRule(
+        sections=[(0x1000, 0x1010, 'CONTENT'), (0x7FEA, 0x7FFE, '$Y094001')],
+        deck_placed=frozenset({'CONTENT'}), origins=frozenset({0x7FEA}))
+    lbst = mmbstamp.derive_load_blocks(libt, 0, lambda hw: False, False,
+                                       fill=fillt)
+    # avail = 0x8000 - 0x1012 = 28654; k minimal with the remainder <= 2048
+    # is ceil((28654 - 2048) / 1024) = 26, so the block backs up to
+    # 0x1012 + 26*1024 = 0x7812 and runs 2030 hw to the bank end
+    tail = lbst[-1]
+    check('lb_bank_tail_step',
+          (tail.start, tail.length) == (0x7812, 0x8000 - 0x7812)
+          and tail.length <= mmbstamp.FILL_PAD_HW
+          and (tail.start - 0x1012) % mmbstamp.BANK_TAIL_STEP == 0,
+          f'{hex(tail.start)} len {tail.length}')
+
+    # -- a MAP-carded parent's longer csect at the same start keeps the
+    # region's tail allocated, so the bank tail backs up over less of it.
+    # Same geometry as above, but a parent phase filled the region at
+    # 0x1000 out to 0x1810 where this phase's own csect stops at 0x1010.
+    libm = LibModule(name='PHASE95')
+    libm.extents = [Extent(2 * 0x1000, b'\xD1' * 2 * 0x10),
+                    Extent(2 * 0x7FEA, b'\xD2' * 2 * 0x14)]
+    fillm = mmbstamp.FillRule(
+        sections=[(0x1000, 0x1010, 'CONTENT'), (0x7FEA, 0x7FFE, '$Y095001')],
+        deck_placed=frozenset({'CONTENT'}), origins=frozenset({0x7FEA}),
+        mapped={0x1000: 0x1810})
+    lbsm = mmbstamp.derive_load_blocks(libm, 0, lambda hw: False, False,
+                                       fill=fillm)
+    # floor 0x1812 instead of 0x1012; avail = 0x8000 - 0x1812 = 26606, so
+    # k = ceil((26606 - 2048) / 1024) = 24 and the tail starts 0x1812 + 24*1024
+    tailm = lbsm[-1]
+    check('lb_bank_tail_map_extent',
+          (tailm.start, tailm.length) == (0x7812, 0x8000 - 0x7812)
+          and (tailm.start - 0x1812) % mmbstamp.BANK_TAIL_STEP == 0,
+          f'{hex(tailm.start)} len {tailm.length}')
+    # and the mapped extent must not be visible where the phase does not
+    # itself occupy the start: an unrelated address is left alone
+    check('lb_map_extent_scoped',
+          fillm.occupied_below(0x7FEA, 0) == 0x1812
+          and mmbstamp.FillRule(
+              sections=fillm.sections, deck_placed=fillm.deck_placed,
+              origins=fillm.origins).occupied_below(0x7FEA, 0) == 0x1012)
+
     # -- stamp(): overlay at the composed csect addresses --------------------
     tables = mmbstamp.PhaseTables(
         gpt=list(range(mmbstamp.GPT_SIZE)),
@@ -142,6 +254,172 @@ def runMmbstamp():
         check('stamp_missing', False, 'no error for missing csect')
     except mmbstamp.StampError:
         check('stamp_missing', True)
+
+
+def runG3dat():
+    """g3dat unit checks: upper-memory module placement, the >>4 descriptor
+    re-encoding, the destination-sector split, the entry cap, and the
+    stamp() overlay."""
+    # -- placement: DAT/RTV/STR stacked down from the top of the sector ------
+    at = g3dat.place_modules({'FCMG3DAT': 161, 'FCMG3RTV': 152,
+                              'FCMG3STR': 143})
+    check('g3_place', (at['FCMG3DAT'], at['FCMG3RTV'], at['FCMG3STR'])
+          == (0xFF5F, 0xFEC7, 0xFE38),
+          ' '.join(f'{at[n]:04X}' for n in g3dat.MODULES))
+    try:
+        g3dat.place_modules({n: 0x4000 for n in g3dat.MODULES})
+        check('g3_place_fit', False, 'no error when the modules overflow')
+    except g3dat.G3DatError:
+        check('g3_place_fit', True)
+
+    # -- descriptor re-encoding: the DAT flag halfword is the phase
+    # table descriptor's >> 4 ----------------------------------------------
+    lb = mmbstamp.LoadBlock(4 * mmbstamp.BANK_HW + 0x22, 8, True)
+    lb.sot = True
+    check('g3_flags_gpt', lb.words()[1] == 0xC640, f'{lb.words()[1]:04X}')
+    ents, _ = g3dat.split_for_destination([lb], 15 * g3dat.SECTOR_HW + 0x7E38)
+    check('g3_flags_dat', ents == [(0x8022, 0x0C64, 8)], str(ents))
+
+    # -- destination split: a phase-shaped run of LB lengths, archive top
+    # FE38 -----------------------------------------------------------------
+    ph6 = [542, 94, 82, 1906, 1306, 6234, 4958, 16052, 2058, 1920, 16380,
+           16140, 2156, 3210, 2706, 2278, 16382, 16352, 490, 754, 9204,
+           16382, 2220, 3738, 12634, 7220, 1830, 7534, 1682]
+    lbs = [mmbstamp.LoadBlock((i % 8) * mmbstamp.BANK_HW, ln, False)
+           for i, ln in enumerate(ph6)]
+    ents, bottom = g3dat.split_for_destination(
+        lbs, 15 * g3dat.SECTOR_HW + 0x7E38)
+    lens = [e[2] for e in ents]
+    check('g3_split_count', len(ents) == 34, str(len(ents)))
+    check('g3_split_total', sum(lens) == sum(ph6) == 174444, str(sum(lens)))
+    check('g3_split_bottom', bottom == 0x0554CC, f'{bottom:#07x}')
+    # the five LBs that straddle a 32K destination boundary, in order
+    check('g3_split_pieces',
+          [(lens[i], lens[i + 1]) for i in (8, 12, 19, 24, 29)]
+          == [(1138, 920), (13548, 2592), (3444, 12908), (9412, 6970),
+              (7206, 14)],
+          str([(lens[i], lens[i + 1]) for i in (8, 12, 19, 24, 29)]))
+    # a split piece keeps its parent's flags and continues at addr+take
+    a0, f0, l0 = ents[8]
+    a1, f1, _ = ents[9]
+    check('g3_split_carry', (f1 == f0 and a1 == a0 + l0),
+          f'{a0:04X}+{l0}→{a1:04X} {f0:04X}/{f1:04X}')
+    # a destination that starts sector-aligned gets a whole sector of room,
+    # not zero (the fixture above only ever arrives at a boundary)
+    one = [mmbstamp.LoadBlock(mmbstamp.BANK_HW, 0x8001, False)]
+    ents, _ = g3dat.split_for_destination(one, 15 * g3dat.SECTOR_HW)
+    check('g3_split_aligned', [e[2] for e in ents] == [0x8000, 1],
+          str([hex(e[2]) for e in ents]))
+    # running the archive off the bottom of memory is an error, not a hang
+    try:
+        g3dat.split_for_destination(
+            [mmbstamp.LoadBlock(0, 16000, False) for _ in range(40)],
+            15 * g3dat.SECTOR_HW + 0x7E38)
+        check('g3_split_underrun', False, 'no error for an oversized archive')
+    except g3dat.G3DatError:
+        check('g3_split_underrun', True)
+
+    # -- stamp(): overlay at the composed csect address ---------------------
+    dat = g3dat.G3Dat(words=list(range(g3dat.G3DAT_SIZE)))
+    img = bytes(2 * 0x3000)
+    sym = {'sections': [{'name': g3dat.G3DAT_CSECT, 'address': 0x1000,
+                         'size': g3dat.G3DAT_SIZE}]}
+    out = g3dat.stamp(img, sym, dat)
+    check('g3_stamp', out[2 * 0x1000:2 * 0x1000 + 6]
+          == b'\x00\x00\x00\x01\x00\x02')
+    check('g3_stamp_len', len(out) == len(img))
+    try:
+        g3dat.stamp(img, {'sections': []}, dat)
+        check('g3_stamp_missing', False, 'no error for missing csect')
+    except g3dat.G3DatError:
+        check('g3_stamp_missing', True)
+    try:
+        g3dat.stamp(img, {'sections': [
+            {'name': g3dat.G3DAT_CSECT, 'address': 0x1000, 'size': 4}]}, dat)
+        check('g3_stamp_short', False, 'no error for an undersized csect')
+    except g3dat.G3DatError:
+        check('g3_stamp_short', True)
+
+
+def runTapeText():
+    """mmbstamp.stack_holes / tape_text: an auto-generated @-stack is
+    allocation, not content.
+
+    The linker reserves the space and supplies no tape text, so the MMB
+    staging buffer's fill is what the load block carries there and every
+    block sum has to use it -- ours emits a zero-filled text extent
+    instead.  All names synthetic."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        # one 8-hw csect of real text, then an 8-hw generated stack, then
+        # 4 more halfwords of real text, all in one extent
+        makePhase(root, 42, [(2 * 0x100, b'\x01\x02' * 20)], dict(sections=[
+            {'name': '#DAAAAAAA', 'address': 0x100, 'size': 8,
+             'module': 'AAAAAAAA'},
+            {'name': '@0AAAAAAA', 'address': 0x108, 'size': 8,
+             'module': '<generated-stacks>'},
+            {'name': '#EAAAAAAA', 'address': 0x110, 'size': 4,
+             'module': 'AAAAAAAA'},
+        ]))
+        sym = json.load(open(root / 'PHASE42' / 'PHASE42.sym.json'))
+        check('stack_holes', mmbstamp.stack_holes(sym) == [(0x108, 0x110)],
+              str(mmbstamp.stack_holes(sym)))
+        t = mmbstamp.tape_text(root, 42)
+        check('tape_text_len', len(t) == 12, str(len(t)))
+        check('tape_text_hole',
+              all(h not in t for h in range(0x108, 0x110)), 'stack has text')
+        check('tape_text_keeps',
+              t.get(0x100) == 0x0102 and t.get(0x110) == 0x0102, str(t))
+        # the point of the hole: a sum over the block reads FILL there
+        s = sum(t.get(h, mmbstamp.FILL) for h in range(0x100, 0x114)) & 0xFFFF
+        check('tape_text_sum', s == (12 * 0x0102 + 8 * mmbstamp.FILL) & 0xFFFF,
+              hex(s))
+
+
+def runChecksumSlots():
+    """fcmImage._checksum_slots: survival in memory (the `owner` test) and
+    appearance in the listing (MCF membership) are separate questions.
+
+    A memory configuration is defined by the MCF as a phase subset.  Every
+    phase the loader places is really in memory, checksum slots included,
+    but a phase outside the subset is not part of the config's load module,
+    so its blocks' slots must not reach the map -- the same verdict
+    mmu2fcm.unionSym records as `residue` on that phase's csects.  Synthetic
+    load orders and addresses throughout."""
+    img = FcmImage()
+    img.mem_hw = 0x400
+    owner = bytearray(img.mem_hw)          # nobody wrote anything
+
+    # load orders 1..3; the MCF lists 1 and 3 but not 2
+    listed = {1, 3}
+    lb = [(1, 0x100), (2, 0x120), (3, 0x140)]
+    got = img._checksum_slots([], owner, lb, listed)
+    check('cks_mcf_keeps', 0x100 in got and 0x140 in got, str(got))
+    check('cks_mcf_drops', 0x120 not in got, str(got))
+
+    # a slot two phases produce is listed as long as one is an MCF phase
+    got = img._checksum_slots([], owner, [(2, 0x200), (3, 0x200)], listed)
+    check('cks_mcf_shared', got == [0x200], str(got))
+    got = img._checksum_slots([], owner, [(2, 0x200)], listed)
+    check('cks_mcf_unshared', got == [], str(got))
+
+    # listed_ord=None -> historic behaviour, every order contributes
+    got = img._checksum_slots([], owner, lb, None)
+    check('cks_mcf_none', got == [0x100, 0x120, 0x140], str(got))
+
+    # the owner test is unchanged and still independent: a later phase's
+    # text over an MCF phase's slot suppresses it
+    owner2 = bytearray(img.mem_hw)
+    owner2[0x100:0x102] = b'\x02\x02'      # order 2 wrote over order 1's slot
+    got = img._checksum_slots([], owner2, [(1, 0x100)], listed)
+    check('cks_owner_still', got == [], str(got))
+
+    # the block-per-extent half honours the same rule (content end 0x181
+    # rounds up to the fullword-aligned slot at 0x182)
+    got = img._checksum_slots([(2, 0x181)], owner, [], listed)
+    check('cks_extent_mcf', got == [], str(got))
+    got = img._checksum_slots([(3, 0x181)], owner, [], listed)
+    check('cks_extent_keeps', got == [0x182], str(got))
 
 
 def run():
@@ -197,7 +475,7 @@ def run():
         check('union_B_real', secs['B']['module'] == 'B',
               f"imported marker won: {secs['B']}")
         # C's text was fully re-supplied (identical bytes) under CC by the
-        # later phase: flight maps list only the overlay winner, so C is
+        # later phase; only the overlay winner is listed, so C is
         # shadow-dropped and CC listed
         check('union_shadow', 'C' not in secs and 'CC' in secs,
               f"{sorted(secs)}")
@@ -222,6 +500,9 @@ def run():
               'CLI image differs from compose()')
 
     runMmbstamp()
+    runG3dat()
+    runTapeText()
+    runChecksumSlots()
 
     for f in _failures:
         print('FAIL', f)
