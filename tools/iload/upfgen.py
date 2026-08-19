@@ -67,6 +67,7 @@ HDR_RE = re.compile(
     r"^\s?([0-9A-F]{6})(?:-([0-9A-F]{6}))?\s+(#\S+)\+([0-9A-F]{4})\s+(.*)$")
 TOK_RE = re.compile(r"(\*?)\b([0-9A-F]{4})\b")
 TYPE_WORDS = ("VARIABLE", "TERMINAL", "STRUCTURE")
+NAME_COLS = 32
 
 
 def scrapeDass(path: Path):
@@ -77,6 +78,8 @@ def scrapeDass(path: Path):
     curName, curEnd = None, -1
     mcf = None
     for ln in path.read_text(encoding="latin-1", errors="replace").splitlines():
+        if "P A T C H   S U M M A R Y" in ln:
+            break
         if mcf is None and "DEFINED IN THE MCF AS PHASES" in ln:
             mcf = [int(x) for x in re.findall(r"[\d,]+\s*$", ln)[0].split(",")]
         m = HDR_RE.match(ln)
@@ -87,7 +90,10 @@ def scrapeDass(path: Path):
         csect, rest = m.group(3), m.group(5)
         isHeader = any(w in rest for w in TYPE_WORDS)
         if isHeader:
-            curName, curEnd = rest.split()[0], hi
+            name = rest[:NAME_COLS].split()
+            if not name:
+                continue
+            curName, curEnd = name[0], hi
             rest = rest[len(curName):]
             # strip the trailing type keywords so decoded EU values / type
             # words can't contribute stray hex tokens
