@@ -151,29 +151,29 @@ deck.  A tree looks like:
 ```
 
 and may have a sibling `gen/<tree>/` overlay for generated or
-preprocessed members — members there override same-named members in the
-tree, so the source tree itself is never modified.  If the overlay
-contains a `linkorder.json` pins file, its link orderings are picked 
-up automatically.
+preprocessed members — `SSSRC/`, `APPLSRC/` and `INCL80/` there override
+same-named members in the tree, so the source tree itself is never
+modified.  If the overlay contains a `linkorder.json` pins file, its link
+orderings are picked up automatically.
 
 To build one link target — resolve the deck, assemble the ASM members,
 compile the HAL members in template order, build the display decks, and
 link the result:
 
 ```
-build/bin/con80build --root code/OI340600 --out build/OI340600 \
+build/bin/con80build --root code/OI340700 --out build/OI340700 \
     --assemble --hal --display --link SSW
 ```
 
-This produces `build/OI340600/SSW.fcm` (plus `SSW.lib`, a `sym.json`
+This produces `build/OI340700/SSW.fcm` (plus `SSW.lib`, a `sym.json`
 symbol sidecar, and per-member objects under `obj/`).  The `.fcm` runs
 in the simulator (`build/bin/gpc run`/`debug`).
 
 For a deck whose master member defines multiple MMU phases:
 
 ```
-build/bin/con80build --root code/OI340600 --out build/OI340600 --phase 4
-build/bin/con80build --root code/OI340600 --out build/OI340600 --build-all
+build/bin/con80build --root code/OI340700 --out build/OI340700 --phase 4
+build/bin/con80build --root code/OI340700 --out build/OI340700 --build-all
 ```
 
 `--phase N` builds one phase (its load module lands at
@@ -195,6 +195,20 @@ image.
 Useful extras: `--plan` resolves and classifies the worklist without
 building anything, `--emit-cmake FILE` writes a standalone CMake recipe
 for the same worklist, and `-e` halts at the first failing member.
+
+The build runs in parallel and caches compilations:
+
+- `--jobs/-j N` — toolchain processes at once (default one per CPU;
+  `-j1` is the strictly serial build).
+- `--phase-jobs/-J P` — with `--build-all`, how many phases compile at
+  once. The phase *links* stay a chain in deck order.
+- The compile cache reuses a HAL unit wherever an identical compile
+  recurs, which in a whole-tree build is about half of them. It lives at
+  `<out>/.compilecache`, so it travels with the build tree;
+  `--shared-cache` puts it in a fixed per-user location under `$TMPDIR`
+  instead so every tree shares one, `--cache-dir DIR` names a location,
+  and `--no-cache` turns it off. `--cache-verify` recompiles on every hit
+  and checks the cached object against the fresh one.
 
 ### Inspecting the MMU build deck: mmubuild
 
@@ -220,7 +234,7 @@ loading process. Phases loaded in the configuration's order,
 later phases overlaying earlier ones:
 
 ```
-build/bin/mmu2fcm --mmu build/OI340600 --con80 code/OI340600/CON80 \
+build/bin/mmu2fcm --mmu build/OI340700 --con80 code/OI340700/CON80 \
     --config SSW --system-id 29.01A.01B --iload-id 29.1.0.00.0B
 ```
 
@@ -233,9 +247,12 @@ EBCDIC-coded System and I-Load Identifier words a loader writes at low
 core (halfwords 0x1C and 0x20) — they are load-time values, not part of
 any load module, so omitting them leaves the words zero.
 `--stamp-phase-tables` additionally generates and stamps the
-mass-memory phase tables into the image, `--stamp-ipl-tables` the IPL
-set's own, and `--boot` composes the machine the IPL microcode leaves
-behind.
+mass-memory-build tape tables into the image — `#PFCMGPT`, `#PCDCPHA`,
+`FCMG3DAT` — with `--stamp-checksums` the per-load-block checksum slots,
+`--stamp-ipl-tables` the IPL set's own, and `--boot` the machine the IPL
+microcode leaves behind.  None of them is load-module content, so
+`mafgen --base <unstamped>.fcm` reproduces the DASS star column from the
+difference.
 
 That stamps a composed **image**.  `mmustamp` writes the same values into
 the phase **load module**, which is what `mmu2mmv` builds each tape record

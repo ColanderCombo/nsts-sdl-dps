@@ -39,6 +39,15 @@ foreach(_prog bench02 bench08)
     )
 endforeach()
 
+add_test(NAME "lnk101_dup_csect"
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/srcTest/lnk101/test_dup_csect.py"
+)
+set_tests_properties("lnk101_dup_csect" PROPERTIES
+    LABELS "linker"
+    TIMEOUT 30
+)
+
 # A CSECT-table entry marked "linkInfo": "placement" is placed and its
 # contents are defined, and none of them resolves a relocation.
 add_test(NAME "lnk101_placement_only"
@@ -436,6 +445,52 @@ add_test(NAME con80_mirror
 )
 set_tests_properties(con80_mirror PROPERTIES
     LABELS "ap101Utils"
+    TIMEOUT 60
+)
+
+# Blank-ddname LIBRARY cards: the LE's RESTRICTED NO-CALL `LIBRARY *(er,...)`
+# (the named external references are never resolved and the load module keeps
+# the assembled text) versus the NEVER-CALL `LIBRARY (member,...)`.  The
+# scoping half is the campaign's load-bearing rule: a card binds a phase only
+# where that phase is never linked without the carding phase, which is what
+# lets GNC9STUB's phase-8 cards reach phase 18 (both G9-only) while keeping
+# phase 2, in all nine configurations, out of their reach.
+add_test(NAME lnk101_nocall
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_lnk101_nocall.py"
+)
+set_tests_properties(lnk101_nocall PROPERTIES
+    LABELS "lnk101"
+    TIMEOUT 60
+)
+
+# Cross-phase resolution and the load ORDER: a memory configuration writes
+# one phase over another, so a symbol defined in two co-resident phases can
+# have one definition already buried by the time the software runs.  The
+# reference must take the one that survives -- and must decline where the
+# consuming phase's configurations overlay differently, since one load
+# module serves them all.
+add_test(NAME lnk101_overlay
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_lnk101_overlay.py"
+)
+set_tests_properties(lnk101_overlay PROPERTIES
+    LABELS "lnk101"
+    TIMEOUT 60
+)
+
+# A link's reproducibility record has to name the inputs that DECIDE the
+# layout, not just the object files: the earlier-phase load modules, the
+# overlay-region origins imported from them, and the concard root.  Two
+# phase-16 links once differed by 177 addresses with identical `repro`
+# blocks.  Also guards the load-module `created` stamp -- the one byte that
+# stopped a repeat link from being comparable with `cmp`.
+add_test(NAME lnk101_repro_inputs
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_lnk101_repro_inputs.py"
+)
+set_tests_properties(lnk101_repro_inputs PROPERTIES
+    LABELS "lnk101"
     TIMEOUT 60
 )
 

@@ -1,5 +1,6 @@
 build
 build-win
+build.*
 inst
 docs
 *.pyc
@@ -10,11 +11,18 @@ testCases
 
 # Machine-local
 .cache
+.cmake/
 .history/
 __pycache__/
 
 /testData/
 /code/BFS.SRC
-/code/OI301700
-/code/OI340600
+/code/OI*
 /ext/hals-lsp/
+/ext/halmat/
+
+# Build/probe debris that lands at the repo root
+/Testing/
+/*.obj
+/*.asmg.json
+*.orig
