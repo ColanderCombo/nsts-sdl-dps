@@ -5,7 +5,7 @@ import yaml
 
 from ap101Utils.addr import Addr
 
-log = logging.getLogger("LNK101S")
+log = logging.getLogger("LNK101")
 
 
 class LinkConfig:
@@ -74,7 +74,7 @@ class LinkConfig:
     def save(self, outputPath):
         data = self.toDict()
         with open(outputPath, 'w') as f:
-            f.write("# LNK101S link configuration\n")
+            f.write("# LNK101 link configuration\n")
             f.write("# All addresses are in bytes (hex). Halfword address = byte address / 2.\n")
             f.write("# Sections must be 4-byte aligned. Edit addresses to control placement.\n")
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)

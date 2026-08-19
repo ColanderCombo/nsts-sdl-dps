@@ -4,6 +4,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from functools import cache
 from pathlib import Path
 
 
@@ -18,6 +19,7 @@ def _source_hash():
     return h.hexdigest()
 
 
+@cache
 def get_git_info():
     src_dir = Path(__file__).parent
     try:
@@ -50,6 +52,16 @@ def version_string():
     return f"{short}({date}){dirty} src:{src}"
 
 
+def created_stamp():
+    import os
+    from datetime import datetime, timezone
+    sde = os.environ.get("SOURCE_DATE_EPOCH", "").strip()
+    if sde.isdigit():
+        return datetime.fromtimestamp(int(sde), tz=timezone.utc).replace(
+            tzinfo=None).isoformat(timespec="seconds")
+    return datetime.now().isoformat(timespec="seconds")
+
+
 def md5_file(path):
     h = hashlib.md5()
     with open(path, "rb") as f:
@@ -64,6 +76,7 @@ class ReproTracker:
         self.tool_version = tool_version
         self.git_info = get_git_info()
         self.files = {}  # resolved path str -> {"md5": ..., "role": ...}
+        self.inputs = {}
 
     def track(self, path, role="input"):
         resolved = str(Path(path).resolve())
@@ -77,6 +90,7 @@ class ReproTracker:
             "version": self.tool_version,
             "git": self.git_info,
             "files": {p: info for p, info in sorted(self.files.items())},
+            **({"inputs": self.inputs} if self.inputs else {}),
         }
 
     def print_summary(self, file=sys.stderr):

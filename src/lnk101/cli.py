@@ -174,7 +174,7 @@ def link(
                     return record.getMessage()
                 if record.levelno == logging.DEBUG:
                     return f"DEBUG: {record.getMessage()}"
-                return f"LNK101S: {record.levelname.lower()}: {record.getMessage()}"
+                return f"LNK101: {record.levelname.lower()}: {record.getMessage()}"
         handler = logging.getLogger().handlers[0]
         handler.setFormatter(InfoFilter())
 
@@ -278,6 +278,18 @@ def link(
         fn = module.filename
         if fn and os.path.exists(fn) and fn not in input_files:
             tracker.track(fn, role="library")
+    for spec in (opts.map_lib or []):
+        _ph, _, _path = spec.partition('=')
+        if _path and os.path.exists(_path):
+            tracker.track(_path, role=f"map_lib:{_ph}")
+    for _opt, _role in ((opts.autocall_json, "autocall"),
+                        (opts.link_order, "link_order")):
+        if _opt and os.path.isfile(str(_opt)):
+            tracker.track(str(_opt), role=_role)
+    tracker.inputs["mapLibs"] = sorted(opts.map_lib or [])
+    tracker.inputs["concardRoot"] = opts.concard_root
+    tracker.inputs["phaseRegionOrigins"] = {
+        n: a for n, a in sorted(linker.phaseRegionStarts.items())}
 
     # Embed repro data in JSON outputs (always, regardless of --repro flag)
     repro_dict = tracker.to_dict()

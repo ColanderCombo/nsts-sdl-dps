@@ -55,7 +55,7 @@ uv_add_pyproject("src/pyproject.toml")
 add_custom_target(asm101 ALL COMMENT "asm101 assembler")
 add_dependencies(asm101 uv_sync)
 
-add_custom_target(lnk101 ALL COMMENT "LNK101S linker")
+add_custom_target(lnk101 ALL COMMENT "LNK101 linker")
 add_dependencies(lnk101 uv_sync)
 
 #-----------------------------------------------------------------------------
