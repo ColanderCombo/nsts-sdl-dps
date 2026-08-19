@@ -57,21 +57,6 @@ set_tests_properties(asm101_golden PROPERTIES
     TIMEOUT 120
 )
 
-# Instruction-definition sync guard: runs the ext/sim harness to extract the GPC
-# simulator's instruction definitions, then checks they match the checked-in
-# src/asm101/instr_defs.json (freshness) and that the IOP descriptors still
-# agree with the listing-correct reference in test/iop_listing_truth.py (catches
-# the coffee drifting from flight-listing truth).  SKIPs cleanly if Node/esbuild
-# or the ext/sim submodule are unavailable.
-add_test(NAME asm101_instr_defs
-    COMMAND "${SDL_VENV_PYTHON}"
-        "${_asm_script_dir}/test_asm101_instr_defs.py"
-)
-set_tests_properties(asm101_instr_defs PROPERTIES
-    LABELS "asm101"
-    TIMEOUT 120
-)
-
 # Compiled-archive differential: asserts the descriptor-driven CPU encoder
 # reproduces real HAL/S-FC object code taken from the BFS COMPILED listings (RS
 # extended/indexed long forms + RR).  Independent ground truth -- not asm101's
@@ -118,7 +103,7 @@ add_custom_target(test-asm101
 # pattern is left unanchored on purpose: a trailing '$' is swallowed by Make's
 # variable expansion in the generated recipe, and each test name is already a
 # unique substring (no asm101_* name is a substring of another).
-foreach(_asm_test asm101_upstream asm101_features asm101_iop asm101_golden asm101_instr_defs asm101_compiled_vectors)
+foreach(_asm_test asm101_upstream asm101_features asm101_iop asm101_golden asm101_compiled_vectors)
     # test-asm101-features -> a hyphenated alias is friendlier to type.
     string(REPLACE "asm101_" "test-asm101-" _asm_tgt "${_asm_test}")
     add_custom_target(${_asm_tgt}

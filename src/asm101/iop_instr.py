@@ -87,15 +87,16 @@ PC_RELATIVE = frozenset(
 
 # The 1-bit descriptor fields that the trailing "(1)" index syntax sets.  The
 # long-format MSC/BCE ops name it 'i' (index register); the BCE store-status ops
-# #SSC/#SST name it 'm' (index mode).
-_INDEX_FIELDS = ("i", "m")
+# #SSC/#SST name it 'm' (index mode); @INT names it 'I', its OR-with-X mode bit,
+_INDEX_FIELDS = ("i", "m", "I")
 
 
 @cache
 def index_field(name):
-  """The name of 'name's 1-bit index-mode field ('i' or 'm'), set by a trailing
-  "(1)", or None if the op has none.  Lets the codegen handle the BCE 'm' ops the
-  same way as the 'i' ops without hard-coding a single field letter."""
+  """The name of 'name's 1-bit index-mode field ('i', 'm' or 'I'), set by a
+  trailing "(1)", or None if the op has none.  Lets the codegen handle the BCE
+  'm' ops the same way as the 'i' ops without hard-coding a single field
+  letter."""
   desc = IOP.descriptor(name)
   if desc is None:
     return None

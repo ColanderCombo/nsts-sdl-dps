@@ -119,7 +119,7 @@
       "fmt": [
         "XUL R1,R2"
       ],
-      "name": "Exclusive OR Upper and Lower"
+      "name": "Exchange Upper and Lower Halfwords"
     },
     "IAL": {
       "d": "11100xxxddddddbb",
@@ -1026,7 +1026,8 @@
         "SSM D2(B2)",
         "SSM D2(X2,B2)"
       ],
-      "name": "Set System Mask"
+      "name": "Set System Mask",
+      "addrWidth": "HALFWORD"
     },
     "SCAL": {
       "d": "11010xxx11111abb/X",
@@ -1060,7 +1061,8 @@
         "TS D2(B2)",
         "TS D2(X2,B2)"
       ],
-      "name": "Test and Set"
+      "name": "Test and Set",
+      "addrWidth": "HALFWORD"
     },
     "TSB": {
       "d": "10110111ddddddbb/I",
@@ -1423,9 +1425,10 @@
       ]
     },
     "@STP": {
-      "d": "0001000000000000",
+      "d": "00010cccdddddddd",
       "fmt": [
-        "@STP"
+        "@STP OPX",
+        "@STP OPX,COUNT"
       ]
     }
   },
@@ -1604,7 +1607,7 @@
       ]
     },
     "#STP": {
-      "d": "0001___________f",
+      "d": "0001I__________f",
       "fmt": [
         "#STP FLAG"
       ]

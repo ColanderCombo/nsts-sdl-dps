@@ -68,23 +68,30 @@ def _macroOperandEnd(operand, invoke):
   list parse stops at the `(`) as complete instead of a blob to keep joining.
 
     blank found, content parses cleanly:
-      - content ends in ',' -> list broken before the blank: trim, keep joining
-      - else                -> trim the comment; operand complete
-    blank found, content does NOT parse cleanly -> blob: rstrip, keep joining
-    blank found, content empty -> blank/leading-space card: empty operand,
-      complete for an invocation, not for a prototype
+      - content ends in ','   -> list broken before the blank: trim, keep joining
+      - else                  -> trim the comment; operand complete
+    blank found, content does NOT parse cleanly 
+                              -> blob: rstrip, keep joining
+    blank found, content empty 
+                              -> blank/leading-space card: empty operand,
+                                complete for an invocation, not for a prototype
     no blank, parses cleanly  -> whole card is operand, continues
     no blank, does not parse  -> blob: rstrip, continues
   """
   rule = "oinv" if invoke else "oproto"
   b = larkparse.first_blank_outside(operand)
   if b is None:
+    if operand == operand.rstrip(): 
+      return operand, False
     if larkparse.parse(operand, rule) is not None:
       return operand, False
     return operand.rstrip(), False
   content = operand[:b]
   if content == "":
     return "", invoke
+  if content[-1] == "," and operand.rstrip() == content:
+    # ordinary continuation card
+    return content, False
   if larkparse.parse(content, rule) is None:
     return operand.rstrip(), False
   if content[-1] == ",":

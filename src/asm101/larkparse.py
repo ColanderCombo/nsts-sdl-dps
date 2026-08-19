@@ -3,10 +3,14 @@
 # Lark-based front-end for the asm101 assembler: a grammar
 # plus a transformer that emits an AST.
 # 
+import hashlib
 import os
+import sys
+import tempfile
 from dataclasses import dataclass, field
 from functools import cache
 from lark import Lark, Transformer, v_args
+from lark import __version__ as lark_version
 from ap101Utils import codepages  # noqa: F401 -- registers the 'ebcdicvagc' codec
 from .astnodes import (
     Int, Loc, Neg, BinOp, Sym, Var, Attr, Lcon,
@@ -578,16 +582,82 @@ _LALR_STARTS = frozenset({
 _META_STARTS = frozenset({"rs", "oinv"})
 
 
+# Split grammar by start rules for caching:
+_PARSER_GROUPS = (
+    (frozenset(_LALR_STARTS - {"ds", "rs"}), "lalr",   False),
+    (frozenset({"rs"}),                      "lalr",   True),
+    (frozenset({"bool", "aif", "oproto",
+                "bool_only", "cexpr_only"}), "earley", False),
+    (frozenset({"oinv"}),                    "earley", True),
+)
+
+
+def _cache_path(key):
+  try:
+    with open(_GRAMMAR, "rb") as f:
+      grammar = f.read()
+  except OSError:
+    return None
+  digest = hashlib.sha256(
+      grammar + repr(key).encode() + lark_version.encode()
+      + repr(sys.version_info[:2]).encode()).hexdigest()[:32]
+  root = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+  return os.path.join(root, "asm101", f"lalr-{digest}.lark")
+
+
+def _load_or_build(key, build):
+  path = _cache_path(key)
+  if path is None:
+    return build()
+  try:
+    with open(path, "rb") as f:
+      return Lark.load(f)
+  except Exception:
+    pass
+  parser = build()
+  try:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    try:
+      with os.fdopen(fd, "wb") as f:
+        parser.save(f)
+      os.replace(tmp, path)
+    except BaseException:
+      os.unlink(tmp)
+      raise
+  except Exception:
+    pass
+  return parser
+
+
+@cache
+def _group(starts, algorithm, positions):
+  key = (tuple(sorted(starts)), algorithm, positions)
+
+  def build():
+    return Lark.open(_GRAMMAR, start=sorted(starts),
+                     parser = algorithm,
+                     lexer = "contextual" if algorithm == "lalr" else "auto",
+                     maybe_placeholders=False,
+                     propagate_positions=positions)
+
+  # Lark can only serialize LALR tables; Earley has to be rebuilt each time.
+  return _load_or_build(key, build) if algorithm == "lalr" else build()
+
+
 @cache
 def _parser(start):
   if start == "ds":
-    return _parser("dc")   # identical grammar rule; share one parser
+    return _parser("dc")
+  for starts, algorithm, positions in _PARSER_GROUPS:
+    if start in starts:
+      return _group(starts, algorithm, positions), start
   isLalr = start in _LALR_STARTS
   return Lark.open(_GRAMMAR, start=start,
                    parser = "lalr" if isLalr else "earley",
                    lexer = "contextual" if isLalr else "auto",
                    maybe_placeholders=False,
-                   propagate_positions=(start in _META_STARTS))
+                   propagate_positions=(start in _META_STARTS)), start
 
 
 # Quote/paren/attribute-aware field scanning, shared by the Stage-0 comment
@@ -672,10 +742,10 @@ NO_STRIP = frozenset({
 
 @cache
 def parse(text, rule):
-  parser = _parser(rule)
+  parser, start = _parser(rule)
   stripped = text if rule in NO_STRIP else _strip_comment(text)
   try:
-    tree = parser.parse(stripped)
+    tree = parser.parse(stripped, start=start)
     return _AST(stripped).transform(tree)
   except Exception:
     return None

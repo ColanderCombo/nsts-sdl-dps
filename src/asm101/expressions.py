@@ -269,7 +269,11 @@ def svReplace(stmt, text, svLocals):
     elif replacement is True:
       replacement = "1"
     elif isinstance(replacement, int):
-      replacement = str(replacement)
+      #  IBM C28-6514-5/p.81 Using SETA Symbols:
+      # "If the SETA symbol is not used in an arithmetic expression, the
+      # arithmetic value is converted to an unsigned integer, with leading
+      # zeros removed". &C = -2 substitutes as 2.
+      replacement = str(abs(replacement))
     elif isinstance(replacement, (list,tuple)):
       if text[start-2:start] in ["K'", "N'"]:
         start -= 2

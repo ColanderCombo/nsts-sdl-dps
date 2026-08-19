@@ -1111,6 +1111,25 @@ class Assemble:
       self.writeDebugSymbols()
     self._log(f"Assembly complete: {self._relpath(self.object_file)}")
     
+  def _checkCsectExtents(self, sections) -> None:
+    """Every CSECT origin must clear the end of the one before it.
+    """
+    placed = sorted(((origin, name, len(image))
+                     for name, _esdSeq, origin, image in sections if image),
+                    key=lambda s: s[0])
+
+    if len(placed) < 2 or all(origin == 0 for origin, _n, _l in placed):
+      return
+    for (o0, n0, len0), (o1, n1, _len1) in zip(placed, placed[1:]):
+      if o1 < o0 + len0:
+        message = (
+            f"CSECT layout is inconsistent: '{n1}' has ESD origin "
+            f"{o1 // 2:#07x} but '{n0}' runs to {(o0 + len0) // 2:#07x} "
+            f"(halfwords) -- they overlap by {(o0 + len0 - o1) // 2}.")
+        print(f"Warning: {self._relpath(self.object_file)}: {message}",
+              file=sys.stderr)
+        self._log(f"WARNING: {message}")
+
   def writeObjectModule(self) -> None:
     def origin(sectName) -> int:
       sect = sects.get(sectName)
@@ -1120,6 +1139,7 @@ class Assemble:
                  d.offset.bytes if d.offset is not None else 0,
                  bytes(d.memory[:d.used]))
                 for name, d in sects.items() if not d.dsect]
+    self._checkCsectExtents(sections)
     # A symbol registered as an external on an early pass (e.g. a Z-con
     # target seen before its definition) may have ended up defined in this
     # assembly; emitting an ER for it would make the linker demand an export
@@ -1250,10 +1270,13 @@ class Assemble:
         "source": self.source_files[-1].stem if self.source_files else None,
         "sections": sections,
         "symbols": symbols,
-        # [section, startByte, endByte, 'DC'|'DS', letter, elements, label]
+        # [section, startByte, endByte, 'DC'|'DS', letter, elements,
+        # label, scale] 
         "data": datastmts,
-        # literal-pool slots: [section, startByte, endByte, T, L] -- the
-        # source type of each =constant, for pool-reference comments
+        # literal-pool slots: [section, startByte, endByte, T, L, Ls, S] --
+        # the source type of each =constant, its allocated footprint L, its
+        # source-declared length Ls and its scale modifier S (or null), for
+        # pool-reference comments
         "literals": sorted(
             (list(r) for r in self.metadata.get("literals", [])
              if r[0] in real),

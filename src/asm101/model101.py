@@ -88,11 +88,7 @@ addresses depend on which earlier instructions condensed to SRS.  The
 multi-pass loop resolves it by relaxation to a fixpoint (code only shrinks,
 so it converges).
 'optimizeScratch' and 'handleSrsOrRs' carry the form-selection logic (scratch
-entries not yet sized are flagged "ambiguous"); a few corners ('forceAM0',
-the FP-op exclusions) remain empirical, tuned to reproduce the original
-assembler's bytes exactly.  SRS_CEILING=56 matches the POO's register-
-designated shift-count threshold (see 'SHIFT_REG_COUNT_BASE'), applied
-uniformly by the original assembler.
+entries not yet sized are flagged "ambiguous")
 
 Passes (an initial macro/field pass already ran before generateObjectCode):
     Pass 0  parse each operand to an AST, once, so pass-1 lookahead is cheap;
@@ -132,12 +128,16 @@ mnemonics are fullword-D2 comes from the descriptors' 'addrWidth' attribute
 (see 'srs_d2_units') -- the very field the simulator's g_EA scales by, so the
 assembler and the simulator cannot disagree.
 '''
-# SRS displacement-fit bounds.  The ceiling is 56, not 64: D values 56-63
-# are the POO's register-designated SHIFT-count form (D = 56+n -> count in
-# bits 10-15 of Rn; 6246156B p.78).  The original assembler applied the
-# 56 ceiling to every SRS op.
+# SRS displacement-fit bounds.  
+# 
 SRS_FLOOR = 0
+# The ceiling is 56: bits 10-15 of D (56-63)
+# are used as a shift count (IBM-6246156B/p.78):
+SHIFT_REG_COUNT_BASE = 56
+# BACKWARD branches are <= 56:
 SRS_CEILING = 56
+# MEMORY references are <= 55:
+SRS_MEM_CEILING = 55
 # FORWARD branches condense to the SRS short form only when the SELF-
 # CONDENSED displacement (the distance after the branch itself shrinks a
 # halfword) is below 54, not the full 56-halfword field: the assembler
@@ -146,7 +146,7 @@ SRS_CEILING = 56
 # full window.  Callers subtract 1 from a currently-RS-sized branch's
 # measured distance before this test.
 SRS_FORWARD_BRANCH_CEILING = 54
-SHIFT_REG_COUNT_BASE = 56
+
 
 
 # SRS branch displacement-fit tests, shared by the pass-1 ambiguity resolver
@@ -246,7 +246,7 @@ def unUsing(using, hashed, limit=0xFFFFFF):
       d2 = j
   return b2,d2
 
-# Re-resolve each USING base of a collect-pass snapshot against the CURRENT
+# Re-resolve each USING base of a collect-pass snapshot against the current
 # symtab.  A pass-1 USING whose base symbol is a forward reference resolves
 # against the pre-pass 'preliminary' symtab entries -- byte-unit position
 # over-estimates -- while optimizeScratch evaluates instruction operands
@@ -255,15 +255,34 @@ def unUsing(using, hashed, limit=0xFFFFFF):
 # #LSQRT: base A recorded at +4, settled A at +2 -> 'A R6,A' computed d2=-2,
 # SRS wrongly rejected).  The SRS/RS size decision must compare like with
 # like, so recompute the base the same way codegen eventually will.
+#
+def _refreshStar(u):
+  """Current value of the '*' a collect-pass USING was written against."""
+  star = u[6]
+  if len(u) < 10 or u[7] is None:
+    return star
+  ssect, sidx, sgap = u[7], u[8], u[9]
+  if ssect not in sects or ssect not in symtab:
+    return star
+  base = symtab[ssect].value
+  if sidx < 0:
+    return base + sgap
+  scratch = sects[ssect].scratch
+  if sidx >= len(scratch):
+    return star
+  e = scratch[sidx]
+  return base + (e["pos1"] + e["length"]).hw + sgap
+
+
 def refreshUsing(using):
   fresh = []
   for u in using:
     if u is None or len(u) < 7 or u[3] is None:
       fresh.append(u)
       continue
-    h, section, address, locAst, k, ustmt, star = u
-    h2 = evalArithmeticExpression(locAst, NO_LOCALS, ustmt, symtab, star,
-                                  severity=0)
+    h, section, address, locAst, k, ustmt = u[0], u[1], u[2], u[3], u[4], u[5]
+    h2 = evalArithmeticExpression(locAst, NO_LOCALS, ustmt, symtab,
+                                  _refreshStar(u), severity=0)
     if h2 is None:
       fresh.append(u)
       continue
@@ -273,11 +292,17 @@ def refreshUsing(using):
   return fresh
 
 # Resolve a combined halfword offset back to the actual CSECT that contains it,
-# for building an RLD relocation.  Returns the name of the (non-DSECT) section
-# whose range [offset, offset + used//2) contains 'value', or 'default' if none
-# does.  'exclude' (a section name) never matches -- pass the current section
-# when the value must resolve to a *different* CSECT, or None to allow any.
-def resolveCSect(value, sects, default, exclude=None):
+# for building an RLD relocation.  Returns the name of the CSECT whose range 
+# [offset, offset + used//2) contains 'value', or 'default' if none does.  
+# If the value is found in another CSECT that takes priority, if not
+# we'll take the value in the current CSECT
+#
+# a EXTRN/ENTRY symbol and not a csect, and will return a zero offset, so
+# if 'default' isn't detected as a CSECT, return it directly:
+def resolveCSect(value, sects, default, currentSect=None):
+  if default is not None and default not in sects:
+    return default
+  fallback = None
   for sn, sd in sects.items():
     if sd.dsect or sd.offset is None:
       continue
@@ -285,9 +310,11 @@ def resolveCSect(value, sects, default, exclude=None):
     # Mid-pass, a LATER section's 'used' is still growing (it resets with
     # pos1 each compile pass); the previous pass's 'usedPrev' is the size
     # estimate for ranging.
-    if so <= value < so + max(sd.used.hw, sd.usedPrev.hw) and sn != exclude:
-      return sn
-  return default
+    if so <= value < so + max(sd.used.hw, sd.usedPrev.hw):
+      if sn != currentSect:
+        return sn
+      fallback = sn
+  return fallback if fallback is not None else default
 
 
 def sectionOffset(name):
@@ -296,6 +323,24 @@ def sectionOffset(name):
   if name in sects and sects[name].offset is not None:
     return sects[name].offset.hw
   return 0
+
+
+def layoutCsects():
+  """Generate a fullword aligned contiguous list of CSECTS 
+     starting at the first ORG.
+  """
+  lastOffset = 0                 # accumulated in halfwords
+  for sect in sects:
+    if sects[sect].dsect:
+      continue
+    sects[sect].offset = Addr.from_hw(lastOffset)
+    offset = sects[sect].used
+    for pool in literalPools:
+      if pool.literals and pool.sect == sect:
+        offset = pool.offset + pool.size
+        break
+    lastOffset += offset.hw
+    lastOffset = (lastOffset + 1) & 0xFFFFFE
 
 
 def makeExtern(symbol, stmt=None):
@@ -435,8 +480,8 @@ from .model101tables import (
     APPROPRIATE_RULES, ARGS_BCE, ARGS_MSC, ARGS_RI, ARGS_RR, ARGS_RS_ONLY,
     ARGS_SI, ARGS_SRS_AND_RS, ARGS_SRS_ONLY, ARGS_SRS_OR_RS, BRANCH_ALIASES,
     BRANCH_ALIASES_R, BRANCH_AT_POUND_VARIANTS, FP_OPERATIONS_SP,
-    GENERATOR_OPS, KNOWN_INSTRUCTIONS, SHIFT_OPERATIONS, generateRS0,
-    generateRS1, generateSRS,
+    GENERATOR_OPS, KNOWN_INSTRUCTIONS, OVFL_CARRY_BRANCHES, SHIFT_OPERATIONS,
+    generateRS0, generateRS1, generateSRS,
 )
 from .instrdefs import (
     AP101S_ONLY, CPU, base_op, rs_form_bits, rs_hw1, implied_r1, srs_d2_units,
@@ -527,7 +572,8 @@ rextrns = {} # For 'EXTRN'
 symtab = {}
 relocations = [] # RLD entries
 # Per-suboperand DC/DS statement records from the final compile pass:
-# [sect, startByte, endByte, 'DC'|'DS', type letter, element count, label].
+# [sect, startByte, endByte, 'DC'|'DS', type letter, element count, label,
+#  scale].  
 # src/mafgen needs them to segment a csect into code and data regions and
 # to render typed DC lines; exported through metadata["dataStmts"] into
 # the .asmg.json sidecar.
@@ -593,6 +639,11 @@ class Literal:
                label resolves late.
     T          the constant-type letter (C/X/B/H/F/E/D/Y/Z)
     L          the literal's length in bytes -- its layout footprint in the pool
+    Ls         the SOURCE-declared length in bytes: an explicit 'L' modifier
+               taken at System/360 face value (=XL2'F' -> 2), else the same
+               as 'L'. 
+    S          the fixed-point scale modifier as written ('=FS32'60E6'' -> 32),
+               or None when the literal carries none.  
     operand    normalized operand text (e.g. =Y(LEND-LBEG)); the STABLE identity
                key the pool dedups on -- value shifts pass-to-pass, operand
                doesn't (see 'literalIndex')
@@ -609,6 +660,8 @@ class Literal:
   assembled: bytearray
   zsym: object = None
   zdata: bool = False
+  Ls: int = 0
+  S: object = None
 
 @dataclass
 class LiteralPool:
@@ -808,6 +861,7 @@ def evalLiteralAttributes(stmt, ast, symtab):
     for i in range(l - 1, -1, -1):
       bytes[i] = value & 0xFF
       value = value >> 8
+  lsrc = length if length is not None else l # lsrct = length as written
   if length is not None:
     # Note that we treat the length modifier as a count of halfwords
     # rather than bytes, in contradiction to the System/360 assembly-
@@ -836,7 +890,7 @@ def evalLiteralAttributes(stmt, ast, symtab):
   else:
     operand += f"'{body}'"
   return Literal(value=l2, T=t, L=l, operand=operand, assembled=bytes,
-                 zsym=zsym, zdata=zdata)
+                 zsym=zsym, zdata=zdata, Ls=lsrc, S=lscale)
 
 #=============================================================================
 # 'optimizeScratch' analyzes the "scratch" structures created during the
@@ -965,16 +1019,23 @@ def optimizeScratch():
         # omitted) never condenses to SRS, even when the value fits; the
         # bare form 'expr(Rn)' DOES condense.  Number displacements
         # condense in both forms (legacy).
+        #
+        # No branch condenses over a base register.  The SRS branch forms
+        # (BCF/BCB/BCTB/BVCF) spend the whole halfword on M1 + a signed
+        # IC-relative displacement -- there is no B2 field for the base to
+        # go in
         if "B2" in ast and (isNumberD2(ast) or not ast.get("B2ONLY")) \
                 and value >= SRS_FLOOR \
-                and value < SRS_CEILING and operation != "BCT":
+                and value < SRS_MEM_CEILING \
+                and operation not in BRANCH_ALIASES \
+                and operation not in ["BCT", "BC", "BVC"]:
           adjust(scratch, stmt, i)
           continue
         entry["ambiguous"] = False
         continue
-      # Special cases that branch backward:
       if section == sect and \
-              (operation in BRANCH_ALIASES or operation in ["BCT", "BC", "BVC"]):
+              (operation in BRANCH_ALIASES or operation in ["BCT", "BC", "BVC"]) \
+              and operation not in OVFL_CARRY_BRANCHES:
         d = symtab[sect].value + stmt.pos1.hw + 1 - d2
         if d >= SRS_FLOOR and d < SRS_CEILING:
           adjust(scratch, stmt, i)
@@ -1015,7 +1076,8 @@ def optimizeScratch():
         # displacement is in range AND divides evenly (else forbiddenSRS).
         dUnitizer = srs_d2_units(operation)
         dSRS = (ud2 + dUnitizer - 1) // dUnitizer
-        if dSRS >= SRS_FLOOR and dSRS < SRS_CEILING and ud2 % dUnitizer == 0:
+        if dSRS >= SRS_FLOOR and dSRS < SRS_MEM_CEILING \
+                and ud2 % dUnitizer == 0:
           adjust(scratch, stmt, i)
           continue
   return
@@ -1193,7 +1255,8 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
       dataStmts.append([dcPend["sect"], dcPend["start"],
                         int(sects[sect].pos1), dcPend["form"],
                         dcPend["letter"], dcPend["count"],
-                        dcPend.get("label", "")])
+                        dcPend.get("label", ""),
+                        dcPend.get("scale")])
       dcPend = None
 
   # Common processing for all instructions. The 'alignment' argument is one
@@ -1303,9 +1366,9 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
         error(stmt, f"Cannot evaluate {typeName} constant")
         v = 0
       relSect, relOff = unhash(v)
-      if relSect is not None and passCount == 3:
+      if relSect is not None and passCount >= 3:
         combinedOffset = relOff + sectionOffset(relSect)
-        rldSymbol = resolveCSect(combinedOffset, sects, relSect, exclude=sect)
+        rldSymbol = resolveCSect(combinedOffset, sects, relSect, currentSect=sect)
         appendReloc(relocations, rldSymbol, sect,
                     sects[sect].pos1 + dcBufferPtr, type=rldType)
         v = combinedOffset
@@ -1440,8 +1503,8 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
             combinedOffset = relOff + \
                 sectionOffset(relSect)
             if byteAligned:
-              rldSymbol = resolveCSect(combinedOffset, sects, relSect, exclude=sect)
-              if passCount == 3:
+              rldSymbol = resolveCSect(combinedOffset, sects, relSect, currentSect=sect)
+              if passCount >= 3:
                 appendReloc(relocations, rldSymbol, sect,
                             startBytePos + acc["nbits"] // 8,
                             'Y' if fwidth == 16 else 'A')
@@ -1469,11 +1532,11 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
       toMemory(nbytes)
     if compile:
       # one data record per packed field (statement label on the first):
-      # each spans the bytes its bits touch
+      # each spans the bytes its bits touch.
       for i, (stype, count, b0, b1) in enumerate(subRecs):
         dataStmts.append([sect, int(startBytePos) + b0 // 8,
                           int(startBytePos) + (b1 + 7) // 8, operation,
-                          stype, count, stmtLabel if i == 0 else ""])
+                          stype, count, stmtLabel if i == 0 else "", None])
     
   # Evaluate a single suboperand of the operand of an instruction like 
   # RR, RS, SRS, SI, RI.  Returns a pair (err,value).  The 'err' is 
@@ -1612,14 +1675,14 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
             # Linker will fill in the displacement; emit zero
             # and add a Y-type relocation entry.
             i1 = 0
-            if passCount == 3:
+            if passCount >= 3:
               emitDisplacementReloc(extrnI1Sym)
           elif sectI1Sym is not None:
             # Cross-section reference: leave i1 alone
             # (it already holds the in-module offset that
             # the linker's YCON apply formula expects);
             # just add the Y-type relocation entry.
-            if passCount == 3:
+            if passCount >= 3:
               emitDisplacementReloc(sectI1Sym)
           i1 = _num(i1) & 0xFFFF
           data[2] = i1 >> 8
@@ -1717,15 +1780,20 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
         # add over the whole 32-bit instruction, so the link-time base add
         # carries out of hw2 into hw1's low bits (a 2-byte hw2 reloc
         # would drop address bit 16).  Sub-64K targets are unaffected:
-        # the carry never reaches hw1.
+        # the carry never reaches hw1.  AddrCon.apply confines that add to
+        # ADDRESS_FIELD_MASK, so it can never reach the opcode above a[17].
+        #
+        # A negative addend is not two's-complemented.  Insterad, it
+        # writes the addend's magnitude and sets the RLD's V bit for an A- RLD:
         relSect, relOff = unhash(v)
-        if relSect is not None and passCount == 3:
+        if relSect is not None and passCount >= 3:
           combinedOffset = relOff + sectionOffset(relSect)
-          rldSymbol = resolveCSect(combinedOffset, sects,
-                                   relSect, exclude=sect)
-          appendReloc(relocations, rldSymbol, sect, sects[sect].pos1,
-                      type='A')
-          v = combinedOffset
+          if passCount >= 3:
+            rldSymbol = resolveCSect(combinedOffset, sects,
+                                     relSect, currentSect=sect)
+            appendReloc(relocations, rldSymbol, sect, sects[sect].pos1,
+                        type='A-' if combinedOffset < 0 else 'A')
+          v = abs(combinedOffset)
         elif relSect is None and relOff is None and passCount >= 3:
           error(stmt, "Complex relocatable expression not "
                 "supported in an IOP address", severity=0)
@@ -1841,7 +1909,8 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
         dcPend = {"form": operation, "letter": suboperandType,
                   "label": name,
                   "count": duplicationFactor
-                  * max(1, len(suboperand.values or []))}
+                  * max(1, len(suboperand.values or [])),
+                  "scale": suboperand.scale}
 
       # Z-type (ZCON), DC Z(symbol,,flags): a 4-byte fullword-aligned
       # external reference with relocation -- a different layout from the
@@ -1880,7 +1949,7 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
               # Genuinely external target: ER ESD + RLD against it; the
               # linker adds the resolved absolute address to the addend.
               registerExtrn(symbolName, stmt.n)
-              if passCount == 3:
+              if passCount >= 3:
                 pos1 = sects[sect].pos1
                 # The ZCON flags byte goes into the data image
                 # below, not the RLD entry; the writer derives
@@ -1898,9 +1967,9 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
               if relSect is not None:
                 # 'zexpr' already includes the addend.
                 hw0 = relOff + sectionOffset(relSect)
-                if passCount == 3:
+                if passCount >= 3:
                   pos1 = sects[sect].pos1
-                  rldSymbol = resolveCSect(hw0, sects, relSect, exclude=sect)
+                  rldSymbol = resolveCSect(hw0, sects, relSect, currentSect=sect)
                   appendReloc(relocations, rldSymbol, sect, pos1, zType)
               elif relOff is not None:
                 # Absolute (EQU) target: no RLD; a linked ZCON HW0 is always
@@ -1925,16 +1994,16 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
               dsym = symtab.get(dName)
               if dsym is None or dsym.type == "EXTERNAL":
                 registerExtrn(dName, stmt.n)
-                if passCount == 3:
+                if passCount >= 3:
                   appendReloc(relocations, dName, sect,
                               sects[sect].pos1, 'ZS')
-              elif passCount == 3:
+              elif passCount >= 3:
                 dv = evalArithmeticExpression(zdexpr, NO_LOCALS, stmt,
                                               symtab, currentHash())
                 dSect, dOff = unhash(dv)
                 if dSect is not None:
                   rldSymbol = resolveCSect(dOff + sectionOffset(dSect),
-                                           sects, dSect, exclude=sect)
+                                           sects, dSect, currentSect=sect)
                   appendReloc(relocations, rldSymbol, sect,
                               sects[sect].pos1, 'ZS')
                 # an absolute (EQU) data target needs no RLD: the flags
@@ -2363,8 +2432,7 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
       # condition-code aliases (BO/BNO/BNC/...)
       # encode as BCF -- except BNC, which is
       # itself an overflow/carry branch.
-      ovflCarry = operation in ("BNC", "BOV",
-                                "BOC", "BVC")
+      ovflCarry = operation in OVFL_CARRY_BRANCHES
       d = d2 - (stmt.pos1.hw + symtab[sect].value + 1)
       # A '$'-forced long branch skips the SRS
       # short forms and is coded as RS (BC).
@@ -2379,32 +2447,14 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
           b = 0b00
         data = generateSRS(stmt, o, r1, d, b)
         done = True
-      elif not forceRS and isinstance(d, int) \
+      elif not forceRS and not ovflCarry \
+              and isinstance(d, int) \
               and fitsBackwardSrsBranch(d):
-        # Backward: BCB is the condition-code
-        # form.  There is no SRS backward
-        # overflow/carry form, so a backward
-        # BVC/BOV/BOC would need the RS form
-        # (BVC) -- not exercised by the deck;
-        # fail loud rather than silently emit
-        # the wrong (condition-code) family.
-        if ovflCarry and operation != "BNC":
-          error(stmt,
-                "Backward overflow/carry "
-                f"branch ({operation}) not implemented")
         d = (-d & 0b111111)
         data = generateSRS(stmt, "BCB", r1, d, 0b10)
         done = True
-      elif ovflCarry and operation != "BNC":
-        # Out-of-SRS-range overflow/carry
-        # branch needs the RS form (BVC), not
-        # BC; not exercised -- fail loud.
-        error(stmt,
-              "Out-of-range overflow/carry "
-              f"branch ({operation}) not implemented")
-        done = True
-      else:
-        operation = "BC"
+      else: # no short form fits:
+        operation = "BVC" if ovflCarry else "BC"
         forceRS = True
     isConstant = False
     specifiedB2 = (b2 != None)
@@ -2552,7 +2602,7 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
               x2 == None and b2 != None \
               and isinstance(d2, int) \
               and d2 > -2048 and d2 < 2048:
-        if d2 >= 0 and d2 < SRS_CEILING and len(data) == 2:
+        if d2 >= 0 and d2 < SRS_MEM_CEILING and len(data) == 2:
           data = generateSRS(stmt, operation, r1, d2, ib2)
         elif not selfRelB2:
           # A real (USING-resolved or explicit) base, R3 included: LA
@@ -2572,7 +2622,7 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
              (not (ib2 == 3 and \
                    operation in FP_OPERATIONS_SP) and \
               not forceRS and x2 == None and \
-              (specifiedB2 or ib2 == 3) and \
+              (selfRelB2 or ib2 == 3) and \
               fitsForwardSrsBranch(d, stmt) and \
               not forbiddenSRS and \
               operation in BRANCH_ALIASES):
@@ -2611,7 +2661,7 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
         # always emit RS AM=0 with zero
         # displacement and a Y-type RLD.
         data = generateRS0(stmt, operation, r1, 0, 3)
-        if passCount == 3:
+        if passCount >= 3:
           emitDisplacementReloc(rextrns[originalD2])
       elif operation in ["BC", "BIX", "BAL", "BCT"] and x2 in [None, 0] and \
               d1 > -2048 and d1 < 0 and not forceAM0:
@@ -2624,7 +2674,7 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
         data = generateRS1(stmt, operation, 0, 1, r1, 0x7FF & -d1, 0, ib2)
       elif not forceAM0 and \
               (x2 != None or ia or \
-               i or (ib2 == 3 and selfRelB2 and d1 >= 0 and d1 < 2048) or \
+               i or (ib2 == 3 and selfRelB2 and d1 > -2048 and d1 < 2048) or \
                (ast.get("B2ONLY") and ib2 != 3 and not d2IsNumber and
                 d1 >= 0 and d1 < 2048)):
         # RS AM=1 here.  The bare in-range-displacement case is AM=1 only when
@@ -2665,11 +2715,11 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
           # zero displacement and let the
           # linker fill it via a Y-type RLD.
           d0 = 0
-          if passCount == 3:
+          if passCount >= 3:
             emitDisplacementReloc(rextrns[originalD2])
         elif b2 != None:
           d0 = _num(d2) & 0xFFFF
-          if selfRelB2 and passCount == 3:
+          if selfRelB2 and passCount >= 3:
             # The current-section fallback rewrote d2 to a csect-relative
             # offset (b2=3, no real base).  The AM=0 16-bit field holds
             # an ABSOLUTE in-bank address at run time, so it must be
@@ -2679,10 +2729,14 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
             # (A real base-register displacement -- explicit or
             # USING-resolved -- is NOT relocated.)
             emitDisplacementReloc(sect)
+          elif b2 == 3 and passCount >= 3: 
+            dSect, _dOff = unhash(d2)
+            if dSect is not None:
+              emitDisplacementReloc(resolveCSect(d0, sects, dSect))
         elif d2 in rextrns:
           b2 = 3
           d0 = 0
-          if passCount == 3:
+          if passCount >= 3:
             emitDisplacementReloc(rextrns[d2])
         else:
           section, offset = unhash(d2)
@@ -2695,17 +2749,17 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
             # linker add the symbol via a Y RLD.
             b2 = 3
             d0 = offset & 0xFFFF
-            if passCount == 3:
+            if passCount >= 3:
               emitDisplacementReloc(section)
           elif section in sects and \
                   sects[section].offset is not None:
             d0 = offset + sectionOffset(section) - sectionOffset(sect)
             b2 = 3
-            if passCount == 3:
+            if passCount >= 3:
               # Find the actual CSECT for this offset
               # (expression evaluator may have rebased
               # to first CSECT's address space)
-              rldSymbol = resolveCSect(d0, sects, section, exclude=sect)
+              rldSymbol = resolveCSect(d0, sects, section, currentSect=sect)
               emitDisplacementReloc(rldSymbol)
           if b2 == None:
             error(stmt, "Could not interpret operand")
@@ -2787,17 +2841,6 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
     err = v is None
     if err:
       error(stmt, "Could not evaluate v subfield", severity=0)
-    if operand.startswith("*") and sect is not None \
-            and sect != firstCSECT and not sects[sect].dsect:
-      # Drop the current section's term and re-base the '*' value
-      # onto the first CSECT's address space (cf. expressions.py).
-      # Only a *secondary* section needs rebasing; before the first
-      # CSECT there is no section term to drop ('*' is just 0).  A DSECT
-      # is NOT in the CSECT address space (its preliminaryOffset is never
-      # set), so 'EQU *' there keeps its DSECT-relative value, un-rebased.
-      v = (_num(v) & 0xFFFFFF) + symtab[firstCSECT].value \
-          + symtab[sect].preliminaryOffset
-    if err:
       error(stmt, "Cannot evaluate EQU")
       return
     # Do NOT trigger 'repeatPass' per EQU.  Convergence is judged once per
@@ -2806,7 +2849,7 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
     # MULTIPLY-DEFINED EQU (e.g. DCHAR's MSG13x 'EQU *' emitted twice) writes
     # two '*' addresses every pass, so "did it change" is always true even
     # though the end-of-pass table (last-def-wins) is stable.
-    symtab[name] = SymtabEntry(type="EQU", value=v, properties=stmt)
+    symtab[name] = SymtabEntry(type="EQU", value=v, properties=stmt, n=stmt.n)
     applyResolvedValue(symtab[name], v)
 
   def handleLtorg():
@@ -2869,12 +2912,22 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
         # the settled symtab (see 'refreshUsing').
         locAst = ast["r"][0]
         starHash = currentHash()
+        # ... and, for a 'USING *,Rn', an anchor into the scratch list so
+        # '*' itself can be re-resolved: the section, the index of the last
+        # scratch entry laid down before this USING, and the halfword gap
+        # between that entry's end and the USING's location:
+        starAnchor = (None, None, None)
+        if collect and sect is not None and sect in sects:
+          _scr = sects[sect].scratch
+          _i = len(_scr) - 1
+          _end = (_scr[_i]["pos1"] + _scr[_i]["length"]).hw if _i >= 0 else 0
+          starAnchor = (sect, _i, sects[sect].pos1.hw - _end)
     k = 0
     for r in rlist:
       if r == None or r < 0 or r > 7:
         error(stmt, "Bad register number")
       elif operation == "USING":
-        using[r] = (h, section, address, locAst, k, stmt, starHash)
+        using[r] = (h, section, address, locAst, k, stmt, starHash) + starAnchor
         h += 4096
         address += 4096
         k += 1
@@ -2883,6 +2936,7 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
     return
 
   def handleCnop():
+    nonlocal name
     # 'CNOP n' aligns the location counter to an n-halfword boundary (n=2 ->
     # fullword), e.g. before a fullword-aligned long-format branch;
     # commonProcessing pads like any alignment gap.  @CNOP/#CNOP are the same
@@ -2903,33 +2957,43 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
         # following skeletons assemble with zero displacements; nothing
         # emitted when the counter is already odd.  The pad is emitted as
         # real bytes (toMemory) so every sizing pass replays it via
-        # stmt.length; a label would take the PRE-pad address.
+        # stmt.length; a label takes the PRE-pad address.
         commonProcessing(1)
-        if sect is not None and sect in sects \
-                and (sects[sect].pos1.hw & 1) == 0:
-          fill1 = 0xC0 if operation[0] in "@#" else 0xD8
-          toMemory(bytearray([fill1, 0x00]))
+        if sect is not None and sect in sects:
+          if (sects[sect].pos1.hw & 1) == 0:
+            fill1 = 0xC0 if operation[0] in "@#" else 0xD8
+            toMemory(bytearray([fill1, 0x00]))
+          else:
+            stmt.pos1 = sects[sect].pos1
+            stmt.assembled = None
         return
     # CNOP ("conditional no-op") fills the alignment gap with executable
-    # NOPs, NOT a zero gap -- the pad sits in the instruction stream and may
-    # be reached by fall-through.  CPU context (CNOP): BCF 0,0 = 0xD800.
-    # IOP context (@CNOP/#CNOP): the DLYI-0 no-op = 0xC000 (a D800
-    # there would be a CPU opcode in IOP instruction space).  Write the filler
-    # halfwords over the gap (gated like toMemory: real bytes only in a
-    # CSECT compile pass), then let commonProcessing advance the counter
-    # and place any label at the aligned location.
-    if cVsD and compile and sect is not None and sect in sects:
+    # NOPs. The pad sits in the instruction stream and may be reached by 
+    # fall-through.  
+    #   CPU CNOP        == BCF 0,0 = 0xD800.
+    #   IOP @CNOP/#CNOP == DLYI 0 = 0xC000
+    prePos = sects[sect].pos1 if (sect is not None and sect in sects) else None
+    padded = bytearray()
+    if prePos is not None:
       fill_hi = 0xC0 if operation[0] in "@#" else 0xD8
-      pos1 = sects[sect].pos1
-      end = pos1.align(align)
-      if end != pos1:
+      end = prePos.align(align)
+      padded = bytearray([fill_hi, 0x00] * ((int(end) - int(prePos)) // 2))
+      # Write the filler over the gap; commonProcessing then advances the counter
+      # past it, and skips its own C9FB alignment fill for CNOP.
+      if cVsD and compile and padded:
         memory = sects[sect].memory
         while end > len(memory):
           memory.extend(DEFAULT_CHUNK)
-        for p in range(pos1, end, 2):
-          memory[p] = fill_hi
-          memory[p + 1] = 0x00
+        memory[int(prePos):int(end)] = padded
+    # Name the label at the pre-pad counter (alignment 1 moves nothing), then
+    # align with the name suppressed so it is not re-pointed past the pad.
+    commonProcessing(1)
+    savedName, name = name, ""
     commonProcessing(align)
+    name = savedName
+    if prePos is not None:
+      stmt.pos1 = prePos
+      stmt.assembled = padded if padded else None
     return
 
   def handleOrg():
@@ -3073,6 +3137,10 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
     collect = (passCount in [1, 2])
     asis = (passCount == 2)
     compile = (passCount >= 3)
+
+    if compile:
+      # RLDs are regenerated on each pass as we iterate on condensing SRSs:
+      relocations.clear()
 
     if passCount == 1:
       log("Pass 1: placing sections, sizing instructions")
@@ -3296,33 +3364,19 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
         while offset - alignment >= usage:
           offset -= alignment
         pool.offset = offset
-    if asis:
-      # All CSECTs (not DSECTs) are laid out contiguously, each given an
-      # 'offset' (an 'Addr' from the first CSECT's origin), fullword-realigned
-      # between.  The exact rule for which sections are contiguous isn't
-      # pinned down; treating all of them this way matches known behavior.
-      lastOffset = 0                 # accumulated in halfwords
-      for sect in sects:
-        if sects[sect].dsect:
-          continue
-        sects[sect].offset = Addr.from_hw(lastOffset)
-        offset = sects[sect].used
-        for pool in literalPools:
-          if pool.literals and pool.sect == sect:
-            offset = pool.offset + pool.size
-            break
-        lastOffset += offset.hw
-        lastOffset = (lastOffset + 1) & 0xFFFFFE
+    if asis or compile:
+      layoutCsects()
 
     # SRS/RS branch-condense fixpoint: repeat compile until the symbol table
     # stops changing.  Each pass re-resolves branches against the table as it
     # stood at the pass start; the first unchanged pass is the one where
     # every forward reference saw its target's final address.  Compared whole
     # once per pass (a multiply-defined label churns within a pass but is
-    # stable at end-of-pass).  Code only shrinks, so it converges fast;
-    # 'maxPasses' is a loud backstop if something grows instead.
+    # stable at end-of-pass).  
     if compile:
-      snap = { k: v.value for k, v in symtab.items() }
+      snap = ({ k: v.value for k, v in symtab.items() },
+              { name: (sd.offset.hw if sd.offset is not None else None)
+                for name, sd in sects.items() if not sd.dsect })
       if snap != compileSnap:
         repeatPass = True
       compileSnap = snap
@@ -3370,7 +3424,7 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
             zcon.hw0 = (zcon.hw0 + combined) & 0xFFFF
             zcon.write_to_image(assembled, offset)
             rldSymbol = resolveCSect(combined, sects, relSect,
-                                     exclude=pool.sect)
+                                     currentSect=pool.sect)
             appendReloc(relocations, rldSymbol, pool.sect, offset, zType)
           elif relOff is not None:
             # Absolute (EQU) target: no RLD; sector-encode like the linker.
@@ -3396,7 +3450,7 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
             assembled[offset:offset + 2] = \
                 (combined & 0xFFFF).to_bytes(2, "big")
             rldSymbol = resolveCSect(combined, sects, relSect,
-                                     exclude=pool.sect)
+                                     currentSect=pool.sect)
             appendReloc(relocations, rldSymbol, pool.sect, offset, 'Y')
         # A complex value (relSect None) keeps its numeric image, like the
         # =Z case above.
@@ -3410,12 +3464,12 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
   metadata["protManaged"] = sorted(protManaged)
   metadata["protRanges"] = {s: sorted(r) for s, r in protRanges.items()}
   metadata["dataStmts"] = list(dataStmts)
-  # literal-pool slots for the listing regenerator: a pool reference
-  # comments with the literal's SOURCE type (=X'00007FFF', not a
-  # width-guessed =F), so record [sect, startByte, endByte, T, L]
+  # literal-pool slots for the listing regenerator:  
+  #  record [sect, startByte, endByte, T, L, Ls, S].
   metadata["literals"] = [
       [pool.sect, int(pool.offset) + int(o),
-       int(pool.offset) + int(o) + lit.L - 1, lit.T, lit.L]
+       int(pool.offset) + int(o) + lit.L - 1, lit.T, lit.L,
+       lit.Ls or lit.L, lit.S]
       for pool in literalPools
       if pool.literals and pool.sect and pool.offset is not None
       for o, lit in zip(pool.offsets, pool.literals)]

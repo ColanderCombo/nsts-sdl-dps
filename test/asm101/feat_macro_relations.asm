@@ -3,8 +3,8 @@
 *   - character relations collate in EBCDIC ('A'=C1 < '1'=F1), and a
 *     shorter string is always less (HLASM SC26-4940 PDF p.388);
 *   - a null parameter or &SYSLIST element used arithmetically is 0
-*     (Assembler H GC26-3758-3 p.19), so the FPMSWTCH-style guard
-*     "AIF (&SYSLIST(1) LE 0 ...)" branches on an omitted operand;
+*     (Assembler H GC26-3758-3 p.19), so "AIF (&SYSLIST(1) LE 0 ...)" 
+*     branches on an omitted operand;
 *   - keyword arguments (ACALL=YES, TITLE='...') must bind, and a
 *     continued invocation must join before operand scan (both were
 *     dropped by ASM101S).
@@ -47,7 +47,7 @@ T        CSECT
          CCTEST  3
          CCTEST  8
 ACOS     AMAIN   ACALL=YES
-         AMAIN   TITLE='PROCESS SWITCH ROUTINE'
+         AMAIN   TITLE='TEST ROUTINE'
          IFPROC  ,(CH,R4,GE,TPCTPRI),,,,,,                             X
                ZZ,,LAST
          END

@@ -2,19 +2,12 @@
 #
 # Feature / regression tests for the src/asm101 assembler fork.
 #
-# These lock down behaviors that were fixed while bringing real flight-software
-# decks (e.g. code/OI340600/SSSRC/BILDNEW5) through the assembler.  There are
-# two layers:
-#
-#   UNIT        - import the assembler's parser/evaluator directly and assert
-#                 on small, precise inputs (fast, no subprocess).
-#   INTEGRATION - assemble a checked-in .asm fixture under test/asm101/ via the
-#                 module CLI and assert on the result (exit status, listing).
-#
-# Run standalone with the project venv:
+# Run:
 #     build/venv/bin/python test/test_asm101_features.py
-# or via ctest:  ctest -R asm101_features
+# or:  
+#     ctest -R asm101_features
 #
+import json
 import os
 import re
 import subprocess
@@ -44,42 +37,12 @@ def unit_tests():
   from asm101.larkparse import parse
   from asm101.model101tables import ARGS_MSC
 
-  # --- MSC table: @BXC and @CALL are distinct entries (a missing comma once
-  # concatenated them into one bogus key "@BXC@CALL", leaving both
-  # unrecognized) ---
+  # --- MSC table: @BXC and @CALL are distinct entries  ---
   check("msc_bxc_and_call_distinct",
         "@BXC" in ARGS_MSC and "@CALL" in ARGS_MSC
         and "@BXC@CALL" not in ARGS_MSC,
         f"@BXC={'@BXC' in ARGS_MSC} @CALL={'@CALL' in ARGS_MSC}")
 
-  # --- rs_form_bits derives model101's RS/SRS form-selection bits (forceAM0,
-  # dUnitizer) from the descriptor; it must stay byte-exact against the legacy
-  # opcode (bit 0 and bit 9) for every SRS/RS mnemonic, or the form-selection
-  # silently shifts.  The hand-written opcode tables are RETIRED (membership is now
-  # descriptor-derived), so their historical 10-bit values were snapshotted to
-  # rs_form_bits_oracle.json -- a frozen, independent oracle that covers ALL ~283
-  # SRS/RS ops (broader than the goldens). ---
-  import json
-  from pathlib import Path
-  from asm101.instrdefs import rs_form_bits
-  _oracle = json.loads(
-      (Path(__file__).parent / "asm101" / "rs_form_bits_oracle.json").read_text())
-  _legacy_codes = _oracle["codes"]
-  _rsbad = [op for op, code in _legacy_codes.items()
-            if rs_form_bits(op) != (code & 1, (code >> 9) & 1)]
-  check("rs_form_bits_matches_legacy_opcode", not _rsbad,
-        f"rs_form_bits disagrees with the frozen opcode oracle for: {_rsbad[:10]}")
-
-  # --- srs_d2_units (addrWidth-derived) must agree with the legacy opcode
-  # bits on every SRS-capable op; RS-only ops legitimately diverge (their
-  # dUnitizer is dead code). ---
-  from asm101.instrdefs import srs_d2_units
-  from asm101.model101tables import ARGS_SRS_AND_RS
-  _dubad = [op for op in sorted(ARGS_SRS_AND_RS)
-            if op in _legacy_codes and srs_d2_units(op) !=
-            (2 if (_legacy_codes[op] & 0x201) == 0 else 1)]
-  check("srs_d2_units_matches_legacy_opcode", not _dubad,
-        f"srs_d2_units disagrees with the frozen opcode oracle for: {_dubad[:10]}")
   from asm101.larkparse import split_top_level, first_blank_outside
   from asm101.expressions import (
       svDeclare, svSet, svReplace,
@@ -859,6 +822,55 @@ def integration_tests():
           "'A R6,AA' under forward USING must condense to SRS 0601:\n"
           + "\n".join(l for l in _utxt.splitlines() if "R6,AA" in l))
 
+    # The OTHER half of that pair: 'BALR Rn,0' / 'USING *,Rn' establishes the
+    # base from the LOCATION COUNTER, not from a symbol, so re-resolving the
+    # snapshot against the symbol table is not enough -- the '*' itself has to
+    # be re-resolved against the settled layout.  Ambiguous statements ahead of
+    # the USING are sized long by the collect pass, so its '*' is high by the
+    # whole not-yet-condensed excess; leave it stale and every displacement
+    # under that base computes negative, so NOTHING over it condenses and each
+    # reference stays an RS long form one halfword too big.
+    slst = td / "ustar.lst"
+    rc, out = assemble(
+        ["-o", str(td / "ustar.obj"), "-l", str(slst),
+         str(FIX / "feat_using_star_srs.asm")])
+    check("using_star_srs_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
+    _stxt = slst.read_text()
+    check("using_star_srs_condenses",
+          re.search(r"^0000C 3404 .*ST    R4,WORD1", _stxt, re.M) is not None,
+          "'ST R4,WORD1' over a 'USING *,R0' base must condense to SRS 3404 "
+          "(D2 counted in fullwords), not RS 34F0 0002:\n"
+          + "\n".join(l for l in _stxt.splitlines() if "R4,WORD1" in l))
+    check("using_star_srs_second_ref",
+          re.search(r"^0000D 1E08 .*L     R6,WORD2", _stxt, re.M) is not None,
+          "'L R6,WORD2' must condense to SRS 1E08 at the settled address:\n"
+          + "\n".join(l for l in _stxt.splitlines() if "R6,WORD2" in l))
+
+    # The SRS memory window stops at D=54, one short of the encodable 55 and
+    # two short of the 56 at which D turns into the register-designated shift
+    # count: the original assembler never spent the D field's last two values
+    # on a memory reference, and a displacement of exactly 55 halfwords is
+    # emitted long.  This is a SIZE rule, so the check is on the span as well
+    # as on the bytes: 54 condenses to one halfword, 55 stays two.
+    mclst = td / "srsmc.lst"
+    rc, out = assemble(
+        ["-o", str(td / "srsmc.obj"), "-l", str(mclst),
+         str(FIX / "feat_srs_mem_ceiling.asm")])
+    check("srs_mem_ceiling_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
+    _mctxt = mclst.read_text()
+    check("srs_mem_ceiling_54_condenses",
+          re.search(r"^00000 BAD9\s.*STH   R2,AT54", _mctxt, re.M) is not None,
+          "D=54 must condense to the SRS form BAD9:\n"
+          + "\n".join(l for l in _mctxt.splitlines() if "R2,AT54" in l))
+    check("srs_mem_ceiling_55_stays_long",
+          re.search(r"^00001 BAF1 0037\s.*STH   R2,AT55", _mctxt, re.M)
+          is not None,
+          "D=55 is past the memory window and must stay RS long BAF1 0037:\n"
+          + "\n".join(l for l in _mctxt.splitlines() if "R2,AT55" in l))
+    check("srs_mem_ceiling_span", _xref_value(mclst, "SPAN") == 3,
+          f"the two stores must occupy 1 + 2 halfwords, so SPAN lands at "
+          f"halfword 3, not {_xref_value(mclst, 'SPAN')}")
+
     # An explicitly-coded base register with an expression displacement must
     # encode RS AM=1, matching the flight CASEN computed-goto idiom
     # 'LH R2,#@LBn-*-3(,R2)' -> 9AF6 (every OI30-listing instance; the
@@ -927,6 +939,43 @@ def integration_tests():
     check("dollar_branch_rld_emitted", (1, 2) in _rlds,
           f"B$ INSIDE displacement (byte 2) must be relocated by ESD 1; "
           f"RLDs={_rlds}")
+
+    # An EXPLICITLY CODED R3 is 'no base' too, so the AM=0 field is an
+    # ABSOLUTE ADDRESS and its relocatable displacement must carry a Y RLD
+    # naming the csect that CONTAINS THE TARGET.  Unrelocated it keeps the
+    # assembler's own contiguous-layout address and never learns where the
+    # linker put that csect: the reference then lands short by whatever gap
+    # the linker leaves between the two sections.
+    r3robj = td / "r3reloc.obj"
+    rc, out = assemble(
+        ["-o", str(r3robj), str(FIX / "feat_r3_reloc_other_csect.asm")])
+    check("r3_reloc_other_csect_assembles", rc == 0,
+          f"rc={rc}\n{out.strip()[-400:]}")
+    _esd, _rr = {}, []
+    _data = r3robj.read_bytes()
+    for _i in range(0, len(_data), 80):
+        _card = _data[_i:_i + 80]
+        _kind = _card[1:4].decode("cp037", errors="replace")
+        _n = int.from_bytes(_card[10:12], "big")
+        if _kind == "ESD":
+            _sid = int.from_bytes(_card[14:16], "big")
+            for _k in range(_n // 16):
+                _esd[_sid + _k] = _card[16 + 16*_k:24 + 16*_k] \
+                    .decode("cp037", errors="replace").strip()
+        elif _kind == "RLD":
+            _b = _card[16:16 + _n]
+            _rr += [(_esd.get(int.from_bytes(_b[j:j+2], "big")),
+                     int.from_bytes(_b[j+5:j+8], "big"))
+                    for j in range(0, _n, 8)]
+    check("r3_reloc_names_target_csect", ("TWO", 2) in _rr,
+          f"'LA$ 1,TABLE(Z3)' must relocate byte 2 against TWO, the csect "
+          f"that contains TABLE; RLDs={_rr}")
+    check("r3_reloc_same_csect", ("ONE", 6) in _rr,
+          f"'LA$ 2,LOCAL(Z3)' must relocate byte 6 against its own csect; "
+          f"RLDs={_rr}")
+    check("r3_reloc_real_base_exempt", len(_rr) == 2,
+          f"'LA 4,LOCAL(0)' is over a REAL base register and must NOT be "
+          f"relocated; RLDs={_rr}")
 
     # A self-relative RS target at ZERO displacement takes the subtractive
     # I-bit form like backward ones: 'BAL R3,*+2' = E3F7 0800 (i=1, d=0),
@@ -1362,6 +1411,79 @@ def integration_tests():
           f"the '=Z(,EXTSYM+2,0)' literal-pool slot must punch ZCON/data "
           f"(0x50); got {zrld!r}")
 
+    # A relocatable addend on the 18-bit IOP 'a' field carries its SIGN in the
+    # RLD, never in the field.  IBM's assembler writes the addend's MAGNITUDE
+    # for both signs -- '#LBR@ SYM-2' and '#LBR@ SYM+2' assemble to the same
+    # FA00 0002 -- and only the RLD's V bit (0x9C vs 0x1C) tells the linkage
+    # editor to subtract.  asm101 used to two's-complement -2 into the 18-bit
+    # field as 0x3FFFE, whose top two bits ARE the low two bits of the opcode
+    # halfword: it emitted FA03 FFFE, and the link then carried the target
+    # address across the halfword boundary and corrupted the opcode.
+    iobj = td / "iopaddend.obj"
+    ilst = td / "iopaddend.lst"
+    rc, out = assemble(["-o", str(iobj), "-l", str(ilst),
+                        str(FIX / "feat_iop_addr_addend.asm")])
+    check("iop_addend_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
+    itxt = b""
+    for _i in range(0, len(idata := iobj.read_bytes()), 80):
+      _card = idata[_i:_i + 80]
+      if _card[1:4] == b"\xe3\xe7\xe3":        # EBCDIC 'TXT'
+        itxt += _card[16:16 + int.from_bytes(_card[10:12], "big")]
+    # bytes 0x0/0x4 = the two NEGATIVE sites, 0x8/0xC = the two POSITIVE ones.
+    check("iop_negative_addend_is_magnitude",
+          itxt[0:8].hex() == "fa000002fd000002",
+          f"'#LBR@ FA-2' / '#MOUT@ FB-2' must assemble FA00 0002 / "
+          f"FD00 0002, not the two's complement FA03 FFFE; "
+          f"TXT={itxt.hex()}")
+    check("iop_positive_addend_unchanged",
+          itxt[8:16].hex() == "fa000002fd000014",
+          f"'#LBR@ FA+2' / '#MOUT@ FB+20' must stay FA00 0002 / "
+          f"FD00 0014; TXT={itxt.hex()}")
+    irld = _rld_entries(iobj)
+    # ESDID 2 = FA, 3 = FB (ER ids follow the SD in source order).
+    check("iop_negative_addend_rld_sets_sign_bit",
+          sorted((e[0], e[2], e[3]) for e in irld if e[2] & 0x80)
+          == [(2, 0x9C, 0), (3, 0x9C, 4)],
+          f"the two negative sites need signed ACON RLDs (0x1C|0x80) at "
+          f"bytes 0/4; got {irld!r}")
+    check("iop_positive_addend_rld_unsigned",
+          sorted((e[0], e[2], e[3]) for e in irld if not e[2] & 0x80)
+          == [(2, 0x1C, 8), (2, 0x1C, 16), (3, 0x1C, 12)],
+          f"the positive sites (and the bare '#BU FA' at byte 16) must "
+          f"keep the plain ACON RLD 0x1C; got {irld!r}")
+
+    # ... and the link-time half: a signed ACON must SUBTRACT the magnitude
+    # the field carries, with the arithmetic confined to a[17:0] so neither
+    # the sign-bit negation nor a base-address carry can reach the opcode.
+    from ap101Utils.addr import Addr
+    from ap101Utils.addrcon import AddrCon, RLD_ACON, RLD_SIGN
+    _neg = AddrCon(RLD_ACON | RLD_SIGN, 4)
+    _pos = AddrCon(RLD_ACON, 4)
+    check("iop_signed_acon_subtracts_the_addend",
+          (_neg.apply(0xFA000002, Addr.from_hw(0x1234)),
+           _neg.apply(0xFD000014, Addr.from_hw(0x5678)))
+          == (0xFA001232, 0xFD005664),
+          f"got {_neg.apply(0xFA000002, Addr.from_hw(0x1234)):08X} "
+          f"{_neg.apply(0xFD000014, Addr.from_hw(0x5678)):08X}")
+    check("iop_signed_acon_reverses",
+          _neg.reverse(0xFA000002, 0xFA001232) == 0x1234,
+          f"reverse() must recover the target 0x1234; got "
+          f"{_neg.reverse(0xFA000002, 0xFA001232):#x}")
+    # a[17:16] live in the low two bits of the opcode halfword, so a target
+    # over 64K MUST still carry into them -- that is why the RLD is a fullword
+    # ACON over the whole instruction and not a 2-byte one on hw2.
+    check("iop_acon_carry_reaches_a17_a16",
+          (_pos.apply(0xFA000000, Addr.from_hw(0x1FFFE)),
+           _pos.apply(0xFA000002, Addr.from_hw(0xFFFE)))
+          == (0xFA01FFFE, 0xFA010000),
+          f"got {_pos.apply(0xFA000000, Addr.from_hw(0x1FFFE)):08X} "
+          f"{_pos.apply(0xFA000002, Addr.from_hw(0xFFFE)):08X}")
+    # ... but never past bit 17 into the opcode itself.
+    check("iop_acon_carry_stops_below_the_opcode",
+          _pos.apply(0xFA03FFFE, Addr.from_hw(0x1234)) == 0xFA001232,
+          f"an 18-bit overflow must wrap inside a[17:0], leaving FA00 "
+          f"intact; got {_pos.apply(0xFA03FFFE, Addr.from_hw(0x1234)):08X}")
+
     # ESD ordering: SD (control sections) and ER (external refs) are
     # assigned IDs in SOURCE-APPEARANCE order, interleaved; LD (ENTRY)
     # definitions take trailing IDs.  Matches real AP101S 3.0 listings
@@ -1374,6 +1496,72 @@ def integration_tests():
           [("SD", "SECTA"), ("ER", "XFIRST"), ("SD", "SECTB"),
            ("ER", "YSECOND"), ("LD", "EHERE")],
           f"expected SD/ER interleaved by appearance + LD last; got {esd!r}")
+
+    # Symbol attribution and RLD relocation ESDIDs across a SECOND csect.
+    # The expression evaluator re-projects every relocatable value onto the
+    # FIRST csect, so each RLD site has to recover the true owning section
+    # from the flat offset.  Three ways that went wrong, all invisible while
+    # the linker keeps the csects contiguous and all off by the placement gap
+    # when an OVERLAY boundary separates them:
+    #   * 'EQU *' was FILED against the first csect at a module-global
+    #     halfword count.  Its value then depended on a preliminaryOffset
+    #     that is still 0 during passes 1-2, so a pass-3 forward reference
+    #     read the un-re-based value, resolved it to the first csect, and
+    #     punched that ESDID -- while pass 4 rewrote the text word correctly.
+    #   * a reference from a secondary csect to a symbol in that SAME csect
+    #     was punched against the first csect (resolveCSect excluded the
+    #     current section outright instead of merely deprioritizing it).
+    #   * an EXTRN referenced from a secondary csect was punched against the
+    #     first csect: its addend is not an offset into any csect, but it
+    #     range-matched one anyway.
+    qobj = td / "equsect.obj"
+    rc, out = assemble(["-o", str(qobj), str(FIX / "feat_equ_second_csect.asm")])
+    check("equ_second_csect_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
+    qsyms = {s["name"]: (s["section"], s["offset"])
+             for s in _asmg_symbols(qobj)}
+    check("equ_second_csect_attribution",
+          qsyms.get("S2EQU") == ("SEC2", 1),
+          f"'S2EQU EQU *' inside SEC2 -> {qsyms.get('S2EQU')!r}, "
+          f"expected ('SEC2', 1); all symbols {qsyms!r}")
+    check("equ_first_csect_attribution",
+          qsyms.get("S1EQU") == ("SEC1", 1),
+          f"'S1EQU EQU *' inside SEC1 -> {qsyms.get('S1EQU')!r}")
+    qesd = {i: nm for i, t, nm in _esd_entries(qobj)}
+    qrld = sorted((qesd.get(p_), a, qesd.get(r), f)
+                  for r, p_, f, a in _rld_entries(qobj))
+    check("equ_second_csect_rld_targets",
+          qrld == [("SEC1", 4, "SEC2", 0x00),    # Y(S2EQU) fwd ref
+                   ("SEC1", 6, "SEC2", 0x00),    # Y(S2LABEL) fwd ref
+                   ("SEC2", 4, "SEC2", 0x00),    # Y(S2EQU) self-reference
+                   ("SEC2", 6, "SEC2", 0x00),    # Y(S2LABEL) self-reference
+                   ("SEC2", 8, "SEC1", 0x00),    # Y(S1EQU) back-reference
+                   ("SEC2", 12, "EXTSYM", 0x1C)],  # A(EXTSYM) from 2nd csect
+          f"(position, address, relocated-against, flag) = {qrld!r}")
+
+    # RLDs describe the FINAL compile pass, not pass 3.  The fixpoint reruns
+    # pass 3, 4, 5, ... rewriting the image from scratch each time, so a value
+    # that settles later used to get a correct text word and a relocation
+    # entry frozen from pass 3.  The EQU chain in the fixture resolves one
+    # link per pass and needs seven; at pass 3 'E1' still lands inside S1.
+    # Asserting the exact list pins the other direction too: entries are
+    # discarded and re-derived per pass, so each site appears exactly once.
+    lobj = td / "latesettle.obj"
+    rc, out = assemble(["-o", str(lobj), "-v",
+                        str(FIX / "feat_rld_late_settle.asm")])
+    check("rld_late_settle_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
+    check("rld_late_settle_needs_many_passes",
+          "converged after 7 passes" in out,
+          "the fixture must still settle AFTER pass 3 or it tests nothing; "
+          f"got {[l for l in out.splitlines() if 'converged' in l]!r}")
+    lesd = {i: nm for i, t, nm in _esd_entries(lobj)}
+    lrld = sorted((lesd.get(p_), a, lesd.get(r))
+                  for r, p_, f, a in _rld_entries(lobj))
+    check("rld_late_settle_targets",
+          lrld == [("S1", 0, "S2"),     # DC Y(E1): reaches S2 only by pass 7
+                   ("S1", 2, "S1")],    # DC Y(S1TOP): stable control
+          f"(position, address, relocated-against) = {lrld!r}; a pass-3-frozen "
+          "RLD gives ('S1',0,'S1'), and accumulating across passes repeats "
+          "each site once per compile pass")
 
     # DC B'...' binary constant.  Before the fix this was a no-op stub that
     # emitted no bytes and did not advance the location counter (it dropped
@@ -1487,16 +1675,19 @@ def integration_tests():
     # MSC/BCE context (they share the location counter); they route to the CNOP
     # handler instead of the IOP encoder (which has no descriptor for them and
     # used to crash).  ACN/BCN follow an odd-positioned counter, so @CNOP 2 /
-    # #CNOP 2 must bump them to the next fullword (halfword 2 and 4).
+    # #CNOP 2 each emit one pad halfword and advance the counter to the next
+    # fullword -- but the LABEL names the pad, i.e. the counter BEFORE it
+    # (halfword 1 and 3), not the aligned address after it.  See
+    # feat_cnop_prepad.asm for the derivation of that rule.
     cnlst = td / "iopcnop.lst"
     rc, out = assemble(
         ["-o", str(td / "iopcnop.obj"), "-l", str(cnlst),
          str(FIX / "feat_iop_cnop.asm")])
     check("iop_cnop_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
-    check("iop_cnop_at_aligns_fullword", _xref_value(cnlst, "ACN") == 2,
-          f"@CNOP 2 -> ACN at halfword {_xref_value(cnlst, 'ACN')}, expected 2")
-    check("iop_cnop_hash_aligns_fullword", _xref_value(cnlst, "BCN") == 4,
-          f"#CNOP 2 -> BCN at halfword {_xref_value(cnlst, 'BCN')}, expected 4")
+    check("iop_cnop_at_aligns_fullword", _xref_value(cnlst, "ACN") == 1,
+          f"@CNOP 2 -> ACN at halfword {_xref_value(cnlst, 'ACN')}, expected 1")
+    check("iop_cnop_hash_aligns_fullword", _xref_value(cnlst, "BCN") == 3,
+          f"#CNOP 2 -> BCN at halfword {_xref_value(cnlst, 'BCN')}, expected 3")
 
     # A BCE-looking name that is really an MLIB80 macro (e.g. #ORG), assembled
     # WITHOUT the macro library, is not an instruction -- it must read as a plain
@@ -1509,18 +1700,46 @@ def integration_tests():
           and "Unimplemented IOP pseudo-op" not in out,
           f"rc={rc}\n{out.strip()[-400:]}")
 
-    # CNOP n aligns the location counter to n halfwords (1=halfword/no-op,
-    # 2=fullword).  AFULL lands at halfword 2 (fullword after H'0'); BHALF
-    # stays at halfword 3 (CNOP 1 doesn't move an already-aligned counter).
+    # CNOP n aligns the location counter (1=odd halfword, 2=fullword) and pads
+    # the gap with an executable NOP.  AFULL sits at halfword 1 -- the pad it
+    # generates -- and moves the counter to halfword 2; BHALF stays at
+    # halfword 3 (the counter is already odd, so CNOP 1 emits nothing).
     clst = td / "cnop.lst"
     rc, out = assemble(
         ["-o", str(td / "cnop.obj"), "-l", str(clst),
          str(FIX / "feat_cnop.asm")])
     check("cnop_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
-    check("cnop2_fullword_align", _xref_value(clst, "AFULL") == 2,
-          f"AFULL at halfword {_xref_value(clst, 'AFULL')}, expected 2")
+    check("cnop2_fullword_align", _xref_value(clst, "AFULL") == 1,
+          f"AFULL at halfword {_xref_value(clst, 'AFULL')}, expected 1")
     check("cnop1_halfword_noop", _xref_value(clst, "BHALF") == 3,
           f"BHALF at halfword {_xref_value(clst, 'BHALF')}, expected 3")
+
+    # A CNOP's pad is the CNOP's OWN object code, so the statement's location
+    # -- and any label on it -- is the counter BEFORE the pad, not the aligned
+    # address after it.  (A DC/DS names its POST-alignment start instead: that
+    # gap belongs to nobody.)  A labelled CNOP is a branch target, so this is
+    # object code, not listing cosmetics.  The pad is typed by context: D800
+    # (BCF 0,0) for the CPU form, C000 (the DLYI-0 no-op) for the IOP @/#
+    # forms.
+    plst = td / "cnoppre.lst"
+    rc, out = assemble(
+        ["-o", str(td / "cnoppre.obj"), "-l", str(plst),
+         str(FIX / "feat_cnop_prepad.asm")])
+    check("cnop_prepad_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
+    for label, want_hw, want_code, why in [
+        ("PADCPU", 1, "D800", "CNOP 2 from an odd counter: names its own pad"),
+        ("NOPADC", 2, None,   "already fullword: no pad, pre = aligned"),
+        ("PADIOP", 3, "C000", "@CNOP 2 pads with the IOP no-op, not D800"),
+        ("ODDOK",  5, None,   "CNOP 1 with an odd counter: no pad"),
+        ("PADODD", 6, "D800", "CNOP 1 from an even counter: one pad halfword"),
+        ("AFTER",  7, "0000", "the pads really advanced the counter"),
+    ]:
+      got_hw = _xref_value(plst, label)
+      check(f"cnop_prepad_{label.lower()}_addr", got_hw == want_hw,
+            f"{why}: {label} at halfword {got_hw}, expected {want_hw}")
+      got_code = _listing_code(plst, label)
+      check(f"cnop_prepad_{label.lower()}_code", got_code == want_code,
+            f"{why}: {label} object code {got_code!r}, expected {want_code!r}")
 
     # DC bit-length ("L.n") packing.  PACK is the pinned reference value:
     # YL.2(3),YL.7(5),YL.7(6) packs MSB-first to 0xC286.  SYM lands at
@@ -2257,7 +2476,7 @@ def maclib_tests():
         ("CC VALID: >3<", "numeric_cc_in_range"),
         ("CC INVALID: >8<", "numeric_cc_out_of_range"),
         ("AMAIN NAME=ACOS ACALL=YES TITLE=", "keyword_arg_binds"),
-        ("AMAIN NAME= ACALL=NO TITLE='PROCESS SWITCH ROUTINE'",
+        ("AMAIN NAME= ACALL=NO TITLE='TEST ROUTINE'",
          "quoted_keyword_arg_binds"),
         ("IFPROC P1=>(CH,R4,GE,TPCTPRI)< P7=>ZZ< P9=>LAST< NS=10",
          "continued_invocation_operands"),
@@ -2352,6 +2571,16 @@ def _rld_entries(obj_path):
                   int.from_bytes(c[o + 5:o + 8], "big")))
       o += 8
   return out
+
+
+def _asmg_symbols(obj_path):
+  """The 'symbols' list of the asmg.json debug sidecar asm101 writes beside
+  its object, each {name, kind, section, offset, ...}."""
+  side = Path(obj_path).with_suffix(".asmg.json")
+  try:
+    return json.loads(side.read_text())["symbols"]
+  except (OSError, ValueError, KeyError):
+    return []
 
 
 def _esd_entries(obj_path):

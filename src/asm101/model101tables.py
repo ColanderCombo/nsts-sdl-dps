@@ -77,6 +77,10 @@ _AT_POUND_VARIANTS = frozenset(b + s for b in _AT_POUND_BASES for s in ("@", "#"
 _SRS_BRANCH_ALIASES = frozenset(BRANCH_ALIASES) - {"BR", "NOPR"}
 
 _CC_BRANCH_ALIASES = frozenset(BRANCH_ALIASES) - {"BR", "NOPR", "BOV", "BOC", "BNC"}
+
+# The overflow/carry branch family: BVC and its extended mnemonics.  These test
+# the carry and overflow indicators rather than the condition code
+OVFL_CARRY_BRANCHES = frozenset({"BNC", "BOV", "BOC", "BVC"})
 BRANCH_AT_POUND_VARIANTS = frozenset(b + s for b in _CC_BRANCH_ALIASES
                                   for s in ("@", "#", "@#"))
 
