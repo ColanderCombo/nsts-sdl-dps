@@ -142,6 +142,11 @@ class AmtDeck:
                 for o in self.ops for s in o.specs if s[3]]
 
 
+def _dim(n):
+    # HAL/S: A one copy structure is -STRUCTURE. n > 1 == -STRUCTURE(n)
+    return "" if n == 1 else "(%d)" % n
+
+
 def _prio(pgm):
     """Scheduling-priority symbol for a control-segment program: PRIO_ + the
     program name's first 3 characters (a ZPRIOTIM REPLACE macro)."""
@@ -420,9 +425,9 @@ def to_hal(deck):
         prog_vals = []
         for p in deck.cc_spgms:
             prog_vals += [_prio(p), "NAME(%s)" % p]
-        L += _wrap("DECLARE CDAV_CC_SPNAME CDAV_CC_SPNAME-STRUCTURE(%d) "
+        L += _wrap("DECLARE CDAV_CC_SPNAME CDAV_CC_SPNAME-STRUCTURE%s "
                    "INITIAL(%s);"
-                   % (len(deck.cc_spgms),
+                   % (_dim(len(deck.cc_spgms)),
                       _initial(prog_vals, len(deck.cc_spgms) * 2)))
         L += ["   STRUCTURE CDAV_CC_SPEC:",
               "     1 CDAV_CC_SP_ID INTEGER SINGLE,",
