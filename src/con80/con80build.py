@@ -17,12 +17,14 @@
 #
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Annotated, Optional
@@ -31,6 +33,8 @@ os.environ["TYPER_USE_RICH"] = "0"  # disable fancy formatting
 import typer
 
 from ap101Utils import cards, concard, halorder
+
+from . import compilecache
 
 
 def _short(tok: str) -> str:
@@ -45,19 +49,72 @@ def _short(tok: str) -> str:
     return tok
 
 
+# Build profiling.  Setting CON80BUILD_TIMING=<file> makes every toolchain
+# subprocess and every in-process step append a record to <file>
+_TIMING = os.environ.get("CON80BUILD_TIMING") or None
+
+
+def _tlog(**rec) -> None:
+    if not _TIMING:
+        return
+    rec.setdefault("pid", os.getpid())
+    line = (json.dumps(rec) + "\n").encode()
+    fd = os.open(_TIMING, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        os.write(fd, line)
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def _timed(kind: str, name: str = "", **extra):
+    """Time an in-process build step into the timing log."""
+    if not _TIMING:
+        yield
+        return
+    t0 = time.time()
+    try:
+        yield
+    finally:
+        _tlog(kind=kind, name=name, t0=t0, dt=time.time() - t0, **extra)
+
+
 def _run(cmd, *, verbose: int = 0, env=None, cwd=None, label: str | None = None):
     if verbose:
         loc = f"   # cwd={cwd}" if cwd else ""
         tag = f"[{label}] " if label else ""
         print(f"+ {tag}" + " ".join(shlex.quote(_short(str(c))) for c in cmd)
               + loc, flush=True)
+    t0 = time.time()
     r = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=cwd)
+    if _TIMING:
+        _tlog(kind="proc", tool=Path(str(cmd[0])).name, label=label or "",
+              t0=t0, dt=time.time() - t0, rc=r.returncode)
     if verbose:
         out = (r.stdout or "") + (r.stderr or "")
         if out.strip():
             sys.stdout.write(out if out.endswith("\n") else out + "\n")
             sys.stdout.flush()
     return r
+
+
+_JOBS = 1
+_PHASE_JOBS = 1
+
+_CACHE_ROOT: str | None = None  # Root of the cross-phase compile cache (--cache DIR)
+_CACHE_VERIFY = False           # whether every hit is re-verified against a fresh compile.
+
+
+def _pmap(fn, items, jobs: int | None = None) -> list:
+    """`[fn(i) for i in items]`, up to `jobs` at a time, results in input
+    order.  The workers are threads because the work is subprocesses."""
+    items = list(items)
+    n = jobs or _JOBS
+    if n <= 1 or len(items) <= 1:
+        return [fn(i) for i in items]
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(n, len(items))) as ex:
+        return list(ex.map(fn, items))
 
 
 # Directory of the installed tool wrappers (asm101/lnk101/dfg/... shell
@@ -82,13 +139,8 @@ _DEFAULT_LINKLIBS = (Path("build") / "lib" / "runtime" / "RUN",
 
 
 def _require_dirs(entries) -> None:
-    """Fail fast when required directories are absent, BEFORE any toolchain
-    call: report EVERY missing one so a single fix-up round suffices.  Most
-    defaults are cwd-relative, so a wrong working directory otherwise
-    surfaces late as thousands of downstream compile errors (e.g. an empty
-    INCLIB when prepareINCLIB's --pass-rel32 dir is unreachable).
-    `entries` are (option, path) pairs; None paths (option not in play)
-    are skipped."""
+    """Fail when required directories are absent, BEFORE any toolchain
+    call: report every missing one so a single fix-up round suffices."""
     missing = [(opt, Path(p)) for opt, p in entries
                if p is not None and not Path(p).is_dir()]
     if not missing:
@@ -104,6 +156,9 @@ def _require_dirs(entries) -> None:
 
 
 SOURCE_DIRS = ("SSSRC", "APPLSRC")
+INCL_DIR = "INCL80"        # overlays like SOURCE_DIRS, see _as_dirs
+CON80_DIR = "CON80"        # overlays too, see _con80_overlay
+CON80_MIRROR = "con80"     # where the merged deck is materialized under --out
 _CODED_PREFIX = "#$@"
 # Names that are runtime/library/autocall targets, not buildable flight source.
 _RUNTIME_RE = re.compile(r"^(#?[QZ]|#?L|#?0|\$0|\$Y|\$X|#Y|#T)")
@@ -426,14 +481,57 @@ def stack_seed_modules(deck_dir: Path, root: str) -> list[str]:
             if d.verb == "STACK" and d.operand and d.operand.startswith("$0")]
 
 
+_CHANGE_OPERAND = re.compile(r"([A-Z0-9#@$]+)\(([A-Z0-9#@$]+)\)")
+
+
+def concard_changes(deck_dir: Path, root: str) -> dict[str, dict[str, str]]:
+    """`CHANGE old(new)` renames of the expansion, keyed by INCLUDE member.
+
+    The CESD rename chain a CHANGE builds applies to the one module supplied
+    by the next module-reading card -- in the CON80 decks always the
+    following `INCLUDE ddname(member)` (LE PLM p.28/35; several CHANGEs may
+    stack before one INCLUDE), and it covers every ESD entry type: SD, LD and
+    ER.  Same rule lnk101's Linker.applyConcardChanges applies to the loaded
+    modules; autocall has to see the same CESD, because the LE resolved its
+    automatic library call against the renamed entries.  Reading the ERs raw
+    makes autocall demand the pre-CHANGE name, which pulls both the old and
+    the new csect into the link and leaves the renamed target's own compool
+    unresolved.
+
+    Merged per member: one member reached by several CHANGE groups sees the
+    union, which is what the LE's per-INCLUDE chains add up to."""
+    deck = concard.ConcardDeck(str(deck_dir))
+    out: dict[str, dict[str, str]] = {}
+    pending: dict[str, str] = {}
+    for _, d in concard.expand_directives(deck, root):
+        if d.verb == "CHANGE":
+            m = _CHANGE_OPERAND.match((d.operand or "").strip())
+            if m:
+                pending[m.group(1)] = m.group(2)
+        elif d.verb == "INCLUDE" and pending:
+            operand = (d.operand or "").strip()
+            m = re.match(r"[A-Z0-9]+\(([^)]*)\)", operand)
+            member = (m.group(1) if m else operand).strip()
+            if member:
+                out.setdefault(member, {}).update(pending)
+            pending = {}
+    return out
+
+
 def autocall_scan(objs, external_defs: set[str],
-                  stub_syms: set[str], runlib_names: set[str]):
+                  stub_syms: set[str], runlib_names: set[str],
+                  changes: dict[str, dict[str, str]] | None = None):
     """One automatic-library-call wave: scan the LINK SET's objects' ESDs,
     return (ordered unresolved-ER names, defined names).  Generated-csect
     name classes (@stacks, #Z zcon stubs, #T checksums, patch/fill areas)
-    never resolve from source and are skipped."""
+    never resolve from source and are skipped.
+
+    `changes` is concard_changes()'s {member: {old: new}}: an object module
+    that supplies one of those INCLUDE members is scanned through the rename,
+    exactly as the LE saw it."""
     from ap101Utils import objModule
     from ap101Utils.objModule import EsdType
+    changes = changes or {}
     defined = set(external_defs)
     order: list[str] = []
     for p in sorted(objs):
@@ -442,10 +540,18 @@ def autocall_scan(objs, external_defs: set[str],
         except Exception:
             continue
         for m in f.modules:
+            rename: dict[str, str] = {}
+            if changes:
+                for e in m.esdEntries:
+                    if e.type in (EsdType.SD, EsdType.LD):
+                        r = changes.get((e.name or "").strip())
+                        if r:
+                            rename.update(r)
             for e in m.esdEntries:
                 n = (e.name or "").strip()
                 if not n:
                     continue
+                n = rename.get(n, n)
                 if e.type in (EsdType.SD, EsdType.LD):
                     defined.add(n)
                 elif e.type in (EsdType.ER, EsdType.WX) and n not in order:
@@ -471,10 +577,7 @@ def autocall_scan(objs, external_defs: set[str],
     return need, defined
 
 
-# --halt-on-error: stop the build at the first failing member (asm101/dfg/
-# halsc-display) or failing step.  The HAL step's per-unit failures are
-# transient by design (the multi-pass TEMPLIB retry), so it halts at step
-# end on the final failure list, not mid-loop.
+# --halt-on-error: stop the build at the first failing member:
 _HALT_ON_ERROR = False
 
 
@@ -488,25 +591,28 @@ def _assemble(items, objdir: Path, mlib: Path, python: str,
               tolerable: int = 4, verbose: int = 0,
               tag: str = "asm101") -> tuple[int, list[str]]:
     objdir.mkdir(parents=True, exist_ok=True)
-    ok = 0
-    failures: list[str] = []
     env = {**os.environ, "PYTHONUTF8": "1"}
     n = len(items)
-    for i, (srcpath, obj) in enumerate(items, 1):
+
+    def one(job):
+        i, (srcpath, obj) = job
         cmd = [*_tool("asm101", python),
                f"--object={obj}", f"--library={mlib}",
                f"--tolerable={tolerable}", str(srcpath)]
         r = _run(cmd, verbose=verbose, env=env,
                  label=f"{tag} {i}/{n} {srcpath.name}")
         if r.returncode == 0 and obj.exists():
-            ok += 1
-        else:
-            failures.append(srcpath.name)
-            tail = (r.stderr or r.stdout).strip().splitlines()[-1:] or [""]
-            print(f"  [{tag} FAIL {i}/{n}] {srcpath.name}: {tail[0]}",
-                  file=sys.stderr)
-            _halt(f"{tag} {srcpath.name} failed")
-    return ok, failures
+            return None
+        tail = (r.stderr or r.stdout).strip().splitlines()[-1:] or [""]
+        print(f"  [{tag} FAIL {i}/{n}] {srcpath.name}: {tail[0]}",
+              file=sys.stderr)
+        return srcpath.name
+
+    results = _pmap(one, list(enumerate(items, 1)))
+    failures = [r for r in results if r is not None]
+    for name in failures:
+        _halt(f"{tag} {name} failed")
+    return n - len(failures), failures
 
 
 def assemble(sources, objdir: Path, mlib: Path, python: str,
@@ -529,32 +635,54 @@ def assemble_patches(patches: dict, objdir: Path, mlib: Path, python: str,
                      tag="asm101 patch")
 
 
-def _deck_template_seeds(path: Path) -> list[str]:
-    """Descored template names a DFG deck (display or AMT) requires — the
-    hal() template-closure seeds.  Display decks: INCLUDE= compools.  AMT
-    decks: the derived DFB/DMMD compools + every OPGM/SPGM control-segment
-    program the generated compool D INCLUDE TEMPLATEs."""
+def _disp_overlays(gen_tree: Path | None, phase: int | None) -> list[Path]:
+    """display overlay directories, most specific first."""
+    if gen_tree is None:
+        return []
+    dirs = []
+    if phase is not None:
+        d = gen_tree / f"phase{phase:02d}" / "displays"
+        if d.is_dir():
+            dirs.append(d)
+    d = gen_tree / "displays"
+    if d.is_dir():
+        dirs.append(d)
+    return dirs
+
+
+def _overlay_hal(overlays, stem: str) -> Path | None:
+    """The first overlay holding `<stem>.hal`, or None."""
+    for d in overlays or ():
+        pre = d / f"{stem}.hal"
+        if pre.is_file():
+            return pre
+    return None
+
+
+def _deck_template_seeds(path: Path, overlays=()) -> list[str]:
+    """Descored template names a DFG deck (display or AMT) requires.  
+    Display decks: INCLUDE= compools.  
+    AMT decks: the derived DFB/DMMD compools + every OPGM/SPGM 
+               control-segment program the generated compool 
+               D INCLUDE TEMPLATEs.
+    """
+    extra = []
+    pre = _overlay_hal(overlays, path.stem)
+    if pre is not None:
+        extra = halorder.parse_hal(pre)[1]
     from dfg import amt
     if amt.is_amt_deck(path):
         try:
-            return [halorder.descore(n)
+            deck = [halorder.descore(n)
                     for n in amt.template_names(amt.parse(path))]
         except amt.AmtError:
-            return []
-    return halorder.display_deps(path)
+            deck = []
+    else:
+        deck = halorder.display_deps(path)
+    seen: set = set()
+    return [d for d in [*deck, *extra] if not (d in seen or seen.add(d))]
 
 
-# ---------------------------------------------------------------------------
-# Native-card-type CARDTYPE remaps.
-#
-# The compiler's CARDTYPE option only assigns *unset* column-1 chars
-# (PASS1 INITIALI.xpl: `IF CARD_TYPE(J) = 0 THEN ...`), so a per-file
-# _CARDTYPE pair whose first char is a NATIVE type (E/M/S/C/D) is a
-# silent no-op at compile time.  Should halorder's table ever carry such
-# a remap-to-comment pair, we honour it at the build layer: the mirror
-# copy gets those cards commented (col-1 -> C, columns/SRN preserved),
-# generic over any native-char->C pair.  halorder's own dep scan
-# (_code_lines) already drops such cards, so closure and mirror agree.
 def _native_comment_chars(stem: str) -> str:
     """Column-1 chars that are native card types remapped to comment by
     the deck's per-file CARDTYPE entry — the remaps REL32V0 cannot honour
@@ -586,6 +714,15 @@ def _mirror_rewrite(path: Path) -> str | None:
     if not chars:
         return None
     return comment_native_cards(path.read_bytes().decode("latin-1"), chars)
+
+
+def _as_dirs(dirs) -> list:
+    """`None`, one path, or a search list -> a list of paths, in order."""
+    if dirs is None:
+        return []
+    if isinstance(dirs, (str, Path)):
+        return [Path(dirs)]
+    return [Path(d) for d in dirs]
 
 
 def _hal_mirror(dirs, haltree) -> None:
@@ -634,9 +771,67 @@ def _hal_mirror(dirs, haltree) -> None:
                     link.symlink_to(f.resolve())
 
 
+def _con80_mirror(dirs, dst) -> Path:
+    """Generate a single directory containing the resolved members 
+       including gen/ overlays"""
+    dst = Path(dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    claimed: set = set()
+    for deckdir in dirs:
+        deckdir = Path(deckdir)
+        if not deckdir.is_dir():
+            continue
+        for f in sorted(deckdir.iterdir()):
+            if f.name in claimed or not f.is_file():
+                continue
+            claimed.add(f.name)
+            link = dst / f.name
+            if link.is_symlink():
+                if link.resolve() == f.resolve():
+                    continue
+                link.unlink()
+            elif link.exists():
+                link.unlink()
+            link.symlink_to(f.resolve())
+    for stale in dst.iterdir():
+        if stale.name not in claimed:
+            stale.unlink()
+    return dst
+
+
+def _gen_tree(gen, tree) -> Path | None:
+    """The generated-source overlay tree: explicit --gen, else the source
+    archive's gen/ sibling (<...>/gen/<OI> next to <...>/code/<OI>, found
+    by resolving the --root symlink)."""
+    if gen:
+        return Path(gen)
+    if tree is None:
+        return None
+    tree = Path(tree)
+    return tree.resolve().parent.parent / "gen" / tree.name
+
+
+def _con80_overlay(gen_tree, con80_dir: Path, out: str) -> Path:
+    """`con80_dir` with the gen tree's CON80/ overlaid, or `con80_dir`
+    unchanged when there is nothing to overlay."""
+    if gen_tree is None or con80_dir is None:
+        return con80_dir
+    gen_con80 = Path(gen_tree) / CON80_DIR
+    if not gen_con80.is_dir():
+        return con80_dir
+    mirror = Path(out) / CON80_MIRROR
+    if con80_dir.resolve() == mirror.resolve():
+        return con80_dir                    # already the merged deck
+    _con80_mirror([gen_con80, con80_dir], mirror)
+    print(f"[gen] CON80 overlay: {gen_con80} -> {mirror}")
+    return mirror
+
+
 def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
-        pass_rel32: Path, srcdirs, incl80: Path | None,
-        verbose: int = 0, displays=()) -> tuple[int, list[str]]:
+        pass_rel32: Path, srcdirs, incl80,
+        verbose: int = 0, displays=(), owned=None,
+        gen_tree: Path | None = None,
+        phase: int | None = None) -> tuple[int, list[str]]:
     """Compile the HAL sources with halsc in template-dependency order, sharing
     one TEMPLIB so each unit sees the templates of the units before it.  Units
     compile straight from the .hal mirror (copied into gen/pp per unit);
@@ -660,16 +855,53 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
     # compools (displays) / derived DFB+OPGM+SPGM templates (AMT) must land
     # in gen/SDFLIB for dfg/halsc even when no worklist HAL unit references
     # them (e.g. CG0543's CGG_C03).
+    incremental = owned is not None
+    owned = set(owned or ())
     worklist = list(sources)
-    worklist_set = set(worklist)
-    tree = halorder.tree_units(srcdirs)
-    disp_seeds = [d for p in displays for d in _deck_template_seeds(p)]
-    extra, seed_progs = halorder.template_closure(worklist, tree, disp_seeds)
-    sources = worklist + extra
+    worklist_set = set(worklist)        # this call's units, for pass/fail
+    # ...but an objdir unit is anything objdir already holds or will hold: a
+    # unit an earlier call placed there may reappear in this call's closure and
+    # must not be re-routed to tmpl_obj
+    objdir_units = worklist_set | owned
+    with _timed("step", "tree_units"):
+        tree = halorder.tree_units(srcdirs)
+    disp_overlay = _disp_overlays(gen_tree, phase)
+    disp_seeds = [d for p in displays
+                  for d in _deck_template_seeds(p, disp_overlay)]
+    with _timed("step", "template_closure"):
+        extra, seed_progs = halorder.template_closure(worklist, tree, disp_seeds)
     tmplobj = (gendir / "tmpl_obj").resolve()
     tmplobj.mkdir(parents=True, exist_ok=True)
+    skipped = [p for p in extra if p in owned]
+    extra = [p for p in extra if p not in owned]
+    # An incremental call keeps TEMPLIB, so a closure producer an earlier
+    # wave already compiled still has both its object and its template: its
+    # source has not changed and the library has only grown.  Reuse it
+    # rather than re-running the whole closure per wave.
+    reused: list = []
+    if incremental:
+        # A tmpl_obj object left by an EARLIER RUN predates this run's fresh
+        # TEMPLIB/SDFLIB: reusing it without its published template+SDF
+        # members leaves holes (halsc misses the template, mafgen degrades
+        # the unit to NONHAL).  Reuse only when both members are present;
+        # otherwise recompile (the compile cache makes that a fetch).
+        def _real_sdf(p):
+            m = sdflib / f"##{p.stem[:6]:<6}.sdf"
+            # a 3,360-byte member is compile_stub's declaration-only seed
+            # stub, not a real PASS3 SDF
+            return m.exists() and m.stat().st_size > 3360
+        reused = [p for p in extra
+                  if (tmplobj / (p.stem + ".obj")).exists()
+                  and (templib / f"@@{p.stem[:6]}").exists()
+                  and _real_sdf(p)]
+        extra = [p for p in extra if p not in set(reused)]
+    sources = worklist + extra
     print(f"  template closure: +{len(extra)} producers "
-          f"(real-compiled, objects segregated to tmpl_obj)")
+          f"(real-compiled, objects segregated to tmpl_obj)"
+          + (f"; {len(skipped)} already built by the main flow" if skipped
+             else "")
+          + (f"; {len(reused)} reused from an earlier wave" if reused
+             else ""))
 
     src_root = Path(__file__).resolve().parent.parent       # .../src
     env = {**os.environ, "PYTHONUTF8": "1",
@@ -680,7 +912,8 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
     # rewrites included).  The gen/pp dir keeps a copy per unit so
     # reports/tools that expect gen/pp/<stem>.hal keep working.
     haltree = (gendir / "haltree").resolve()
-    _hal_mirror([*srcdirs] + ([incl80] if incl80 else []), haltree)
+    with _timed("step", "hal_mirror"):
+        _hal_mirror([*srcdirs, *_as_dirs(incl80)], haltree)
     ppdir = (gendir / "pp").resolve()
     ppdir.mkdir(parents=True, exist_ok=True)
     pp_of: dict = {}
@@ -698,25 +931,32 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
     # and the PASS3 SDF library collected alongside it.  A fresh TEMPLIB
     # invalidates every HAL object, so drop them too: a stale object left by
     # an earlier invocation would otherwise survive this run's compile failure
-    # and be linked.
+    # and be linked.  An incremental call skips both: its units ADD to the
+    # libraries the main flow built, and `sources` excludes everything already
+    # compiled, so the pre-clean can only reach this call's own objects.
     import shutil
-    if templib.exists():
-        shutil.rmtree(templib)
-    if sdflib.exists():
-        shutil.rmtree(sdflib)
+    if not incremental:
+        if templib.exists():
+            shutil.rmtree(templib)
+        if sdflib.exists():
+            shutil.rmtree(sdflib)
     for p in sources:
         for d in (objdir, tmplobj):
             (d / (p.stem + ".obj")).unlink(missing_ok=True)
-    _run([python, str(pass_rel32 / "prepareTEMPLIB"), "--clear"],
-         verbose=verbose, cwd=str(gendir), env=env, label="prepareTEMPLIB")
+    if not incremental:
+        _run([python, str(pass_rel32 / "prepareTEMPLIB"), "--clear"],
+             verbose=verbose, cwd=str(gendir), env=env, label="prepareTEMPLIB")
 
     # Build the include dir: macros referenced by non-template D INCLUDE
     # name directives are resolved at compile time from INCLIB.
     # prepareINCLIB converts each INCL80 member to *EBCDIC* PDS records.
     #
+    # An incremental call reuses it: INCLIB derives only from INCL80, which
+    # cannot change mid-build, and rebuilding it per autocall wave is pure cost.
     inclib = (gendir / "INCLIB").resolve()
-    incl_mirror = haltree / incl80.name if incl80 else None
-    if incl_mirror is not None and incl_mirror.is_dir():
+    incl_dirs = _as_dirs(incl80)
+    incl_mirror = haltree / incl_dirs[0].name if incl_dirs else None
+    if incl_mirror is not None and incl_mirror.is_dir() and not incremental:
         ienv = {**env, "PYTHONPATH": os.pathsep.join(
             [str(src_root / "XCOM-I"), env.get("PYTHONPATH", "")])}
         _run([python, str(pass_rel32 / "prepareINCLIB"),
@@ -734,7 +974,7 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
         stub = seedsdir / f"{dn}.hal"
         stub.write_text(f" {progname}: PROGRAM;\n CLOSE {progname};\n")
         _run([halsc, f"--parm={halorder.get_parms('_seed')}",
-              f"--templib={templib}", f"--inclib={inclib}",
+              f"--templib={templib}", f"--inclib-ebcdic={inclib}",
               f"--sdf={sdflib}",
               f"--workdir={gendir / ('_seed_' + dn + '.work')}",
               "-o", str(gendir / ('_seed_' + dn + '.obj')), str(stub)],
@@ -748,19 +988,18 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
     #   (e.g. CDM_UI_COMPOOL <-> ASM_AUX_DPS)
     # The program template is just the program's declaration line, so we
     # fake it here to break the loop:
-    src_index = {}
-    for sd in srcdirs:
-        sd = Path(sd)
-        if sd.is_dir():
-            for q in sd.iterdir():
-                if q.is_file():
-                    full, kind = halorder.unit_header(q)
-                    if full:
-                        src_index.setdefault(halorder.descore(full), (full, kind))
+    _t_srcindex = time.time()
+    # `tree` is the same whole-source-tree index already built above.
+    src_index = {dn: (full, kind) for dn, (_p, full, kind) in tree.items()}
+    _tlog(kind="step", name="seed_src_index", t0=_t_srcindex,
+          dt=time.time() - _t_srcindex) if _TIMING else None
     referenced: set = set()
+    _t_deps = time.time()
     for p in sources:
         _, deps = halorder.parse_hal(pp_of.get(p, p))
         referenced |= set(deps)
+    _tlog(kind="step", name="seed_parse_deps", t0=_t_deps,
+          dt=time.time() - _t_deps) if _TIMING else None
     # PROGRAM units the closure pruned to seeds (body-independent), incl.
     # the display/AMT decks' control-segment programs (an AMT compool's
     # NAME(<opgm>) initializers need their program templates even when no
@@ -768,29 +1007,104 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
     referenced |= seed_progs
     built = ({f[2:8].strip() for f in os.listdir(sdflib)
               if f.startswith("##")} if sdflib.exists() else set())
-    nseed = 0
-    for dn in sorted(referenced - built):
-        info = src_index.get(dn)
-        if info and info[1] == "PROGRAM" and compile_stub(info[0], dn):
-            nseed += 1
+    # Stubs are independent one-line compiles into distinct members.
+    seeds = [(src_index[dn][0], dn) for dn in sorted(referenced - built)
+             if src_index.get(dn) and src_index[dn][1] == "PROGRAM"]
+    nseed = sum(_pmap(lambda s: bool(compile_stub(*s)), seeds))
     print(f"  seeded {nseed} program templates (cycle-break)")
 
-    def _run_halsc(srcpath, obj, parm):
+    # --inclib-ebcdic (not --inclib) everywhere below: gen/INCLIB is
+    # prepareINCLIB's own output, i.e. EBCDIC PDS records by construction, so
+    # halsc can skip its ASCII-detection pass over the whole library.
+    # Each compile emits its own template and SDF member into PRIVATE
+    # directories, which are then merged into the shared libraries.  Same
+    # result as stowing straight into them, but it makes one compile's output
+    # identifiable -- which is what the cache stores -- and leaves the shared
+    # libraries with a single writer.
+    outdir = (gendir / "unit_out").resolve()
+
+    # The cross-phase compile cache.  Keyed on everything the compiler reads
+    # (see compilecache); disabled with --no-cache.
+    unit_name = {p: n for n, (p, _f, _k) in tree.items()}
+    cache = None
+    if _CACHE_ROOT:
+        binaries = [Path(halsc)]
+        hbin = Path(halsc).resolve().parent.parent / "halsfc"
+        if hbin.is_dir():
+            binaries += sorted(hbin.glob("HALSFC-*"))
+
+        def _mirror_bytes(p: Path) -> bytes:
+            m = haltree / p.parent.name / (p.name + ".hal")
+            return (m if m.exists() else p).read_bytes()
+
+        cache = compilecache.CompileCache(
+            Path(_CACHE_ROOT), tree, _mirror_bytes,
+            extra=compilecache.dir_content_fingerprint(inclib) + b"|"
+            + compilecache.fingerprint(binaries))
+
+    def _verify_hit(srcpath, obj, parm, key):
+        """--cache-verify: force a compile and compare against cached file"""
+        tout, sout = _private_out(srcpath.stem + ".verify")
+        fresh = outdir / (srcpath.stem + ".verify.obj")
+        r, _wd = _run_halsc(srcpath, fresh, parm, tout, sout)
+        if r.returncode != 0 or not fresh.exists():
+            print(f"  [cache-verify] {srcpath.name}: recompile FAILED but a "
+                  f"cache entry was used ({key[:12]})", file=sys.stderr)
+            return
+        if compilecache.stamp_normalize(fresh.read_bytes()) != \
+                compilecache.stamp_normalize(obj.read_bytes()):
+            print(f"  [cache-verify] MISMATCH {srcpath.name} ({key[:12]})",
+                  file=sys.stderr)
+            _halt(f"cache-verify mismatch on {srcpath.name}")
+
+    def _private_out(stem):
+        t, s = outdir / stem / "tmpl", outdir / stem / "sdf"
+        shutil.rmtree(outdir / stem, ignore_errors=True)
+        t.mkdir(parents=True, exist_ok=True)
+        s.mkdir(parents=True, exist_ok=True)
+        return t, s
+
+    def _publish(t, s):
+        for src, dest in ((t, templib), (s, sdflib)):
+            dest.mkdir(parents=True, exist_ok=True)
+            for m in src.iterdir():
+                if m.is_file():
+                    shutil.copyfile(m, dest / m.name)
+
+    def _run_halsc(srcpath, obj, parm, tout, sout):
         workdir = gendir / (srcpath.stem + ".work")
         cmd = [halsc, f"--parm={parm}",
-               f"--templib={templib}", f"--inclib={inclib}",
-               f"--sdf={sdflib}", f"--workdir={workdir}",
+               f"--templib={templib}", f"--templib-out={tout}",
+               f"--inclib-ebcdic={inclib}",
+               f"--sdf={sout}", f"--sdfi={sdflib}", f"--workdir={workdir}",
                "-o", str(obj), str(pp_of.get(srcpath, srcpath))]
         r = _run(cmd, verbose=verbose, env=env, label=f"halsc {srcpath.stem}")
         return r, workdir
 
     def compile_one(srcpath, obj=None):
-        dest = objdir if srcpath in worklist_set else tmplobj
+        dest = objdir if srcpath in objdir_units else tmplobj
         obj = obj or dest / (srcpath.stem + ".obj")
         parm = halorder.get_parms(srcpath.stem)
-        r, workdir = _run_halsc(srcpath, obj, parm)
+        ckey = (cache.key(srcpath, unit_name.get(srcpath), parm)
+                if cache is not None else None)
+        if ckey:
+            # A unit that trips an undowngraded ZO3 is only ever produced with
+            # ,X1 (below), so its result is cached under that parm: look there
+            # too, rather than repeating the compile that has to fail first.
+            for k in (ckey, cache.key(srcpath, unit_name.get(srcpath),
+                                      parm + ",X1")):
+                if k and cache.fetch(k, obj, templib, sdflib):
+                    if _CACHE_VERIFY:
+                        _verify_hit(srcpath, obj, parm, k)
+                    return True, ""
+            cache.missed()
+        tout, sout = _private_out(srcpath.stem)
+        r, workdir = _run_halsc(srcpath, obj, parm, tout, sout)
         out = r.stdout + r.stderr
         if r.returncode == 0 and obj.exists():
+            _publish(tout, sout)
+            if ckey:
+                cache.store(ckey, obj, tout, sout)
             return True, ""
         # ZO3 ("loop invariant pulled from IF-THEN", OPT pass): units that
         # trip it carry `D DOWNGRADE ZO3` in the source -- the optimizer
@@ -802,9 +1116,15 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
         optrpt = workdir / "opt.rpt"
         opttxt = optrpt.read_text(errors="replace") if optrpt.exists() else ""
         if "ZO3" in opttxt and "DOWNGRADED" not in opttxt:
-            r, workdir = _run_halsc(srcpath, obj, parm + ",X1")
+            tout, sout = _private_out(srcpath.stem)
+            r, workdir = _run_halsc(srcpath, obj, parm + ",X1", tout, sout)
             out = r.stdout + r.stderr
             if r.returncode == 0 and obj.exists():
+                _publish(tout, sout)
+                x1key = (cache.key(srcpath, unit_name.get(srcpath),
+                                   parm + ",X1") if cache is not None else None)
+                if x1key:
+                    cache.store(x1key, obj, tout, sout)
                 return True, ""
         if "BI002" in out:
             reason = "BI002 (historically an XCOM-I ADDR/freeBase port bug)"
@@ -826,22 +1146,32 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
     # Multi-pass: TEMPLIB grows each pass, so units blocked on a not-yet-built
     # producer (incl. cycle members that bootstrap via D DOWNGRADE) get retried
     # until a pass makes no new progress.
-    pending = halorder.topo_order(sources)
+    #
+    with _timed("step", "topo_levels"):
+        levels = halorder.topo_levels(sources)
     built: set = set()
     reasons: dict[str, str] = {}
-    while pending:
-        progressed = []
-        still = []
-        for srcpath in pending:
-            good, why = compile_one(srcpath)
-            if good:
-                built.add(srcpath); progressed.append(srcpath)
-                reasons.pop(srcpath.name, None)
-            else:
-                reasons[srcpath.name] = why; still.append(srcpath)
-        if not progressed:
+    while True:
+        progressed = False
+        still: list = []
+        for level in levels:
+            todo = [p for p in level if p not in built]
+            if not todo:
+                continue
+            for srcpath, (good, why) in zip(todo, _pmap(compile_one, todo)):
+                if good:
+                    built.add(srcpath); progressed = True
+                    reasons.pop(srcpath.name, None)
+                else:
+                    reasons[srcpath.name] = why; still.append(srcpath)
+        if not still or not progressed:
             break
-        pending = still
+
+    if cache is not None and (cache.hits or cache.misses):
+        print(f"  compile cache: {cache.hits} hit, {cache.misses} miss, "
+              f"{cache.stores} stored"
+              + (" [--cache-verify: every hit recompiled and checked]"
+                 if _CACHE_VERIFY else ""))
 
     work_fail = sorted(p.name for p in worklist_set if p not in built)
     work_fail_set = set(work_fail)
@@ -857,9 +1187,10 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
 
 
 def display(sources, objdir: Path, gendir: Path, halsc: str, python: str,
-            pass_rel32: Path, srcdirs, incl80: Path | None,
+            pass_rel32: Path, srcdirs, incl80,
             deck_root: Path | None, verbose: int = 0,
-            tag: str = "dfg") -> tuple[int, list[str]]:
+            tag: str = "dfg", gen_tree: Path | None = None,
+            phase: int | None = None) -> tuple[int, list[str]]:
     """dfg (deck -> HAL/S compool source; types from gen/SDFLIB), then halsc
     into objdir/<name>.obj (csect #P<name>).
 
@@ -883,63 +1214,66 @@ def display(sources, objdir: Path, gendir: Path, halsc: str, python: str,
     inclib = (gendir / "INCLIB").resolve()
     dispdir = (gendir / "displays").resolve()
     dispdir.mkdir(parents=True, exist_ok=True)
-    scratch = (gendir / "disp_TEMPLIB").resolve()
-    if scratch.exists():
-        shutil.rmtree(scratch)
-    if templib.is_dir():
-        shutil.copytree(templib, scratch)
-    else:
+    if not templib.is_dir():
         print(f"  [display] no {templib} — run --hal first", file=sys.stderr)
         return 0, [p.stem for p in sources]
     haltree = (gendir / "haltree").resolve()
-    _hal_mirror([*srcdirs] + ([incl80] if incl80 else []), haltree)
+    with _timed("step", "hal_mirror"):
+        _hal_mirror([*srcdirs, *_as_dirs(incl80)], haltree)
 
     src_root = Path(__file__).resolve().parent.parent       # .../src
     env = {**os.environ, "PYTHONUTF8": "1",
            "PYTHONPATH": os.pathsep.join([str(pass_rel32), str(src_root),
                                           os.environ.get("PYTHONPATH", "")])}
-    ok, fails = 0, []
-    for srcpath in sources:
+
+    overlay = _disp_overlays(gen_tree, phase)
+
+    def build_one(srcpath) -> str | None:
+        """Generate + compile one deck; returns its name on failure."""
         name = srcpath.stem
         halout = dispdir / f"{name}.hal"
-        cmd = [*_tool("dfg", python), name,
-               "--sdflib", str((gendir / "SDFLIB").resolve()),
-               "-o", str(halout)]
-        if deck_root is not None:
-            cmd += ["--deck-root", str(deck_root)]
-        r = _run(cmd, verbose=verbose, env=env, label=f"{tag} {name}")
-        if r.returncode != 0 or not halout.exists():
-            tail = ((r.stderr or "").strip().splitlines()[-1:] or ["?"])[0]
-            print(f"  [dfg FAIL] {name}: {tail[:70]}", file=sys.stderr)
-            fails.append(name)
-            _halt(f"dfg {name} failed")
-            continue
+        pre = _overlay_hal(overlay, name)
+        if pre is not None:
+            shutil.copyfile(pre, halout)
+            print(f"  [{tag}] {name}: using the recovered compool "
+                  f"{pre.parent.parent.name}/{pre.parent.name}/{pre.name} "
+                  f"(deck not generated)")
+        else:
+            cmd = [*_tool("dfg", python), name,
+                   "--sdflib", str((gendir / "SDFLIB").resolve()),
+                   "-o", str(halout)]
+            if deck_root is not None:
+                cmd += ["--deck-root", str(deck_root)]
+            r = _run(cmd, verbose=verbose, env=env, label=f"{tag} {name}")
+            if r.returncode != 0 or not halout.exists():
+                tail = ((r.stderr or "").strip().splitlines()[-1:]
+                        or ["?"])[0]
+                print(f"  [dfg FAIL] {name}: {tail[:70]}", file=sys.stderr)
+                return name
         # dfg output compiles as-is (includes resolved via SDF).
-        # --sdf (not --sdfi): same read side, but the display's own PASS3
-        # SDF member is collected into gen/SDFLIB — src/mafgen's data-csect
-        # walk reads ##CD0nnn from there, and nothing INCLUDEs a display,
-        # so the added members change no other compile.  TEMPLIB still gets
-        # the SCRATCH copy: an SDF member is read back only by name, while
-        # a template APPENDed to the shared library is seen by every later
-        # compile.
-        src = halout
+        scratch = (gendir / f"disp_TEMPLIB.{name}").resolve()
+        shutil.rmtree(scratch, ignore_errors=True)
+        shutil.copytree(templib, scratch)
         obj = objdir / f"{name}.obj"
         r = _run([halsc, f"--parm={halorder.get_parms(name)}",
-                  f"--templib={scratch}", f"--inclib={inclib}",
+                  f"--templib={scratch}", f"--inclib-ebcdic={inclib}",
                   f"--sdf={(gendir / 'SDFLIB').resolve()}",
                   f"--workdir={dispdir / (name + '.work')}",
-                  "-o", str(obj), str(src)],
+                  "-o", str(obj), str(halout)],
                  verbose=verbose, env=env, label=f"halsc {name}")
+        shutil.rmtree(scratch, ignore_errors=True)
         if r.returncode == 0 and obj.exists():
-            ok += 1
             shutil.rmtree(dispdir / (name + ".work"), ignore_errors=True)
-        else:
-            out = (r.stdout or "") + (r.stderr or "")
-            tail = (out.strip().splitlines()[-1:] or ["?"])[0]
-            print(f"  [halsc FAIL] {name}: {tail[:70]}", file=sys.stderr)
-            fails.append(name)
-            _halt(f"halsc display {name} failed")
-    return ok, fails
+            return None
+        out = (r.stdout or "") + (r.stderr or "")
+        tail = (out.strip().splitlines()[-1:] or ["?"])[0]
+        print(f"  [halsc FAIL] {name}: {tail[:70]}", file=sys.stderr)
+        return name
+
+    fails = [f for f in _pmap(build_one, sources) if f is not None]
+    for name in fails:
+        _halt(f"display {name} failed")
+    return len(sources) - len(fails), fails
 
 
 def runtime_csect_index(linklibs) -> dict[str, Path]:
@@ -997,13 +1331,20 @@ def inserted_runtime_objects(deck_dir: Path, root: str, linklibs,
 def worklist_objects(objdir: Path, by_type: dict, patches: dict) -> list[Path]:
     """The object files this worklist produces: <stem>.obj for each
     ASM/HAL/DISPLAY/AMT source and PCHnnTXT.obj for each patch, filtered to
-    those that exist."""
+    those that exist.
+    """
     want = [objdir / (p.stem + ".obj") for p in by_type["ASM"]]
     want += [objdir / (p.stem + ".obj") for p in by_type["HAL"]]
     want += [objdir / (p.stem + ".obj") for p in by_type["DISPLAY"]]
     want += [objdir / (p.stem + ".obj") for p in by_type.get("AMT", [])]
     want += [objdir / (member + ".obj") for member in patches.values()]
-    return [o for o in want if o.exists()]
+    have = [o for o in want if o.exists()]
+    if len(have) != len(want):
+        missing = sorted({o.stem for o in want} - {o.stem for o in have})
+        print(f"  [link] {len(missing)} worklist member(s) produced no object "
+              f"-- their csects will be ABSENT from the image: "
+              + " ".join(missing), file=sys.stderr)
+    return have
 
 
 def link(objdir: Path, fcm: Path, deck_dir: Path, concard_root: str,
@@ -1046,6 +1387,10 @@ def link(objdir: Path, fcm: Path, deck_dir: Path, concard_root: str,
     env = {**os.environ, "PYTHONUTF8": "1"}
     r = _run(cmd, verbose=verbose, env=env, label=f"lnk101 -> {fcm.name}")
     ok = r.returncode == 0 and fcm.exists()
+    if ok and not verbose:
+        for line in (r.stderr or "").splitlines():
+            if " layout: " in line:
+                print(f"  [{fcm.stem}] {line.strip()}", flush=True)
     if not ok:
         tail = ((r.stderr or "") + (r.stdout or "")).strip().splitlines()[-15:] or [""]
         for line in tail:
@@ -1077,6 +1422,9 @@ def main(
              "(used with --phase)")] = "OFTMP",
     out: Annotated[str, typer.Option("--out",
         help="output root (obj/, gen/, <target>.fcm beneath)")],
+    lib_dir: Annotated[Optional[str], typer.Option("--lib-dir", metavar="DIR",
+        help="where ALREADY-BUILT phase load modules are READ from: "
+             "[default: --out]")] = None,
     root: Annotated[Optional[str], typer.Option("--root",
         help="conventionally laid out source tree (CON80/, SSSRC/, APPLSRC/, "
              "MLIB80/, INCL80/); shorthand for --con80/--src/--mlib/--incl")] = None,
@@ -1087,11 +1435,8 @@ def main(
              "[default: <root>/SSSRC, <root>/APPLSRC]")] = None,
     gen: Annotated[Optional[str], typer.Option("--gen", metavar="DIR",
         help="generated-source overlay tree (SSSRC/, APPLSRC/ beneath); "
-             "members here OVERRIDE same-named members under --src -- the "
-             "delivered source tree is never modified; tool/preprocessor-"
-             "generated members go here "
-             "[default: <resolved root>/../../gen/<basename of --root> "
-             "if it exists, i.e. the source tree's gen/ sibling]")] = None,
+             "members here OVERRIDE same-named members under --src "
+             "[default: <resolved root>/../../gen/<basename of --root>]")] = None,
     mlib: Annotated[Optional[str], typer.Option("--mlib",
         help="asm101 macro/COPY library [default: <root>/MLIB80]")] = None,
     incl: Annotated[Optional[str], typer.Option("--incl",
@@ -1136,17 +1481,14 @@ def main(
              "after all phases are linked); no TARGET/--phase needed")] = False,
     build_all: Annotated[bool, typer.Option("--build-all",
         help="build every phase of the master deck in OFTMP order "
-             "(--phase 1..N), then cross-resolve the load modules; with no "
-             "step flags, all of --assemble --hal --display --link are "
+             "(--phase 1..N), then cross-resolve the load modules; "
+             "all of --assemble --hal --display --link are "
              "implied; no TARGET/--phase needed")] = False,
     keep_going: Annotated[bool, typer.Option("--keep-going",
         help="with --build-all: continue past a failed phase (resolution "
              "still runs over the load modules that built)")] = False,
     halt_on_error: Annotated[bool, typer.Option("--halt-on-error", "-e",
-        help="stop immediately at the first failing member (asm101, dfg, "
-             "display halsc) or failing step; the HAL step halts on its "
-             "final failure list (per-unit retries across TEMPLIB passes "
-             "are part of normal template ordering)")] = False,
+        help="stop at the first failing member")] = False,
     warn_unresolved_phases: Annotated[bool, typer.Option(
         "--Wunresolved-phases",
         help="list per-symbol unresolved warnings (forwarded to "
@@ -1173,23 +1515,53 @@ def main(
         help="runtime-library dir whose members (SQRT, EXP, ...) are "
              "supplied at link, not built here (repeatable; default: "
              "<pass-rel32>/RUNASM and <pass-rel32>/ZCONASM)")] = None,
+    jobs: Annotated[int, typer.Option("--jobs", "-j", metavar="N",
+        help="run up to N toolchain processes at once (assembly, each HAL "
+             "dependency level, the display decks). 0 = one per CPU; "
+             "1 = the strictly serial build")] = 0,
+    phase_jobs: Annotated[int, typer.Option("--phase-jobs", "-J", metavar="P",
+        help="with --build-all: compile up to P phases at once")] = 0,
+    cache: Annotated[Optional[str], typer.Option("--cache-dir", metavar="DIR",
+        help="cross-phase compile cache directory (default: "
+             "<out>/.compilecache")] = None,
+    shared_cache: Annotated[bool, typer.Option("--shared-cache",
+        help="put the compile cache in a fixed per-user location under "
+             "$TMPDIR instead of under --out")] = False,
+    use_cache: Annotated[bool, typer.Option("--cache/--no-cache",
+        help="cache halsfc output")] = True,
+    cache_verify: Annotated[bool, typer.Option("--cache-verify",
+        help="recompile on every cache hit and check the cached object"
+        )] = False,
     verbose: Annotated[int, typer.Option("--verbose", "-v", count=True,
-        help="echo each toolchain command (asm101/halsc/...) and its "
-             "output as it runs")] = 0,
+        help="echo each command and output as it runs")] = 0,
 ) -> None:
     pass_rel32 = Path(pass_rel32_dir)
     runlibs = ([Path(d) for d in runlib] if runlib
                else [pass_rel32 / "RUNASM", pass_rel32 / "ZCONASM"])
 
     # The tool wrappers (asm101/lnk101/dfg) live beside the halsc wrapper.
-    global _BINDIR, _HALT_ON_ERROR
+    global _BINDIR, _HALT_ON_ERROR, _JOBS, _PHASE_JOBS
+    global _CACHE_ROOT, _CACHE_VERIFY
     _BINDIR = Path(os.path.abspath(halsc)).parent
     _HALT_ON_ERROR = halt_on_error
+    _JOBS = jobs if jobs > 0 else (os.cpu_count() or 1)
+    _PHASE_JOBS = max(1, phase_jobs if phase_jobs > 0 else _JOBS // 4)
+    if cache and shared_cache:
+        raise typer.BadParameter("--cache-dir and --shared-cache both name "
+                                 "where the cache goes; give one")
+    if use_cache:
+        shared = os.path.join(
+            os.environ.get("HALSC_CACHE")
+            or os.path.join(os.environ.get("TMPDIR", "/tmp"),
+                            f"halsc-cache-{os.getuid()}"), "units")
+        _CACHE_ROOT = os.path.abspath(
+            cache or (shared if shared_cache else None)
+            or os.environ.get("CON80BUILD_CACHE")
+            or os.path.join(out, ".compilecache"))
+    _CACHE_VERIFY = cache_verify
     if halt_on_error and keep_going:
         raise typer.BadParameter("--halt-on-error and --keep-going conflict")
 
-    # --resolve-phases: the post-link fix-up over every phase load module in
-    # <out>; needs no target and no worklist.
     if resolve_phases:
         libs = sorted(Path(out).glob("PHASE*.lib"))
         if not libs:
@@ -1252,11 +1624,14 @@ def main(
                      (linklib or _DEFAULT_LINKLIBS)]
         _require_dirs(need)
 
+        deckdir = _con80_overlay(_gen_tree(gen, tree), deckdir, out)
+
         ids = [nums[0] for nums, _ in concard.phase_segments(
             concard.ConcardDeck(deckdir), master) if nums]
 
         fwd = []
-        for flag, val in (("--root", root), ("--con80", con80),
+        for flag, val in (("--root", root), ("--con80", str(deckdir)),
+                          ("--gen", gen),
                           ("--mlib", mlib), ("--incl", incl),
                           ("--deck-root", deck_root), ("--halsc", halsc),
                           ("--pass-rel32", pass_rel32_dir),
@@ -1268,12 +1643,20 @@ def main(
             for v in (vals or []):
                 fwd += [flag, str(v)]
         fwd += ["--tolerable", str(tolerable), "--python", python]
+        if _CACHE_ROOT:
+            fwd += ["--cache-dir", _CACHE_ROOT]
+        else:
+            fwd.append("--no-cache")
+        if _CACHE_VERIFY:
+            fwd.append("--cache-verify")
         if no_undefined:
             fwd.append("--no-undefined")
         if warn_unresolved_phases:
             fwd.append("--Wunresolved-phases")
         if halt_on_error:
             fwd.append("--halt-on-error")
+        if prune_objs:
+            fwd.append("--prune-objs")
         fwd += ["-v"] * verbose
         steps = [f for f, on in (("--assemble", run_assemble),
                                  ("--hal", run_hal),
@@ -1281,18 +1664,85 @@ def main(
                                  ("--link", run_link)) if on] \
             or ["--assemble", "--hal", "--display", "--link"]
 
-        failed = []
-        for i, pid in enumerate(ids, 1):
-            print(f"===== phase {pid} ({i}/{len(ids)}) =====", flush=True)
+        def run_phase(pid, phase_steps, jobs, tag=""):
             r = subprocess.run(
                 [python, "-m", "con80.con80build", "--phase", str(pid),
-                 "--out", out, *steps, *fwd])
-            if r.returncode != 0:
-                failed.append(pid)
-                print(f"===== phase {pid} FAILED =====", file=sys.stderr,
-                      flush=True)
-                if not keep_going:
-                    raise typer.Exit(1)
+                 "--out", out, *phase_steps, *fwd, "--jobs", str(jobs)],
+                capture_output=_PHASE_JOBS > 1, text=True)
+            if r.stdout:
+                sys.stdout.write(f"----- phase {pid}{tag} -----\n" + r.stdout)
+                sys.stdout.flush()
+            if r.stderr:
+                sys.stderr.write(r.stderr)
+            return r.returncode
+
+        failed = []
+        if _PHASE_JOBS <= 1 or len(ids) == 1 or "--link" not in steps:
+            work = [(pid, steps) for pid in ids]
+            if _PHASE_JOBS > 1:
+                rcs = _pmap(lambda w: run_phase(w[0], w[1], _JOBS), work,
+                            jobs=_PHASE_JOBS)
+            else:
+                rcs = []
+                for i, pid in enumerate(ids, 1):
+                    print(f"===== phase {pid} ({i}/{len(ids)}) =====",
+                          flush=True)
+                    rcs.append(run_phase(pid, steps, _JOBS))
+            for pid, rc in zip(ids, rcs):
+                if rc != 0:
+                    failed.append(pid)
+                    print(f"===== phase {pid} FAILED =====", file=sys.stderr,
+                          flush=True)
+                    if not keep_going:
+                        raise typer.Exit(1)
+        else:
+            # Phase-parallel: split each phase at the boundary the serial
+            # build already has, between its display step and its link.  What
+            # each phase does and the order it does it in are unchanged; only
+            # the boundary between phases moves.  The boundary must respect:
+            #   compile(N) needs the sym.json of N's MAP phases, so it needs
+            #             those phases linked;
+            #   link(N)   needs every earlier phase's load module, because a
+            #             phase segment re-opens overlay regions earlier
+            #             segments defined (see the link step's comment).
+            # So the links stay a chain in deck order and the compiles -- the
+            # bulk of the build -- fan out behind it.  MAP deps always name
+            # earlier phases, so by the time the chain reaches N its compile
+            # is dispatchable.
+            deck0 = concard.ConcardDeck(str(deckdir))
+            mapdeps = {n: sorted({int(op.operand.split(',')[0])
+                                  for op in concard.layout_program(
+                                      deck0, f"{master}@{n}")
+                                  if op.verb == "MAP" and op.operand
+                                  and op.operand.split(',')[0].strip().isdigit()})
+                       for n in ids}
+            csteps = [s for s in steps if s != "--link"]
+            per = _JOBS
+            print(f"===== {len(ids)} phases, {_PHASE_JOBS} at a time, "
+                  f"up to {per} job(s) each =====", flush=True)
+            from concurrent.futures import ThreadPoolExecutor
+            futs: dict = {}
+            linked: set = set()
+            with ThreadPoolExecutor(max_workers=_PHASE_JOBS) as ex:
+                def dispatch():
+                    for n in ids:
+                        if n not in futs and set(mapdeps[n]) <= linked:
+                            futs[n] = ex.submit(run_phase, n, csteps, per,
+                                                " compile")
+                for i, pid in enumerate(ids, 1):
+                    dispatch()
+                    print(f"===== phase {pid} ({i}/{len(ids)}) =====",
+                          flush=True)
+                    rc = futs[pid].result()
+                    if rc == 0:
+                        rc = run_phase(pid, ["--link"], per, " link")
+                    if rc != 0:
+                        failed.append(pid)
+                        print(f"===== phase {pid} FAILED =====",
+                              file=sys.stderr, flush=True)
+                        if not keep_going:
+                            raise typer.Exit(1)
+                    linked.add(pid)
         print(f"===== cross-phase resolution =====", flush=True)
         r = subprocess.run(
             [python, "-m", "con80.con80build", "--resolve-phases",
@@ -1303,10 +1753,6 @@ def main(
                   f"{' '.join(f'{p}' for p in failed)}", file=sys.stderr)
         raise typer.Exit(1 if (failed or r.returncode) else 0)
 
-    # --phase N: the build target is the master deck's phase-N segment
-    # (virtual concard root "<master>@N"); outputs are named PHASE0N and the
-    # build tree nests under <out>/PHASE0N so sibling phases share one --out
-    # with their load modules collected at <out>/PHASE0N.lib.
     if phase is not None and target is not None:
         raise typer.BadParameter("give TARGET or --phase, not both")
     if phase is not None:
@@ -1330,12 +1776,8 @@ def main(
     # Generated-source overlay: tool/preprocessor-generated members live
     # in a separate gen tree and shadow the delivered source, which is
     # NEVER modified.  The default overlay is the source archive's gen/
-    # sibling (<...>/gen/<OI> next to <...>/code/<OI>, found by resolving
-    # the --root symlink).  SourceIndex is first-dir-wins, so prepending
-    # makes gen members override.
-    gen_tree = (Path(gen) if gen
-                else tree.resolve().parent.parent / "gen" / tree.name
-                if tree else None)
+    # sibling (<...>/gen/SRC next to <...>/code/<SRC)
+    gen_tree = _gen_tree(gen, tree)
     if srcdirs is not None and gen_tree is not None and gen_tree.is_dir():
         gendirs = [gen_tree / d for d in SOURCE_DIRS
                    if (gen_tree / d).is_dir()]
@@ -1343,6 +1785,28 @@ def main(
             print(f"[gen] source overlay: "
                   f"{', '.join(str(d) for d in gendirs)}")
             srcdirs = gendirs + srcdirs
+        # Per-phase source overlay: <gen>/phase<NN>/{SSSRC,APPLSRC}/, ahead
+        # of the whole-build overlay.  A member is normally the same text in
+        # every phase that links it, and sharing one object across phases is
+        # what the compile cache is for -- but a member whose SMPP selection
+        # region picks which OPS's parameter-data-table template to compile
+        # against is genuinely two different compiles.  Compiled once, the
+        # object keeps one OPS's table reference in every phase, and the other
+        # OPS's phase then autocalls that whole table into its own image.
+        #
+        # The compile cache is keyed on source content, not path, so the two
+        # variants get different keys and neither shadows the other.
+        if phase is not None:
+            phdirs = [gen_tree / f"phase{phase:02d}" / d for d in SOURCE_DIRS
+                      if (gen_tree / f"phase{phase:02d}" / d).is_dir()]
+            if phdirs:
+                print(f"[gen] phase-{phase:02d} source overlay: "
+                      f"{', '.join(str(d) for d in phdirs)}")
+                srcdirs = phdirs + srcdirs
+    # INCL80 overlays the same way, and has to: three of the members SMPP
+    # regenerates are HAL includes (FLEXDATA, FLEXTBL), so without this they
+    # could only be localized into the delivered tree.
+    gen_incl = (gen_tree / INCL_DIR) if gen_tree is not None else None
     # Link-order pins: explicit --link-order, else the gen tree's
     # linkorder.json (the orderings ride the gen/ overlay, not the
     # source tree).
@@ -1357,21 +1821,23 @@ def main(
                 f"--link-order file not found: {link_order_path}")
         print(f"[link-order] pins: {link_order_path}")
     mlib_dir = Path(mlib) if mlib else (tree / "MLIB80" if tree else None)
-    incl_dir = Path(incl) if incl else (tree / "INCL80" if tree else None)
+    incl_dir = Path(incl) if incl else (tree / INCL_DIR if tree else None)
+    incl_dirs = [d for d in (gen_incl, incl_dir)
+                 if d is not None and d.is_dir()]
+    if gen_incl is not None and gen_incl.is_dir():
+        print(f"[gen] include overlay: {gen_incl}")
     deck_root_dir = Path(deck_root) if deck_root else tree
     if con80_dir is None or srcdirs is None:
         raise typer.BadParameter(
             "give --root, or explicit --con80 and --src directories")
-    libdir = Path(out)                  # phase load modules collect here
+    libdir = Path(lib_dir) if lib_dir else Path(out)
+    outdir = Path(out)                  # this phase's load module lands here
     out_root = Path(out) / name if phase is not None else Path(out)
     objdir = out_root / "obj"
     gendir = out_root / "gen"
     linklibs = ([Path(d) for d in linklib] if linklib
                 else list(_DEFAULT_LINKLIBS))
 
-    # Fail fast on missing directories -- everything the selected steps
-    # rely on, all reported at once, before the deck is read or any
-    # toolchain runs.
     need = [("--con80", con80_dir)] + [("--src", d) for d in srcdirs]
     if gen is not None:
         need.append(("--gen", Path(gen)))
@@ -1386,9 +1852,8 @@ def main(
         need += [("--linklib", d) for d in linklibs]
     _require_dirs(need)
 
-    # A nonexistent phase (e.g. 22: OFTMP folds CONCARDS(PHASE22) into the
-    # PHASE 21 segment): name the valid phase numbers instead of a raw
-    # KeyError.
+    con80_dir = _con80_overlay(gen_tree, con80_dir, out)
+
     if phase is not None:
         _deck = concard.ConcardDeck(str(con80_dir))
         if not _deck.has(target):
@@ -1399,7 +1864,8 @@ def main(
                 f"directives; valid phases: "
                 f"{' '.join(str(n) for n in _valid)}")
 
-    srcidx = SourceIndex(srcdirs)
+    with _timed("step", "SourceIndex"):
+        srcidx = SourceIndex(srcdirs)
     by_type, runtime, unresolved, patches = resolve_worklist(
         con80_dir, target, srcidx, runtime_names(runlibs))
 
@@ -1426,7 +1892,7 @@ def main(
         con80cmake.emit(
             Path(emit_cmake), root=target, by_type=by_type, patches=patches,
             srcdirs=srcdirs, con80_dir=con80_dir, mlib=mlib_dir,
-            incl80=incl_dir, deck_root=deck_root_dir, out_root=out_root,
+            incl80=incl_dirs, deck_root=deck_root_dir, out_root=out_root,
             python=python, halsc=os.path.abspath(halsc),
             pass_rel32=pass_rel32.resolve(), tolerable=tolerable,
             linklibs=linklibs, concard_root=concard_root,
@@ -1440,8 +1906,9 @@ def main(
     if run_assemble:
         if mlib_dir is None:
             raise typer.BadParameter("--assemble needs --mlib (or --root)")
-        ok, fails = assemble(by_type["ASM"], objdir, mlib_dir,
-                             python, tolerable, verbose)
+        with _timed("phase", "assemble"):
+            ok, fails = assemble(by_type["ASM"], objdir, mlib_dir,
+                                 python, tolerable, verbose)
         print(f"assembled {ok}/{len(by_type['ASM'])} ASM -> {objdir}"
               + (f"; {len(fails)} failed" if fails else ""))
         if fails:
@@ -1455,10 +1922,12 @@ def main(
                 print("  failed:", " ".join(sorted(pfails)))
 
     if run_hal:
-        ok, fails = hal(by_type["HAL"], objdir, gendir,
-                        os.path.abspath(halsc), python,
-                        pass_rel32.resolve(), srcdirs, incl_dir, verbose,
-                        displays=by_type["DISPLAY"] + by_type["AMT"])
+        with _timed("phase", "hal"):
+            ok, fails = hal(by_type["HAL"], objdir, gendir,
+                            os.path.abspath(halsc), python,
+                            pass_rel32.resolve(), srcdirs, incl_dirs, verbose,
+                            displays=by_type["DISPLAY"] + by_type["AMT"],
+                            gen_tree=gen_tree, phase=phase)
         print(f"compiled {ok}/{len(by_type['HAL'])} HAL -> {objdir}"
               + (f"; {len(fails)} failed" if fails else ""))
         if fails:
@@ -1466,19 +1935,22 @@ def main(
             _halt(f"HAL step: {len(fails)} unit(s) failed")
 
     if run_display:
-        ok, fails = display(by_type["DISPLAY"], objdir, gendir,
-                            os.path.abspath(halsc), python,
-                            pass_rel32.resolve(), srcdirs, incl_dir,
-                            deck_root_dir, verbose)
+        with _timed("phase", "display"):
+            ok, fails = display(by_type["DISPLAY"], objdir, gendir,
+                                os.path.abspath(halsc), python,
+                                pass_rel32.resolve(), srcdirs, incl_dirs,
+                                deck_root_dir, verbose, gen_tree=gen_tree,
+                                phase=phase)
         print(f"built {ok}/{len(by_type['DISPLAY'])} displays -> {objdir}"
               + (f"; {len(fails)} failed" if fails else ""))
         if fails:
             print("  failed:", " ".join(sorted(fails)))
         if by_type["AMT"]:
-            aok, afails = display(by_type["AMT"], objdir, gendir,
-                                  os.path.abspath(halsc), python,
-                                  pass_rel32.resolve(), srcdirs, incl_dir,
-                                  deck_root_dir, verbose, tag="dfg amt")
+            with _timed("phase", "display_amt"):
+                aok, afails = display(by_type["AMT"], objdir, gendir,
+                                      os.path.abspath(halsc), python,
+                                      pass_rel32.resolve(), srcdirs, incl_dirs,
+                                      deck_root_dir, verbose, tag="dfg amt")
             print(f"built {aok}/{len(by_type['AMT'])} AMT compools -> {objdir}"
                   + (f"; {len(afails)} failed" if afails else ""))
             if afails:
@@ -1491,9 +1963,8 @@ def main(
     # $0<prog> cards seed the set (stack creation forces the module in).
     # Only jobs whose autocall placement is validated against a flight
     # load run the closure -- each config needs its own wave-order/anchor
-    # derivation.  Candidates for extension are every no-NOCALLER deck
-    # (PHASE04/05/06/07/15/16).
-    AUTOCALL_VALIDATED = {8, 12}
+    # derivation. 
+    AUTOCALL_VALIDATED = {4, 5, 6, 7, 8, 12, 15, 16}
     autocalled: list[dict] = []
     # The autocall decision is the GATE's, never a leftover file's: track
     # it explicitly so the link step and the autocall.json lifecycle below
@@ -1504,21 +1975,66 @@ def main(
     autocall_path = out_root / "autocall.json"
     if autocall_live:
         stub_syms = library_stub_syms(con80_dir, target)
-        csect_defs = srcidx.csect_defs()
+        with _timed("step", "csect_defs"):
+            csect_defs = srcidx.csect_defs()
         # MAP-phase definitions: csects the co-resident base already defines.
         ext_defs: set[str] = set()
         _deck0 = concard.ConcardDeck(str(con80_dir))
-        _deps = sorted({int(op.operand.split(',')[0])
-                        for op in concard.layout_program(_deck0, target)
-                        if op.verb == "MAP" and op.operand
-                        and op.operand.split(',')[0].strip().isdigit()})
+        # `MAP p,<region...>` imports only the named regions' definitions.
+        # A definition in an unmapped region is not resident for this MC:
+        # the LE leaves such a reference unresolved and autocall re-links
+        # the module into this phase.  A bare `MAP p` (no regions) imports
+        # the whole phase.
+        _map_regions: dict[int, list | None] = {}
+        for op in concard.layout_program(_deck0, target):
+            if op.verb != "MAP" or not op.operand:
+                continue
+            _parts = [t.strip() for t in op.operand.split(",")]
+            if not _parts[0].isdigit():
+                continue
+            _pn = int(_parts[0])
+            _regs = [t for t in _parts[1:] if t]
+            if not _regs:
+                _map_regions[_pn] = None          # whole phase
+            elif _map_regions.get(_pn, []) is not None:
+                _map_regions.setdefault(_pn, []).extend(_regs)
+        _deps = sorted(_map_regions)
         for p_ in _deps:
             symp = libdir / f"PHASE{p_:02d}" / f"PHASE{p_:02d}.sym.json"
             if symp.exists():
                 import json as _json
                 _sym = _json.loads(symp.read_text())
-                ext_defs.update(s["name"] for s in _sym.get("sections", []))
-                ext_defs.update(s["name"] for s in _sym.get("symbols", []))
+                # imported markers (module 'X>') describe ANOTHER phase's
+                # definition -- the defining phase's own (region-gated)
+                # entries are the authority on residency
+                entries = [e for e in (list(_sym.get("sections", []))
+                                       + list(_sym.get("symbols", [])))
+                           if not e.get("module", "").endswith(">")]
+                _regs = _map_regions.get(p_)
+                _libp = libdir / f"PHASE{p_:02d}.lib"
+                if _regs is not None and _libp.exists():
+                    from ap101Utils.libModule import (LibModule,
+                                                      regionIntervals)
+                    _ivals = [(s // 2, e // 2) for s, e in regionIntervals(
+                        LibModule.read(_libp), _regs)]
+                    if _ivals:
+                        # Only REMOTE-class compools re-link per MC; every
+                        # other unmapped base definition still resolves in
+                        # place (the LE's one-job model), so only #P names
+                        # outside the mapped intervals stop suppressing.
+                        _n0 = len(entries)
+                        entries = [e for e in entries
+                                   if not e["name"].startswith("#P")
+                                   or any(e["address"] < t
+                                          and e["address"]
+                                          + max(e.get("size", 1), 1) > s
+                                          for s, t in _ivals)]
+                        if _n0 != len(entries):
+                            print(f"[{name}] autocall: MAP phase {p_} "
+                                  f"region-gated -- {_n0 - len(entries)} "
+                                  f"unmapped remote-compool definition(s) "
+                                  f"won't suppress pulls")
+                ext_defs.update(e["name"] for e in entries)
             else:
                 # an empty exclusion set makes the closure pull modules the
                 # co-resident base already defines (split flight-fixed
@@ -1527,14 +2043,24 @@ def main(
                       f"({symp}); its csects WON'T suppress pulls -- "
                       f"build phase {p_} first", file=sys.stderr)
         seeds = stack_seed_modules(con80_dir, target)
+        # The deck's LE CHANGE cards rewrite the CESD of the module each one
+        # precedes; autocall must demand the renamed external, not the name
+        # in the object's raw ESD (see concard_changes).
+        changes = concard_changes(con80_dir, target)
+        if changes:
+            print(f"[{name}] autocall: {sum(len(v) for v in changes.values())}"
+                  f" CHANGE rename(s) over {len(changes)} INCLUDE member(s)")
         attempted: set[Path] = set()   # newsrc gets ONE compile attempt
         nosource_seen: set[str] = set()
         converged = False
         for wave in range(6):
-            linkset = [p for p in worklist_objects(objdir, by_type, patches)
-                       if p.exists()]
-            need, defined = autocall_scan(linkset, ext_defs, stub_syms,
-                                          runtime_names(runlibs))
+            _t_wave = time.time()
+            with _timed("step", f"autocall_scan{wave}"):
+                linkset = [p for p in worklist_objects(objdir, by_type, patches)
+                           if p.exists()]
+                need, defined = autocall_scan(linkset, ext_defs, stub_syms,
+                                              runtime_names(runlibs),
+                                              changes=changes)
             if wave == 0:
                 need = [s for s in seeds if s not in defined] + need
             newsrc: list[tuple[str, Path]] = []
@@ -1553,12 +2079,15 @@ def main(
                     # way.
                     continue
                 if (objdir / f"{p.stem}.obj").exists():
-                    # already compiled (an earlier run's autocall): it only
-                    # needs to (re)join the link's object list
-                    if p not in worklisted and p not in relisted:
-                        relist.append((n, p))
-                        relisted.add(p)
-                    continue
+                    _sdfm = gendir / "SDFLIB" / f"##{p.stem[:6]:<6}.sdf"
+                    sdf_ok = (classify(p) == "ASM"
+                              or (_sdfm.exists()
+                                  and _sdfm.stat().st_size > 3360))
+                    if sdf_ok:
+                        if p not in worklisted and p not in relisted:
+                            relist.append((n, p))
+                            relisted.add(p)
+                        continue
                 if p in worklisted:
                     # a deck member with no object = its MAIN-step compile
                     # failed; adopting it as "autocalled" would exempt it
@@ -1605,12 +2134,17 @@ def main(
                          verbose)
             if byt["HAL"]:
                 hal(byt["HAL"], objdir, gendir, os.path.abspath(halsc),
-                    python, pass_rel32.resolve(), srcdirs, incl_dir, verbose,
-                    displays=byt["DISPLAY"] + byt["AMT"])
+                    python, pass_rel32.resolve(), srcdirs, incl_dirs, verbose,
+                    displays=byt["DISPLAY"] + byt["AMT"],
+                    owned=set(by_type["HAL"]) - set(byt["HAL"]),
+                    gen_tree=gen_tree, phase=phase)
             if byt["DISPLAY"]:
                 display(byt["DISPLAY"], objdir, gendir,
                         os.path.abspath(halsc), python, pass_rel32.resolve(),
-                        srcdirs, incl_dir, deck_root_dir, verbose)
+                        srcdirs, incl_dirs, deck_root_dir, verbose,
+                        gen_tree=gen_tree, phase=phase)
+            _tlog(kind="phase", name=f"autocall_wave{wave}", t0=_t_wave,
+                  dt=time.time() - _t_wave) if _TIMING else None
         if not converged:
             print(f"[{name}] autocall: closure NOT converged after 6 "
                   f"waves -- link set may be incomplete", file=sys.stderr)
@@ -1620,12 +2154,6 @@ def main(
                   + " ".join(sorted(nosource_seen)[:12])
                   + (" ..." if len(nosource_seen) > 12 else ""))
 
-    # autocall.json is a GATE-DECIDED artifact: rewritten on every real run
-    # the gate allows, REMOVED on every real run it doesn't (or that pulls
-    # nothing).  lnk101 keys deferral exemption / placement waves / full-
-    # graph stack sizing on this file -- a stale leftover must never
-    # re-arm autocall.
-    # Plan-only invocations (no step flags) leave the file untouched.
     if autocall_live and autocalled:
         import json as _json
         autocall_path.write_text(_json.dumps(autocalled, indent=1))
@@ -1637,12 +2165,6 @@ def main(
               + ("(gate on, nothing pulled)" if autocall_live
                  else "(autocall gated off for this job)"))
 
-    # Stale-object hygiene: an .obj this phase's worklist (incl. autocall)
-    # did not produce is a leftover from an older run.  The LINK ignores it
-    # (worklist-scoped), but an autocall job's stack sizer reads mapped
-    # phases' objdirs -- stale objs there deepen call chains.  Warn
-    # always; delete on --prune-objs.  Phase builds only:
-    # per-phase objdirs are phase-private, target objdirs may be shared.
     if steps_running and phase is not None and objdir.is_dir():
         expected = {(p.stem + ".obj")
                     for lst in by_type.values() for p in lst}
@@ -1691,8 +2213,8 @@ def main(
                   file=sys.stderr)
             raise typer.Exit(1)
 
-        # The linkage editor processes the master deck as ONE job, so a
-        # phase segment sees the overlay-region table built up by every EARLIER
+        # The linkage editor processes the master deck as one job, so a
+        # phase segment sees the overlay-region table built up by every earlier
         # segment: PHASE13's origin-less `OVERLAY PHAS13D` re-opens a region the
         # phase-2 segment defined, with no MAP card at all (the deck never
         # needed one).  Model that state by also supplying every earlier
@@ -1700,17 +2222,24 @@ def main(
         # supplied lib (lowest phase wins) but reserves intervals and imports
         # symbols only for explicit MAP cards, so this changes nothing except
         # origin-less OVERLAY re-opens -- the same re-open the LE would do.
-        # Earlier libs may be legitimately absent on a partial build (only the
-        # explicit MAP deps above are hard requirements).
         if phase is not None:
             order = [nums[0] for nums, _ in concard.phase_segments(
                 concard.ConcardDeck(str(con80_dir)), master) if nums]
             if phase in order:
                 have = given | {str(p) for p in deps}
+                absent = []
                 for p in order[:order.index(phase)]:
                     dep = libdir / f"PHASE{p:02d}.lib"
-                    if str(p) not in have and dep.exists():
+                    if str(p) in have:
+                        continue
+                    if dep.exists():
                         map_libs.append(f"{p}={dep}")
+                    else:
+                        absent.append(p)
+                if absent:
+                    print(f"  [link] {len(absent)} earlier phase load "
+                          f"module(s) NOT FOUND in {libdir}: "
+                          + " ".join(f"PHASE{p:02d}" for p in absent), file=sys.stderr)
 
         # Scope the link to this root's modules so a partial build (e.g. one
         # phase) doesn't pull other phases' csects out of the shared obj dir.
@@ -1725,7 +2254,7 @@ def main(
             print(f"  [link] +{len(extra_objs)} INSERTed runtime object(s) "
                   f"loaded explicitly (NCAL: no autocall)")
             objs = objs + extra_objs
-        libout = (libdir / f"{name}.lib" if phase is not None
+        libout = (outdir / f"{name}.lib" if phase is not None
                   else fcm.with_suffix(".lib"))
         good = link(objdir, fcm, con80_dir, concard_root, linklibs,
                     python, json_symbols=symjson,

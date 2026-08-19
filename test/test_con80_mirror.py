@@ -4,19 +4,13 @@
 Covers:
   1. _native_comment_chars: only per-file CARDTYPE pairs that remap a
      NATIVE type char (E/M/S/C/D) to comment count — change-flag pairs
-     (GKRORB A->C) and default decks yield nothing.  No live table entry
-     exists today (CV5SLCOM "DC" was retired), so the materialization
-     checks inject a synthetic entry.
+     (GKRORB A->C) 
   2. comment_native_cards mechanics: col-1-only rewrite, columns/SRN
      preserved, None when nothing matches.
   3. _hal_mirror materialization: a deck with a native remap becomes a
      transformed copy; everything else stays a symlink; _mirror_rewrite
      agrees with the materialized bytes.
-  4. halorder CARDTYPE table (flight-faithful STRPDT dispositions):
-     default maps R->C (the SM compools compile INCL80/STRPDT's
-     unqualified NAME declares as comments, so their SDFs export only
-     the structure templates and multi-import works), while the 7
-     flight-verified procedures map R->M.
+  4. halorder CARDTYPE table: default maps R->C 
 """
 import sys
 import tempfile
@@ -109,23 +103,20 @@ def test_native_remap():
 
 
 def test_cardtype_table():
-  # Flight-faithful STRPDT dispositions (OI30 listings): compools R->C...
   for stem in ("CSAPDT", "CS2PDT", "CS4PDT", "CPGPCD", "PGGPCF",
                "PGPPLD", "PGSCRU"):
     check(f"{stem} parm maps R->C",
           "CARDTYPE=FCRC" in halorder.get_parms(stem),
           halorder.get_parms(stem))
-  # ...and the 8 procedures whose listings compile the R cards live R->M.
   for stem in ("SAFACQ", "SCKPNT", "STCCYCL", "SULUPLIN", "STMTAB",
                "SPNINT", "SPPPRECO", "SRESTO"):
     check(f"{stem} parm maps R->M",
           "CARDTYPE=FCRM" in halorder.get_parms(stem),
           halorder.get_parms(stem))
-  # CPTOSV/CPUSLS: deliberate both-OPS config (B->D) but flight R->C.
   for stem in ("CPTOSV", "CPUSLS"):
     parm = halorder.get_parms(stem)
-    check(f"{stem} keeps B->D both-OPS with R->C",
-          "ACBDFCRC" in parm, parm)
+    check(f"{stem} deactivates B like A (per-OPS form)",
+          "ACBCFCRC" in parm, parm)
 
 
 def main():

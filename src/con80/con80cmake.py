@@ -32,7 +32,7 @@ def _sh(script: str) -> str:
 
 
 def emit(outfile: Path, *, root: str, by_type: dict, patches: dict,
-         srcdirs, con80_dir: Path, mlib: Path | None, incl80: Path | None,
+         srcdirs, con80_dir: Path, mlib: Path | None, incl80,
          deck_root: Path | None, out_root: Path, python: str, halsc: str,
          pass_rel32: Path, tolerable: int, linklibs, concard_root: str,
          allow_undefined: bool, nocall: bool = False) -> None:
@@ -46,7 +46,7 @@ def emit(outfile: Path, *, root: str, by_type: dict, patches: dict,
     displays = by_type["DISPLAY"] + by_type.get("AMT", [])
 
     tree = halorder.tree_units(srcdirs)
-    from .con80build import _deck_template_seeds
+    from .con80build import _as_dirs, _deck_template_seeds
     disp_seeds = [d for p in displays for d in _deck_template_seeds(p)]
     extra, closure_seeds = halorder.template_closure(hal_worklist, tree,
                                                      disp_seeds)
@@ -156,7 +156,8 @@ add_custom_command(OUTPUT "{obj}"
 # ---- HAL/S (serial chain: shared TEMPLIB, template order) ----
 # Mirror the extensionless sources as *.hal for the PASS tools, then
 # initialise TEMPLIB/INCLIB.""")
-    mirror_dirs = [*srcdirs] + ([Path(incl80).resolve()] if incl80 else [])
+    incl_dirs = [Path(d).resolve() for d in _as_dirs(incl80)]
+    mirror_dirs = [*srcdirs, *incl_dirs]
     # The mirror runs through con80build._hal_mirror (not a plain ln -sf
     # loop) so any build-layer source rewrite (native-CARDTYPE comment
     # remaps) is materialized as a transformed copy in the mirror.
@@ -181,9 +182,9 @@ add_custom_command(OUTPUT "${{GEN}}/stamps/hal_setup"
   COMMAND ${{CMAKE_COMMAND}} -E rm -f {hal_objs}
   COMMAND ${{HALENV}} "${{PYTHON}}" "${{PASS_REL32}}/prepareTEMPLIB" \
 --clear""")
-    if incl80:
+    if incl_dirs:
         w('  COMMAND ${INCENV} "${PYTHON}" "${PASS_REL32}/prepareINCLIB"'
-          f' --clear "--include=${{GEN}}/haltree/{Path(incl80).name}"')
+          f' --clear "--include=${{GEN}}/haltree/{incl_dirs[0].name}"')
     w("""\
   COMMAND ${CMAKE_COMMAND} -E touch "${GEN}/stamps/hal_setup"
   WORKING_DIRECTORY "${GEN}"
