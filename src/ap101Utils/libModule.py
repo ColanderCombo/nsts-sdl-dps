@@ -348,6 +348,21 @@ class LibModule:
         f"{totalProt} hw protected\n")
 
 
+def regionIntervals(lib: 'LibModule', names, extend: bool = True):
+    """BYTE intervals [(start, end), ...] of the named REGN records."""
+    wanted = set(names)
+    recs = sorted(lib.regions, key=lambda r: r.start)
+    out = []
+    for i, r in enumerate(recs):
+        if r.name not in wanted:
+            continue
+        end = r.end
+        if extend and i + 1 < len(recs):
+            end = max(end, recs[i + 1].start)
+        out.append((r.start, end))
+    return out
+
+
 def main(argv=None):
   args = list(sys.argv[1:] if argv is None else argv)
   verbose = "-v" in args

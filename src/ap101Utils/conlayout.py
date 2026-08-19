@@ -103,6 +103,7 @@ class LayoutEngine:
                  phase_regions: 'dict[str, int] | None' = None,
                  existing: 'dict[str, int] | None' = None,
                  base_occupied: 'list[tuple[int, int]] | None' = None,
+                 local_defs: 'set[str] | None' = None,
                  link_order: 'LinkOrder | None' = None):
         self.module_csects = module_csects
         self.align = align
@@ -113,13 +114,16 @@ class LayoutEngine:
         # name -> halfword address: a library INCLUDE of one of these REPLACES
         # it in place instead of placing sequentially.
         self.existing = existing or {}
+        # Csect names this job supplies -- every SD of a non-external module
+        # of the link.:
+        self.local_defs = local_defs
         # The co-resident base's full memory footprint ([lo, hi) hw extents of
         # every SD in the MAP-carded phases' libs).  Roll-in pool placement
-        # packs into its free gaps; deliberately NOT part of `occupied`, so
+        # packs into its free gaps; deliberately not part of `occupied`, so
         # re-opened-region REPLACEMENT content can still land inside it.
         self.base_occupied = sorted(base_occupied or [])
         # The image carries a 2-hw terminal checksum csect (#T0<pp>...)
-        # right after the base's LAST content in each bank.  Our libs don't
+        # right after the base's last content in each bank.  Our libs don't
         # emit #T csects, so reserve the slot here or roll-in packing would
         # start one fullword early.
         if self.base_occupied:
@@ -130,8 +134,8 @@ class LayoutEngine:
             for b, hi in bank_max.items():
                 ck = align_word(hi)
                 self.base_occupied.append((ck, ck + 2))
-            # The whole Z1 region up to Z1_POOL_END_HW is RESERVED for the
-            # ZCON pool's per-config growth.  run() PROMOTES this reserve
+            # The whole Z1 region up to Z1_POOL_END_HW is reserved for the
+            # ZCON pool's per-config growth.  run() promotes this reserve
             # into `occupied` for decks that do not own the Z1 overlay
             # themselves (see the promotion note there).
             self.base_occupied.append((0x1A8, Z1_POOL_END_HW))
@@ -316,6 +320,9 @@ class LayoutEngine:
         # whole-block grouping but flush AFTER the pool, first-fit over the
         # base-aware gaps, so they cannot take the pool's fill point.
         rollin_blocks: list[tuple[int, str, list]] = []   # (bank, overlay, [(name, size)])
+        rollin_ends: set[int] = set()   # LE-placed run tails: the load block
+                                        # FillRule-pads from here to the next
+                                        # pinned segment
         cur_rollin = False
         # The current overlay belongs to a post-BANK new-overlay group whose
         # bank holds a #D/#X/#Y overlay: its buffered block flows whole,
@@ -356,6 +363,50 @@ class LayoutEngine:
                 gaps.append((cursor, b_hi))
             return gaps
 
+        def backfill_leftovers(names, sizeof, banks=(0, 1)):
+            """Autocall csects no pin/stream/wave placed: the LE backfills
+            them first-fit into the lowest free data-zone gap (banks 0-1)
+            over `self.occupied` alone"""
+            # A gap that opens at an LE-placed (roll-in) run's tail is not
+            # free: the run's load block FillRule-pads from there to the
+            # next segment:
+            for n in sorted(names,
+                            key=lambda n: (-(sizeof.get(n) or 0),
+                                           n.encode("cp037", "replace"))):
+                if n in out.addresses or n in all_inserts:
+                    continue
+                if self.local_defs is not None \
+                        and n not in self.local_defs \
+                        and n in self.existing:
+                    continue
+                sz = sizeof.get(n)
+                if sz is None:
+                    continue               # module not in this link
+                a = None
+                for bank in banks:
+                    gaps = [g for g in _bank_gaps(bank, include_base=False)
+                            if g[1] - g[0] >= 4        # not a checksum slot
+                            and g[0] not in rollin_ends]   # not a FillRule pad
+                    for g_lo, g_hi in gaps:
+                        start = align_word(g_lo) if self.align else g_lo
+                        if start + sz <= g_hi:
+                            a = start
+                            break
+                    if a is not None:
+                        break
+                if a is None:
+                    out.log.append(f"autocall-backfill {n}: no data-zone "
+                                   f"gap; left to linker auto-placement")
+                    continue
+                out.addresses[n] = a
+                out.bank_of[n] = a // BANK_SIZE_HW
+                out.overlay_of[n] = cur_overlay
+                out.phase_of[n] = cur_phase
+                out.protected[n] = (False if n.startswith("@")
+                                    else default_protected(n))
+                self.occupied.append((a, a + sz))
+                out.log.append(f"autocall-backfill {n} @ {a:#07x} ({sz} hw)")
+
         def flush_rollin():
             for bank, _, name, size, ovl in sorted(
                     rollin_pool, key=lambda t: (t[0], t[3], t[1])):
@@ -379,9 +430,10 @@ class LayoutEngine:
                 out.phase_of[name] = cur_phase
                 out.protected[name] = default_protected(name)
                 self.occupied.append((a, a + size))
+                rollin_ends.add(a + size)
             rollin_pool.clear()
             # Deferred roll-in blocks: whole-block first-fit into the free
-            # gaps, AFTER the pool has claimed its space.
+            # gaps, after the pool has claimed its space.
             for bank, ovl, block in rollin_blocks:
                 block = [(n, s) for n, s in block if n not in out.addresses]
                 if not block:
@@ -410,12 +462,13 @@ class LayoutEngine:
                     out.protected[n] = default_protected(n)
                     self.occupied.append((a, a + s))
                     a += s
+                rollin_ends.add(a)
             rollin_blocks.clear()
 
         # INTER-BLOCK CHECKSUMS.  The LE writes a 2-halfword, fullword-
         # aligned CHECKSUM after every OVERLAY's placed content.  We model it
         # as a 2-hw `occupied` reservation right after the overlay's content:
-        # downstream placement then flows PAST it via `_next_free`.  We
+        # downstream placement then flows past it via `_next_free`.  We
         # deliberately do NOT nudge `lc`/`banklc`: the block allocator floors
         # on `app_floor`/`banklc` (content ends, checksum-free) and lets
         # `_next_free` step over the reservations, so the checksums shift
@@ -507,8 +560,13 @@ class LayoutEngine:
                 if stk in out.addresses:
                     continue
                 ssz = stack_decls[stk]
-                a = align_word(cur_overlay_max) if self.align else cur_overlay_max
-                a = self._next_free(a, ssz)
+                ex = self.existing.get(stk)
+                if ex is not None:
+                    a = ex
+                else:
+                    a = align_word(cur_overlay_max) if self.align \
+                        else cur_overlay_max
+                    a = self._next_free(a, ssz)
                 register(stk, a, ssz)
                 # Stacks are runtime-written and never store-protected -- keep them
                 # OUT of `unmarked` so a following SET card cannot flip the flag
@@ -832,7 +890,6 @@ class LayoutEngine:
                 unmarked = []
 
             elif verb == "STACK":
-                flush_block()
                 # STACK $0<prog> names a stack CSECT the linker CREATES
                 # (@0<prog>, sized by the call-chain algorithm).  When the
                 # module's PDE #E<prog> is INSERTed, the LE puts @0<prog> at the
@@ -846,6 +903,7 @@ class LayoutEngine:
                     continue                   # placed by the autocall waves
                 if ("#E" + name[2:]) in all_inserts:
                     continue                   # deferred to its #E overlay's tail
+                flush_block()
                 sizes = self.module_csects.get(name)
                 size = dict(sizes).get(name) if sizes else None
                 if size is None:
@@ -887,34 +945,39 @@ class LayoutEngine:
         stacked = [o.operand for o in program
                    if o.verb == "STACK" and o.operand
                    and o.operand.startswith("$0")]
-        units = []
-        for s0 in stacked:
-            if s0 in autocall_names:
-                continue                   # placed by the autocall code wave
-            if s0 in out.addresses or s0 in all_inserts:
-                continue                   # placed (or will be) by the deck
-            sds = self.module_csects.get(s0)
-            if not sds:
-                continue                   # module not in this link
-            unit = [(n, sz) for n, sz in sds
-                    if not n.startswith(("#", "@")) and n not in out.addresses]
-            if unit:
-                units.append((s0, unit))
-        if units and orphan_floor is None:
-            # no overlay placed a #C, so there is no flush point: the units
-            # fall through to the linker's sector-rule auto-place with
-            # wrong-looking addresses -- every other "couldn't place" path
-            # logs, so must this one
-            out.log.append(
-                "orphan flush: no #C overlay floor; "
-                + ", ".join(s0 for s0, _ in units)
-                + " left to linker auto-placement")
-        if units and orphan_floor is not None:
-            rank = {n: i for i, n in enumerate(pins.orphanFlush)}
+
+        def flush_orphans(floor, ctx):
+            units = []
+            for s0 in stacked:
+                if s0 in autocall_names:
+                    continue               # placed by the autocall code wave
+                if s0 in out.addresses or s0 in all_inserts:
+                    continue               # placed (or will be) by the deck
+                sds = self.module_csects.get(s0)
+                if not sds:
+                    continue               # module not in this link
+                unit = [(n, sz) for n, sz in sds
+                        if not n.startswith(("#", "@"))
+                        and n not in out.addresses]
+                if unit:
+                    units.append((s0, unit))
+            if not units:
+                return
+            if floor is None:
+                # no overlay placed a #C, so there is no flush point: the
+                # units fall through to the linker's sector-rule auto-place
+                out.log.append(
+                    "orphan flush: no #C overlay floor; "
+                    + ", ".join(s0 for s0, _ in units)
+                    + " left to linker auto-placement")
+                return
+            order = (mc.orphanFlush if mc is not None and mc.orphanFlush
+                     else pins.orphanFlush)
+            rank = {n: i for i, n in enumerate(order)}
             units.sort(key=lambda u: (rank.get(u[0], len(rank)),
                                       stacked.index(u[0])))
-            ovl, ph = orphan_ctx
-            a = orphan_floor
+            ovl, ph = ctx
+            a = floor
             for s0, unit in units:
                 # within a unit: the $0 program csect, then its A1..A9/B0..
                 # block csects
@@ -931,7 +994,22 @@ class LayoutEngine:
                                    f"after {ovl}")
                     a += sz
 
-        # ---- MC AUTOCALL STREAMS (per-mc streams pins) --------------------
+        # In a wave autocall job the orphan program code is part of the same
+        # automatic-library-call surface as the waves, so it continues the
+        # code run rather than the last #C overlay -- deferred to just after
+        # that run below.  Stream jobs place the whole surface themselves and
+        # keep the legacy floor.
+        wave_job = bool(autocall_units_) and not stream_job and mc is not None
+        if autocall_units_ and not stream_job and mc is None:
+            # No mc section means no pinned order and the legacy bank floor:
+            # placement is likely wrong, so say so.
+            out.log.append(
+                "autocall job matched no mc pins section (no deck INSERT of "
+                "any anchor): generic wave placement + legacy orphan floor")
+        if not wave_job:
+            flush_orphans(orphan_floor, orphan_ctx)
+
+        # ---- MC AUTOCALL STREAMS  --------------------
         # The job's autocall surface (autocalled members + STACK-orphan
         # program code) places as ONE monotonic stream per bank: each csect
         # first-fits at/after the previous placement, skipping to the next
@@ -956,10 +1034,18 @@ class LayoutEngine:
                     # deck fill point (after the deck content + its closing
                     # checksum) -- it does NOT backfill the deck's interior
                     # gaps.  Only bank 0's data stream backfills.
-                    floor = max((a + (sizeof.get(n) or 0)
-                                 for n, a in out.addresses.items()
-                                 if a // BANK_SIZE_HW == bank),
-                                default=bank * BANK_SIZE_HW)
+                    #
+                    # The fill point is inferred from the job's own content,
+                    # which is wrong when the deck also places a bank-END
+                    # marker at the top of the bank: the inferred floor lands
+                    # above every gap.  A pinned floor wins where the section
+                    # supplies one.
+                    floor = mc.floors.get(bank)
+                    if floor is None:
+                        floor = max((a + (sizeof.get(n) or 0)
+                                     for n, a in out.addresses.items()
+                                     if a // BANK_SIZE_HW == bank),
+                                    default=bank * BANK_SIZE_HW)
                     while gi < len(gaps) and gaps[gi][1] <= floor:
                         gi += 1
                     if gi < len(gaps):
@@ -980,6 +1066,19 @@ class LayoutEngine:
                     # this job's own copies even when a base MAP defines the
                     # name elsewhere.
                     if n in out.addresses or n in all_inserts:
+                        continue
+                    # ...but a stream member this job does not have a copy of 
+                    # is a different animal: it is defined only by a MAP'd base
+                    # module, the LE resolved it there and allocated nothing.
+                    # What doesn't get discarded is the `occupied` interval
+                    # so placing it burns bank space that the deck's blocks
+                    # and the rest of the stream then flow around.
+                    if self.local_defs is not None \
+                            and n not in self.local_defs \
+                            and n in self.existing:
+                        out.log.append(f"autocall-stream {n}: base-only "
+                                       f"(no copy in this link); resolved to "
+                                       f"{self.existing[n]:#07x}, not placed")
                         continue
                     sz = sizeof.get(n)
                     if sz is None:
@@ -1010,6 +1109,19 @@ class LayoutEngine:
                     out.log.append(f"autocall-stream {n} @ {a:#07x} ({sz} hw) "
                                    f"bank {bank}")
                     pos = a + sz
+
+        # Stream leftovers: autocall data-zone csects not in a stream fall
+        # through to the linker's append-at-top auto-placement, but we 
+        # need to backfill them.
+        if stream_job:
+            leftovers = [n for n in autocall_names
+                         if n not in out.addresses and n not in all_inserts
+                         and n.startswith(("#D", "#P", "#X", "#E"))]
+            backfill_leftovers(leftovers, sizeof)
+            rest = [n for n in autocall_names
+                    if n not in out.addresses and n not in all_inserts
+                    and not n.startswith(("#Z", "#Q"))]
+            backfill_leftovers(rest, sizeof, banks=range(8))
 
         # ---- AUTOCALL WAVES (preblock/wave1/compool/code pins) ------------
         if autocall_units_ and not stream_job:
@@ -1055,6 +1167,7 @@ class LayoutEngine:
                 a += 2                                   # that block's checksum
                 for n in mcp.preblock:
                     a = put(n, a, "preblock")
+                rollin_ends.add(a)
 
             # BANK-0 TAIL: one contiguous flow at the fill point after the
             # deck's trailing @-stacks.  wave1: PDE+stack of autocalled
@@ -1097,12 +1210,17 @@ class LayoutEngine:
             tail = ck2 + 2
             pools = [n for s in stems_in_order for n, _ in unit_of[s]
                      if n.startswith("#P") and n not in out.addresses]
-            for n in pin_order(mcp.compoolOrder, pools):
+            # Only pinned pools ride the wave3 tail run; an unpinned
+            # autocalled pool is backfilled.
+            pinned = [n for n in pools if n in mcp.compoolOrder]
+            for n in pin_order(mcp.compoolOrder, pinned):
                 tail = put(n, tail, "wave3")
             ck = align_word(tail)
             self.occupied.append((ck, ck + 2))           # tail block checksum
+            backfill_leftovers(
+                [n for n in pools if n not in mcp.compoolOrder], sizeof)
 
-            # CODE RUN: after the MAP-imported base's content checksum in
+            # code run: after the MAP-imported base's content checksum in
             # the pinned codeBank (mappedIntervals already carry the +2 hw).
             lob = mcp.codeBank * BANK_SIZE_HW
             code = max((hi for lo, hi in initial_occupied
@@ -1115,6 +1233,11 @@ class LayoutEngine:
                     if n.startswith(("$0", "#C")) or (n[:1] in "AB"
                                                       and len(n) == 8):
                         code = put(n, code, "code")
+
+            # the orphan program code continues the code run as one block:
+            # word-aligned, with no checksum slot between 
+            if wave_job:
+                flush_orphans(align_word(code), (cur_overlay, cur_phase))
 
         for n in unmarked:                 # trailing block with no mark card
             out.protected[n] = default_protected(n)

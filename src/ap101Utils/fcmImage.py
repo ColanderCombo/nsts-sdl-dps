@@ -29,7 +29,9 @@ from pathlib import Path
 
 from .libModule import LibModule
 
-BANK_HW = 0x8000              # a checksum slot never crosses a bank boundary
+BANK_HW = 0x8000
+
+CON80_DECK = Path(__file__).resolve().parents[2] / "code/OI340700/CON80"
 
 
 @dataclass(eq=False)          # identity semantics: csects go in sets below
@@ -39,8 +41,10 @@ class FcmCsect:
     size: int           # hw count
     phase: str          # winning (composing) phase, e.g. 'PHASE08'
     module: str | None = None
+    origName: str | None = None  # pre-`CHANGE` csect name (see below)
     imported: bool = False      # address-only marker, no text supplied
     reserved: bool = False      # RESERVE-carded: zeroed MMB block, no text
+    residue: bool = False       # present but not in this config's MCF
 
     @property
     def end(self) -> int:       # exclusive
@@ -84,9 +88,13 @@ class FcmImage:
         # lookup structures
         self._segs: list[tuple[int, int, FcmCsect]] = []
         self._seg_starts: list[int] = []
+        self._segs_listed: list[tuple[int, int, FcmCsect]] | None = None
+        self._seg_starts_listed: list[int] = []
         self._sym_by_sect: dict[str, tuple[list[int], list[str]]] = {}
-        self._ipl_cut = None                 # (phase, [(startHW, endHW)])
+        self._cuts = {}                # {phaseName: [(startHW, endHW)]}
         self._ops0: dict | None = None       # compose-time display staging
+        self.stamped_checksums: list[int] = []   # --stamp-checksums slots
+        self._phase_syms: dict[str, dict] = {}
 
     #
     # loading
@@ -111,17 +119,29 @@ class FcmImage:
         repro = manifest.get("repro", {})
         phase_nums = repro.get("phases", [])
         self.phases = [f"PHASE{n:02d}" for n in phase_nums]
-        # IPL GNC-decouple cut: the named phase was staged only inside
-        # these ranges; its sections and extents elsewhere load later, at
-        # the OPS transition, so they are not in this image
-        cut = repro.get("iplCut")
-        self._ipl_cut = ((f"PHASE{cut['phase']:02d}",
-                          [tuple(r) for r in cut["rangesHW"]])
-                         if cut else None)
+        # Region-gated staging cuts: each named phase was staged only
+        # inside its ranges; its sections and extents elsewhere are not in
+        # this image (SSW's IPL GNC-decouple cut of the MFB; the OPS
+        # configs' PHASE02 config-map cut).  Older manifests carry only
+        # the single legacy "iplCut" key.
+        cutList = (repro.get("regionCuts")
+                   or ([repro["iplCut"]] if repro.get("iplCut") else []))
+        self._cuts = {f"PHASE{c['phase']:02d}":
+                      [tuple(r) for r in c["rangesHW"]] for c in cutList}
         # OPS0 display roll-in: sections synthesized at compose time, so
         # they appear only in the composed manifest
         self._ops0 = repro.get("ops0Display")
+        # The MCF phase subset ({2,13} + the config's GRT row).  A phase
+        # outside it is physically in memory but not part of THIS config's
+        # load module, so neither its csects (mmu2fcm marks those
+        # `residue`) nor its load blocks' checksum slots are listed.
+        mcf = repro.get("mcfPhases")
+        self._mcf_phases = None if mcf is None else set(mcf)
+        # slots mmu2fcm --stamp-checksums wrote (MMB tape content, never
+        # load-module text): the listing stars these rows like the DASS
+        self.stamped_checksums = manifest.get("stampedChecksums") or []
         phase_syms = self._load_phase_syms(mmu_root)
+        self._phase_syms = dict(phase_syms)
 
         self._build_csects(phase_syms)
         self._build_occupancy(mmu_root, phase_nums)
@@ -219,26 +239,31 @@ class FcmImage:
         # composed manifest's entries.
         mres = {s["name"] for s in manifest.get("sections", [])
                 if s.get("reserved")}
+        mresidue = {s["name"] for s in manifest.get("sections", [])
+                    if s.get("residue")}
         for c in self.csects:
             if c.name in mres:
                 c.reserved = True
+            if c.name in mresidue:
+                c.residue = True
         self.csects.sort(key=lambda c: (c.start, c.name))
         self.shadowed.sort(key=lambda c: (c.start, c.name))
 
     def _staged(self, pname: str, e: dict) -> bool:
-        """False for an IPL-cut phase's own section lying wholly outside
+        """False for a region-cut phase's own section lying wholly outside
         its staged ranges.  Imported markers describe another phase's
         space, so they are always staged."""
-        if self._ipl_cut is None or pname != self._ipl_cut[0] \
-                or _imported(e):
+        ranges = self._cuts.get(pname)
+        if ranges is None or _imported(e):
             return True
         a, n = e["address"], max(e.get("size", 1), 1)
         return any(a < end and a + n > start
-                   for start, end in self._ipl_cut[1])
+                   for start, end in ranges)
 
     def _csect(self, e: dict, phase: str) -> FcmCsect:
         return FcmCsect(name=e["name"], start=e["address"], size=e["size"],
                         phase=phase, module=e.get("module"),
+                        origName=e.get("origName"),
                         imported=_imported(e))
 
     #
@@ -250,29 +275,32 @@ class FcmImage:
         Without the .lib files, falls back to the union of csect ranges.
         """
         marked = bytearray(self.mem_hw)
-        # The boot phase is excluded from slot suppression: its residue is
-        # dead memory that later tape blocks stamp their slots over, and
-        # its own block tails sit in unlisted holes.
-        nonboot = bytearray(self.mem_hw)
+
+        owner = bytearray(self.mem_hw)              # last writer of each hw
         boot = f"PHASE{phase_nums[0]:02d}" if phase_nums else None
-        extent_ends: list[int] = []
+        staged_ord = len(phase_nums) + 1            # compose-time staging is last
+        extent_ends: list[tuple[int, int]] = []     # (load order, end hw)
+        lb_slots: list[tuple[int, int]] = []        # (load order, slot hw)
         derived = False
 
         def claim(hw0: int, nhw: int, slot: bool = True):
             marked[hw0:hw0 + nhw] = b"\x01" * nhw
-            nonboot[hw0:hw0 + nhw] = b"\x01" * nhw
+            owner[hw0:hw0 + nhw] = bytes([staged_ord]) * nhw
             if slot:
-                extent_ends.append(hw0 + nhw)
+                extent_ends.append((staged_ord, hw0 + nhw))
 
         if mmu_root is not None and phase_nums:
-            for n in phase_nums:
+            lb_src = self._phase_source()
+            for order, n in enumerate(phase_nums, start=1):
                 name = f"PHASE{n:02d}"
                 libp = mmu_root / f"{name}.lib"
                 if not libp.exists():
                     self.warnings.append(f"{libp} missing -- occupancy "
                                          f"incomplete for {name}")
                     continue
-                for x in LibModule.read(libp).extents:
+                lib = LibModule.read(libp)
+                staged = []
+                for x in lib.extents:
                     if self._behind_ipl_cut(name, x):
                         continue
                     if (x.address % 2
@@ -281,12 +309,27 @@ class FcmImage:
                             f"{name}: extent 0x{x.address:06X} len "
                             f"{len(x.data)} outside image or unaligned")
                         continue
+                    staged.append(x)
                     hw0, nhw = x.address // 2, len(x.data) // 2
-                    if name == boot:
-                        marked[hw0:hw0 + nhw] = b"\x01" * nhw
-                    else:
-                        claim(hw0, nhw)
+                    marked[hw0:hw0 + nhw] = b"\x01" * nhw
+                    if name != boot:
+                        owner[hw0:hw0 + nhw] = bytes([order]) * nhw
                 derived = True
+                if name == boot:
+                    continue          # boot-block tails sit in unlisted holes
+                slots = (self._lb_slots(mmu_root, n, lib, staged, lb_src)
+                         if lb_src is not None and n in lb_src.assigned
+                         else None)
+                if slots is not None:
+                    lb_slots += [(order, a) for a in slots]
+                else:
+                    extent_ends += [(order, (x.address + len(x.data)) // 2)
+                                    for x in staged]
+
+        # Load orders whose phase this configuration's MCF lists:
+        listed_ord = {staged_ord} | {
+            order for order, n in enumerate(phase_nums, start=1)
+            if self._mcf_phases is None or n in self._mcf_phases}
 
         if derived:
             # OPS0 display roll-in extents are staged at compose time but
@@ -299,7 +342,8 @@ class FcmImage:
             for s in self.manifest.get("sections", []):
                 if s.get("reserved"):
                     claim(s["address"], s["size"])
-            self.checksum_slots = self._checksum_slots(extent_ends, nonboot)
+            self.checksum_slots = self._checksum_slots(extent_ends, owner,
+                                                       lb_slots, listed_ord)
         else:
             for c in self.csects:
                 if c.imported:
@@ -310,66 +354,128 @@ class FcmImage:
         self.occupied = {i for i, m in enumerate(marked) if m}
 
     def _behind_ipl_cut(self, phase: str, extent) -> bool:
-        """True when this phase was IPL-cut and the extent lies wholly
+        """True when this phase was region-cut and the extent lies wholly
         outside the staged ranges, so the image never received it."""
-        if self._ipl_cut is None or phase != self._ipl_cut[0]:
+        ranges = self._cuts.get(phase)
+        if ranges is None:
             return False
         lo, hi = extent.address, extent.address + len(extent.data)
         return not any(lo < 2 * end and hi > 2 * start
-                       for start, end in self._ipl_cut[1])
+                       for start, end in ranges)
 
-    def _checksum_slots(self, extent_ends, nonboot) -> list[int]:
+    def _phase_source(self):
+        from . import mmbstamp
+        try:
+            return mmbstamp.load_phase_source(CON80_DECK)
+        except mmbstamp.StampError as e:
+            self.warnings.append(
+                f"{e} -- checksum slots degrade to block-per-extent "
+                f"(MMUSYS phases coalesce extents into load-block groups)")
+            return None
+
+    def _lb_slots(self, mmu_root: Path, n: int, lib, staged,
+                  src) -> list[int] | None:
+        """Checksum-slot addresses of PHASEnn's MMB load blocks (each LB's
+        last fullword; mmbstamp.derive_load_blocks is the single definition
+        of the partition).."""
+        from . import mmbstamp
+        name = f"PHASE{n:02d}"
+        sym = self._phase_syms.get(name)
+        parent_lib = mmu_root / f"PHASE{mmbstamp.POOL_PARENT.get(n, 2):02d}.lib"
+        if sym is None or not parent_lib.exists():
+            self.warnings.append(
+                f"{name}: {'sym.json' if sym is None else parent_lib} "
+                f"unavailable -- checksum slots degrade to block-per-extent")
+            return None
+        root = f"OFTMP@{n}"
+        look = mmbstamp.protection_lookup(
+            sym, mmbstamp.deck_protection(src.deck, root))
+        fill = mmbstamp.fill_rule(sym, src.deck, root,
+                                  mmbstamp.map_extents(mmu_root, src.deck,
+                                                       root))
+        lib.extents = staged        # region-cut extents never reach the MMB
+        lbs = mmbstamp.derive_load_blocks(
+            lib, mmbstamp.pool_next_hw(LibModule.read(parent_lib)), look,
+            himem=n in src.ipl, fill=fill, mc=n in src.mc)
+        return [lb.start + lb.length - 2 for lb in lbs]
+
+    def _checksum_slots(self, extent_ends, owner,
+                        lb_slots=(), listed_ord=None) -> list[int]:
         """Each tape block is followed by a fullword-aligned 2-hw checksum
         slot that never crosses a bank boundary.  A slot survives in memory
-        where no later block's text claims it, and shows up in the listing
+        where no LATER block's text claims it, and shows up in the listing
         as a '--------' row."""
         slots = set()
-        for end in extent_ends:
+        for order, end in extent_ends:
+            if listed_ord is not None and order not in listed_ord:
+                continue
             start = (end + 1) // 2 * 2
             cap = ((end - 1) // BANK_HW + 1) * BANK_HW
             if start + 2 <= min(cap, self.mem_hw) \
-                    and not nonboot[start] and not nonboot[start + 1]:
+                    and owner[start] < order and owner[start + 1] < order:
+                slots.add(start)
+        for order, start in lb_slots:
+            if listed_ord is not None and order not in listed_ord:
+                continue
+            if start + 2 <= self.mem_hw \
+                    and owner[start] < order and owner[start + 1] < order:
                 slots.add(start)
         return sorted(slots)
 
     #
     # address lookup
     #
-    def _build_segments(self):
+    def _build_segments(self, listed: bool = False):
         """Sweep the csects into disjoint segments so locate() is one
         bisect.  Overlaps resolve by overlay order: the latest-loaded phase
-        wins, then the smallest (most specific) csect."""
+        wins, then the smallest (most specific) csect.
+
+        ``listed=True`` builds the same table over this configuration's own
+        load module only."""
         order = {name: i for i, name in enumerate(self.phases, start=1)}
+        staged = len(order) + 1
         events: dict[int, list[tuple[bool, FcmCsect]]] = {}
         for c in self.csects:
+            if listed and c.residue:
+                continue
             a, b = max(c.start, 0), min(c.end, self.mem_hw)
             if c.size <= 0 or a >= b:
                 continue
             events.setdefault(a, []).append((True, c))
             events.setdefault(b, []).append((False, c))
         active: set[FcmCsect] = set()
-        warned_pairs: set[tuple[str, str]] = set()
-        self._segs = []
+        # the listed sweep re-derives what the full one already warned about
+        warned_pairs: set[tuple[str, str]] = set() if not listed else None
+        segs: list[tuple[int, int, FcmCsect]] = []
         prev = None
         for pos in sorted(events):
             if prev is not None and active and pos > prev:
-                self._segs.append(
-                    (prev, pos, self._winner(active, order, warned_pairs)))
+                segs.append(
+                    (prev, pos,
+                     self._winner(active, order, staged, warned_pairs)))
             for starting, c in events[pos]:
                 (active.add if starting else active.discard)(c)
             prev = pos
-        self._seg_starts = [s for s, _, _ in self._segs]
+        if listed:
+            self._segs_listed = segs
+            self._seg_starts_listed = [s for s, _, _ in segs]
+        else:
+            self._segs = segs
+            self._seg_starts = [s for s, _, _ in segs]
 
-    def _winner(self, active, order, warned_pairs) -> FcmCsect:
+    def _winner(self, active, order, staged, warned_pairs) -> FcmCsect:
         """The csect that owns a segment; same-phase overlap is outside
         known overlay behavior, so it warns once per pair."""
         if len(active) == 1:
             return next(iter(active))
-        cs = sorted(active, key=lambda c: (-order.get(c.phase, 0),
+        cs = sorted(active, key=lambda c: (-order.get(c.phase, staged),
                                            c.size, c.name))
         win = cs[0]
         for other in cs[1:]:
-            if order.get(other.phase, 0) != order.get(win.phase, 0):
+            if order.get(other.phase, staged) \
+                    != order.get(win.phase, staged):
+                continue
+            if warned_pairs is None:
                 continue
             pair = tuple(sorted((win.name, other.name)))
             if pair not in warned_pairs:
@@ -395,13 +501,22 @@ class FcmImage:
             self._sym_by_sect[sect] = ([a for a, _ in lst],
                                        [n for _, n in lst])
 
-    def locate(self, hw: int) -> FcmLocation:
+    def locate(self, hw: int, listed: bool = False) -> FcmLocation:
         """Annotate halfword address ``hw``; valid for any address in
-        ``words``.  A csect of None means no csect claims it (fill)."""
+        ``words``.  A csect of None means no csect claims it (fill).
+
+        ``listed=True`` restricts the answer to the csects that are part of
+        this configuration's load module.
+        """
+        segs, starts = ((self._segs_listed, self._seg_starts_listed)
+                        if listed else (self._segs, self._seg_starts))
+        if listed and segs is None:
+            self._build_segments(listed=True)
+            segs, starts = self._segs_listed, self._seg_starts_listed
         c = None
-        i = bisect_right(self._seg_starts, hw) - 1
+        i = bisect_right(starts, hw) - 1
         if i >= 0:
-            a, b, cand = self._segs[i]
+            a, b, cand = segs[i]
             if a <= hw < b:
                 c = cand
         if c is None:

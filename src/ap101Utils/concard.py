@@ -497,6 +497,37 @@ def has_nocall(deck: ConcardDeck, root: str = "OFTMP") -> bool:
     return any(d.verb == "NOCALLER" for _, d in expand_directives(deck, root))
 
 
+def library_no_call(deck: ConcardDeck,
+                    root: str = "OFTMP") -> tuple[set[str], set[str]]:
+    """The BLANK-ddname LIBRARY cards of `root`'s expansion, as
+    (restricted-no-call SYMBOLS, never-call MEMBERS).
+
+    The linkage editor's LIBRARY statement has three forms:
+
+      * `LIBRARY ddname(member,...)`  -- an additional call library.  Not
+        returned here; `_library_ref` parses it for the dependency graph.
+      * `LIBRARY *(er,...)`  -- RESTRICTED NO-CALL.  The named ERs are 
+        never resolved by automatic library call and no diagnostic is 
+        printed: the load module ships with the assembled text field as 
+        the compiler/assembler left it and no RLD fixup applied. 
+      * `LIBRARY  (member,...)`  -- blank ddname, no star: NEVER-CALL.  The
+        named library members are never fetched by automatic library call
+    """
+    restricted: set[str] = set()
+    never: set[str] = set()
+    for _, d in expand_directives(deck, root):
+        if d.verb != "LIBRARY":
+            continue
+        operand = (d.operand or "").strip()
+        star = operand.startswith("*")
+        body = operand[1:].lstrip() if star else operand
+        if not body.startswith("("):
+            continue                      # ddname(member,...): a real library
+        names = {s.strip() for s in body[1:].split(")")[0].split(",")}
+        (restricted if star else never).update(n for n in names if n)
+    return restricted, never
+
+
 def layout_program(deck: ConcardDeck, root: str = "OFTMP") -> list[LayoutOp]:
     ops = []
     for card, d in expand_directives(deck, root):

@@ -35,10 +35,10 @@ _MCS: dict[int, tuple[str, tuple[int, ...], str]] = {
     2: ("G2",  (3, 5),     "GNC OPS2"),
     3: ("G3",  (3, 6),     "GNC OPS3"),
     4: ("S2",  (14, 15),   "SM OPS2"),
-    5: ("S4",  (14, 16),   "SM OPS4 (mission-enabled)"),
+    5: ("S4",  (14, 16),   "SM OPS4"),
     6: ("P9",  (9, 12),    "PL OPS9"),
     8: ("G8",  (3, 7),     "GNC OPS8"),
-    9: ("G9",  (3, 8, 18), "GNC OPS9; PH=8 carries no MC= card"),
+    9: ("G9",  (3, 8, 18), "GNC OPS9"),
 }
 
 # Every config name, IPL set first, then by MC number.
@@ -56,6 +56,13 @@ class McConfig:
     phases: tuple[int, ...]
     mc: int | None = None       # flight MC number; None for the IPL set
     note: str = ""
+    row: tuple[int, ...] = ()   # GRT row (MFB + PGMs); () for the IPL set
+
+    @property
+    def mcf_phases(self) -> frozenset[int]:
+        if self.row:
+            return frozenset({2, 13} | set(self.row))
+        return frozenset(self.phases[1:])
 
     def describe(self) -> str:
         mc = f"MC{self.mc}" if self.mc is not None else "IPL"
@@ -154,7 +161,7 @@ def load_configs(deck) -> dict[str, McConfig]:
         # rows re-list 3); composition is idempotent, so list it once.
         configs[name] = McConfig(
             name, ipl + tuple(p for p in row if p not in ipl),
-            mc=mc, note=note)
+            mc=mc, note=note, row=row)
     return configs
 
 

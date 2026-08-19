@@ -23,7 +23,8 @@ def sector_decode(hw_value: int, sector: int = 0) -> int:
     return hw_value
 
 
-# RLD flag-type bytes from OBJECTGE.xpl  
+# RLD flag-type bytes from OBJECTGE.xpl
+
 RLD_YCON      = 0x00     # halfword address constant
 RLD_ZCON_CODE = 0x04     # ZCON code address (2-byte, no sign bit -- 0x84 negates)
 RLD_ZCON_ADDR = 0x10     # ZCON address
@@ -31,6 +32,13 @@ RLD_ACON      = 0x1C     # 4-byte (fullword) address constant
 RLD_BSR_ONLY  = 0x20     # ZCON: patch BSR field only
 RLD_DSR_ONLY  = 0x40     # ZCON: patch DSR field only
 RLD_ZCON_DATA = 0x50     # ZCON data address
+RLD_SIGN      = 0x80     # bit 7 (V): interpret the text as a negative disp.
+
+# The AP-101S main store is 256K halfwords, so no address constant the linkage
+# editor resolves -- YCON, ZCON or fullword ACON -- carries more than an 18-bit
+# halfword address:
+ADDRESS_FIELD_BITS = 18
+ADDRESS_FIELD_MASK = (1 << ADDRESS_FIELD_BITS) - 1
 
 _RLD_FLAG_TYPES: dict[int, str] = {
     RLD_YCON: "YCON",
@@ -50,9 +58,9 @@ _FLAG_FOR_TYPE: dict[str, int] = {
     'Y': RLD_YCON,
     'A': RLD_ACON,
     'Z': RLD_ZCON_CODE,
-    # A Z-con whose relocated address sits in the DATA subfield
+    # A Z-con whose relocated address sits in the data subfield
     # ('Z(,sym,flags)' -- code subfield empty) relocates as ZCON/data, so
-    # the linker writes HW0 AND patches the DSR field (flight FCMNINIT
+    # the linker writes HW0 and patches the DSR field (flight FCMNINIT
     # '=Z(,FPMXQETB+2,0)' links 8B6C 0001: target 0x18B6C, sector 1 -> DSR=1;
     # punching ZCON/code left HW1's DSR unpatched).
     'ZD': RLD_ZCON_DATA,
@@ -60,6 +68,10 @@ _FLAG_FOR_TYPE: dict[str, int] = {
     # DSR-only RLD -- no HW0 write, the linker just patches HW1's DSR
     # with the data target's sector.
     'ZS': RLD_DSR_ONLY,
+    # An ordinary adcon carrying a negative addend.  The object text holds the
+    # addend's magnitude and the RLD's V bit tells the linkage editor to
+    # subtract it:
+    'A-': RLD_ACON | RLD_SIGN,
 }
 
 
@@ -120,6 +132,15 @@ class AddrCon:
     def mask(self) -> int:
         return (1 << (self.length * 8)) - 1
 
+    @property
+    def field_mask(self) -> int:
+        """The bits of the relocated storage this constant actually owns.
+
+        A 2-byte YCON/ZCON owns its whole halfword.  A fullword ACON owns only
+        the 18-bit address field: the remaining 14 bits may belong to an IOP 
+        opcode sharing the word."""
+        return ADDRESS_FIELD_MASK if self.length == 4 else self.mask
+
     def encode(self, target: Addr) -> int:
         """Encode a target address to the value written by this relocation.
 		ZCON *always* sets 0x8000 (even if target in sector 0)
@@ -140,17 +161,22 @@ class AddrCon:
                    + (S==0 ? +value : -value)
         """
         value = self.encode(target)
-        signed_existing = -existing if self.sign else existing
+        field = self.field_mask
+        carried = existing & self.mask & ~field
+        current = existing & field
+        signed_existing = -current if self.sign else current
         signed_value = -value if self.direction else value
-        return (signed_existing + signed_value) & self.mask
+        return carried | ((signed_existing + signed_value) & field)
 
     def reverse(self, existing: int, result: int, sector: int = 0) -> int:
         """Reverse this relocation: given existing and result, recover
         the target halfword address.  For sector 1+ ZCONs, pass the
         sector register value to fully decode."""
-        signed_existing = -existing if self.sign else existing
-        signed_value = (result - signed_existing) & self.mask
-        target_raw = (-signed_value & self.mask) if self.direction else signed_value
+        field = self.field_mask
+        current = existing & field
+        signed_existing = -current if self.sign else current
+        signed_value = ((result & field) - signed_existing) & field
+        target_raw = (-signed_value & field) if self.direction else signed_value
         return sector_decode(target_raw, sector) if self.length == 2 else target_raw
 
     def __repr__(self) -> str:

@@ -95,6 +95,9 @@ _F2_CONSTANT = 0x20
 _F2_REMOTE = 0x01
 _F3_INITIAL = 0x40
 _F3_RIGID = 0x20
+# PASS3 BUILDSD2 sets this (with CELL_TYPE=3, the stack-cell form of the
+# symbol data cell) when field-10 is a stack-frame offset, not a #D/#P one
+_F3_STACK_CELL = 0x04
 
 
 def _be16(mv, off):
@@ -135,7 +138,8 @@ class SdfSymbol:
     remote: bool = False
     rigid: bool = False
     dense: bool = False
-    xrefs: tuple = ()              # citing statement numbers (XREFDATA)
+    stack_cell: bool = False       # field-10 address is a frame offset
+    xrefs: tuple = ()              # (usage flags, statement) pairs (XREFDATA)
     # internal link fields (symbol index numbers; 0 = none)
     _eldest: int = field(default=0, repr=False)
     _brother: int = field(default=0, repr=False)
@@ -272,6 +276,7 @@ class SdfUnit:
             initial=bool(r.flag3 & _F3_INITIAL),
             remote=bool(r.flag2 & _F2_REMOTE),
             rigid=bool(r.flag3 & _F3_RIGID),
+            stack_cell=bool(r.flag3 & _F3_STACK_CELL),
             dense=bool(r.flag2 & _F2_DENSE),
             _eldest=0 if eldest == 0xFFFF else eldest,
             _brother=0 if brother == 0xFFFF else brother,
@@ -282,9 +287,11 @@ class SdfUnit:
     def _read_xrefs(self, mv, xoff):
         """XREFDATA walk (DUMPSDF PRINT_XREF_DATA): at SDC byte ``xoff``,
         halfword 0 = entry count, then halfword entries of
-        (usage flags << 13) | statement number.  A 0xFFFF entry chains to
-        an extension cell: the next fullword-aligned word is its vptr and
-        entries continue at that cell's offset 0."""
+        (usage flags << 13) | statement number, returned as (flags,
+        statement) pairs -- flags 4 = the statement assigns the symbol,
+        1 = reads it, 2 = passes it, 0 = the DECLARE.  A 0xFFFF entry
+        chains to an extension cell: the next fullword-aligned word is
+        its vptr and entries continue at that cell's offset 0."""
         out = []
         k = xoff // 2
         cnt = _be16(mv, 2 * k)
@@ -293,7 +300,7 @@ class SdfUnit:
         while j < cnt and len(out) < 8192:
             item = _be16(mv, 2 * k)
             if item != 0xFFFF:
-                out.append(item & 0x1FFF)
+                out.append((item >> 13, item & 0x1FFF))
                 j += 1
                 k += 1
             else:

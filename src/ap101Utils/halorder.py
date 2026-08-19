@@ -71,14 +71,8 @@ _CARDTYPE = {
     "SRESTO":   "FCRM",
     "CS2INI":   "ACFCRC",
     "CS4INI":   "ACFCRC",
-    # Flight OI30 compiles CPTOSV/CPUSLS per-OPS (SM preprocessor
-    # configs; the listing is the SM2O form, "ACBCFCRC").  We build the
-    # both-OPS configuration instead (B->D activates the CS4_PDT include;
-    # CS2/CS4 declare sets are disjoint) so one object serves the SM2 and
-    # SM4 phase links -- a deliberate config choice, revisit for per-OPS
-    # fidelity.
-    "CPTOSV":   "ACBDFCRC",
-    "CPUSLS":   "ACBDFCRC",
+    "CPTOSV":   "ACBCFCRC",
+    "CPUSLS":   "ACBCFCRC",
     "GKDASC":   "AMOCNCRMFDGCHC",
     "GKRORB":   "ACOMNCRCFCGDHC",
     "GKGMNV":   "ACOCNMRMFCGCHD",
@@ -190,6 +184,9 @@ def parse_hal(path: Path) -> tuple[str | None, list[str]]:
     return name, deps
 
 
+_TREE_UNITS: dict = {}
+
+
 def tree_units(dirs) -> dict:
     """Index every HAL unit with a parseable block header in the source dirs.
 
@@ -197,6 +194,9 @@ def tree_units(dirs) -> dict:
     `dirs` (directory paths, searched in order), so a D INCLUDE TEMPLATE
     name can be resolved.
     """
+    key = tuple(str(d) for d in dirs)
+    if key in _TREE_UNITS:
+        return _TREE_UNITS[key]
     idx: dict = {}
     for sd in dirs:
         sd = Path(sd)
@@ -207,6 +207,7 @@ def tree_units(dirs) -> dict:
                 full, kind = unit_header(q)
                 if full:
                     idx.setdefault(descore(full), (q, full, kind))
+    _TREE_UNITS[key] = idx
     return idx
 
 
@@ -283,10 +284,11 @@ def template_closure(worklist, tree, seed_names=()) -> tuple[list, set]:
     return extra, seed
 
 
-def topo_order(paths):
-    """Order HAL source files so each unit's template producers precede it.
+def _dep_graph(paths):
+    """(unit name per path, internal dependency names per path).
 
-    Edges into PROGRAM producers are ignored: a program template is
+    A dependency is internal when another file in `paths` produces it.
+    Edges into PROGRAM producers are dropped: a program template is
     body-independent and stub-seeded before any real compile (see the
     seeding step in con80build/con80cmake), so a program's template never
     gates its dependents.  Without this the OI340600 display cluster's
@@ -299,12 +301,43 @@ def topo_order(paths):
     producer = {name: p for p, (name, _) in parsed.items() if name}
     seeded = {name for name, p in producer.items()
               if unit_header(p)[1] == "PROGRAM"}
-    # internal deps = deps that some file in the set produces
     internal = {p: {d for d in deps if d in producer and producer[d] is not p
                     and d not in seeded}
                 for p, (_, deps) in parsed.items()}
+    return {p: n for p, (n, _) in parsed.items()}, internal
 
-    done: set = set()
+
+def topo_levels(paths):
+    """`topo_order`'s dependency levels: a list of lists, where every unit in
+    a level depends only on units in earlier levels. Units within one level are
+    independent, so they may be compiled concurrently.
+    """
+    name, internal = _dep_graph(paths)
+    levels: list[list] = []
+    done_names: set = set()
+    remaining = list(paths)
+    while remaining:
+        level = [p for p in remaining if internal[p] <= done_names]
+        if not level:
+            break
+        levels.append(level)
+        done_names |= {name[p] for p in level}
+        level_set = set(level)
+        remaining = [p for p in remaining if p not in level_set]
+    levels.extend([p] for p in remaining)
+    return levels
+
+
+def topo_order(paths):
+    """Order HAL source files so each unit's template producers precede it
+    (see `_dep_graph` for which edges count).
+
+    Unlike `topo_levels` a unit satisfied earlier in the same pass counts,
+    so this settles in fewer passes and its order is not the levels
+    flattened.
+    """
+    name, internal = _dep_graph(paths)
+    done_names: set = set()
     order: list = []
     remaining = list(paths)
     progress = True
@@ -312,8 +345,10 @@ def topo_order(paths):
         progress = False
         still: list = []
         for p in remaining:
-            if internal[p] <= {parsed[q][0] for q in done}:
-                order.append(p); done.add(p); progress = True
+            if internal[p] <= done_names:
+                order.append(p)
+                done_names.add(name[p])
+                progress = True
             else:
                 still.append(p)
         remaining = still

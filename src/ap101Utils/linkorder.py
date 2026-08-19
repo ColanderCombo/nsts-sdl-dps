@@ -24,12 +24,15 @@ Per-mc keys:
   streams       {bank: [name...]}   per-bank autocall placement streams
                 ("+2" pins a 2-hw checksum slot); when present, stream
                 placement is used instead of the wave placement
+  floors        {bank: addr}   where a bank's stream starts.
   pool          [name...]  Z1-pool order for the job's autocalled ZCONs
   poolAfter     name       pool member that block packs after
   preblock      [name...]  autocall pre-block csects
   preblockAfter name       block the pre-block rides after
   wave1Order    [stem...]  bank-0 tail module order
   compoolOrder  [name...]  #P compool wave order
+  orphanFlush   [name...]  this config's orphan program-flush order,
+                overriding the top-level list.
   codeOrder     [stem...]  code-run module order
   codeBank      int        bank of the code run (default 2)
 """
@@ -47,14 +50,18 @@ class McPins:
         self.anchor: str | None = d.get("anchor")
         self.streams: dict[int, list[str]] = {
             int(b): list(v) for b, v in d.get("streams", {}).items()}
+        self.floors: dict[int, int] = {
+            int(b): int(v) for b, v in d.get("floors", {}).items()}
         self.pool: list[str] = list(d.get("pool", []))
         self.poolAfter: str | None = d.get("poolAfter")
+        self.poolFloor: int = int(d.get("poolFloor", 0))
         self.preblock: list[str] = list(d.get("preblock", []))
         self.preblockAfter: str | None = d.get("preblockAfter")
         self.wave1Order: list[str] = list(d.get("wave1Order", []))
         self.compoolOrder: list[str] = list(d.get("compoolOrder", []))
         self.codeOrder: list[str] = list(d.get("codeOrder", []))
         self.codeBank: int = int(d.get("codeBank", 2))
+        self.orphanFlush: list[str] = list(d.get("orphanFlush", []))
 
 
 class LinkOrder:
