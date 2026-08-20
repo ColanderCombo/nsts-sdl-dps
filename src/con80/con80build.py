@@ -170,21 +170,25 @@ class SourceIndex:
                 if not p.is_file():
                     continue
                 self.by_name.setdefault(p.name, p)
-                # A patch deck's PCHnnSRC[.asm] name is looked up by its
-                # extensionless stem (via patch_member()/resolve() below),
-                # never by the bare filename with extension -- index that
-                # stem too, so a .asm-suffixed patch source still resolves.
+                # Object-module/csect names (INCLUDE members, patch decks'
+                # PCHnnTXT -> PCHnnSRC[.asm]) are always looked up without a
+                # .asm extension -- index each file's extensionless stem too,
+                # so a .asm-suffixed source still resolves by its bare name.
+                # For a stem longer than 6 characters this is a no-op below
+                # (by_stem6 only ever looks at the first 6), but a <=6-char
+                # stem like FAZ2 would otherwise have its 6-char window bleed
+                # into ".asm" (FAZ2.asm[:6] == "FAZ2.a", not "FAZ2").
                 stem = _src_stem(p.name)
-                if stem != p.name and _PATCH_SRC_RE.match(stem):
+                if stem != p.name:
                     self.by_name.setdefault(stem, p)
-                self.by_stem6.setdefault(p.name[:6], p)
+                self.by_stem6.setdefault(stem[:6], p)
                 # Some source filenames embed a '#' that is NOT part of the
                 # 6-char stem encoded in the csect name (e.g. the file
                 # DCI#STK backs csect #DDCISTK -> stem DCISTK).
                 # Index a '#'-stripped stem too so those resolve; setdefault
                 # keeps an exact-named file's claim on the key.
-                stripped = p.name.replace("#", "")[:6]
-                if stripped != p.name[:6]:
+                stripped = stem.replace("#", "")[:6]
+                if stripped != stem[:6]:
                     self.by_stem6.setdefault(stripped, p)
 
     def resolve(self, module: str) -> Path | None:

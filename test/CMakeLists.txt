@@ -355,6 +355,19 @@ set_tests_properties(con80_patch_decks PROPERTIES
     TIMEOUT 60
 )
 
+# con80.con80build.SourceIndex.resolve() for a <=6-char-stem source file
+# (e.g. SSSRC/FAZ2.asm) whose own CSECT differs from its filename -- the
+# file is found only by its own name, and a .asm extension used to bleed
+# into the 6-char stem window.
+add_test(NAME con80_source_index
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_con80_source_index.py"
+)
+set_tests_properties(con80_source_index PROPERTIES
+    LABELS "ap101Utils"
+    TIMEOUT 60
+)
+
 add_test(NAME dfg_decks
     COMMAND "${SDL_VENV_PYTHON}"
         "${CMAKE_CURRENT_SOURCE_DIR}/test_dfg_decks.py"
