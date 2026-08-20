@@ -343,6 +343,18 @@ set_tests_properties(con80_mirror PROPERTIES
     TIMEOUT 60
 )
 
+# con80.con80build patch-deck (PCHnnSRC/PCHnnTXT) detection: must recognize
+# a patch source's PCHnnSRC filename whether or not it carries a trailing
+# .asm extension -- both spellings appear across the OI30/OI34 corpora.
+add_test(NAME con80_patch_decks
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_con80_patch_decks.py"
+)
+set_tests_properties(con80_patch_decks PROPERTIES
+    LABELS "ap101Utils"
+    TIMEOUT 60
+)
+
 add_test(NAME dfg_decks
     COMMAND "${SDL_VENV_PYTHON}"
         "${CMAKE_CURRENT_SOURCE_DIR}/test_dfg_decks.py"
