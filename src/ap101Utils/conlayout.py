@@ -66,8 +66,9 @@ def align_word(hw: int) -> int:
 # Class-based protection default for csects in a block with no SET/CLEAR
 # mark: code and link-time ZCON constants live in protected core; data and
 # @-stack frames are runtime-written and stay unprotected.  Prefix rules
-# mirror lnk101's zone classification (_ZONE_BY_PREFIX).
-_UNPROT_PREFIXES = ("@", "#D", "#P", "#0", "#E", "#L", "#X")
+# mirror lnk101's zone classification (_ZONE_BY_PREFIX), plus '#R' (REMOTE
+# data), which that table does not name.
+_UNPROT_PREFIXES = ("@", "#D", "#P", "#0", "#E", "#L", "#R", "#X")
 
 
 def default_protected(name: str) -> bool:

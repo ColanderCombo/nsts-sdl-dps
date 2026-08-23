@@ -806,6 +806,37 @@ class Linker:
                 if section.type == 'SD' and section.baseAddress is not None:
                     yield section
 
+    def storeProtectRangesHw(self):
+        """Absolute halfword [start, end) ranges that carry store protection.
+
+        Explicit ' PROT' ranges when the assembler captured SPON/SPOFF, else
+        the csect's SET/CLEAR mark, else the name-class default.  Feeds both
+        the .lib PROT records and the .sym.json map.
+        """
+        from ap101Utils.conlayout import default_protected
+        ranges = []
+        for s in self._placedSDs():
+            name = s.name.strip()
+            if int(s.length) <= 0 or name in self.reservedCsects:
+                continue
+            nHw = (int(s.length) + 1) // 2
+            baseHw = int(s.baseAddress) // 2
+            m = s.module
+            if m is not None and name in m.protManaged:
+                for a, b in m.protRangesHw.get(name, []):
+                    if a < nHw:
+                        ranges.append((baseHw + a, baseHw + min(b, nHw)))
+            elif (s.protected if s.protected is not None
+                  else default_protected(name)):
+                ranges.append((baseHw, baseHw + nHw))
+        merged = []
+        for lo, hi in sorted(ranges):
+            if merged and lo <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], hi)
+            else:
+                merged.append([lo, hi])
+        return merged
+
     def _computeImageSize(self):
         """Compute imageSize from the highest SD section end."""
         highestEnd = self.imageBase
@@ -2483,7 +2514,6 @@ class Linker:
         for the record format."""
 
         from ap101Utils import libModule
-        from ap101Utils.conlayout import default_protected
 
         if self.image is None:
             error("No image to write to .lib")
@@ -2536,23 +2566,16 @@ class Linker:
             runEnd = max(runEnd, int(s.baseAddress + s.length))
         if run:
             runs.append((run, runEnd))
+        protRanges = self.storeProtectRangesHw()
         for run, end in runs:
             start = int(run[0].baseAddress)
-            bits = [False] * ((end - start + 1) // 2)
-            for s in run:
-                nHw = (int(s.length) + 1) // 2
-                off = (int(s.baseAddress) - start) // 2
-                m, name = s.module, s.name.strip()
-                if m is not None and name in m.protManaged:
-                    for a, b in m.protRangesHw.get(name, []):
-                        for i in range(a, min(b, nHw)):
-                            bits[off + i] = True
-                else:
-                    prot = s.protected if s.protected is not None \
-                        else default_protected(name)
-                    if prot:
-                        for i in range(nHw):
-                            bits[off + i] = True
+            nBits = (end - start + 1) // 2
+            startHw = start // 2
+            bits = [False] * nBits
+            for a, b in protRanges:
+                for i in range(max(a, startHw) - startHw,
+                               min(b, startHw + nBits) - startHw):
+                    bits[i] = True
             lib.extents.append(libModule.Extent(
                 start, bytes(self.image[start - base:end - base]), bits))
 
@@ -2815,7 +2838,11 @@ class Linker:
             "entryPoint": self.entryPoint.hw,
             "sections": [],
             "symbols": [],
-            "modules": []
+            "modules": [],
+            "storeProtect": {
+                "unit": "halfword",
+                "ranges": self.storeProtectRangesHw(),
+            },
         }
         
         # Collect SD CSECTs sorted by address
