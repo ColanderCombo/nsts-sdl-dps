@@ -356,7 +356,20 @@ class DashOp(DDTOp):
 
 class AltcharOp(DDTOp):
     """Alternate-charset symbol: IMMED(3) [FCW2' selecting the alternate
-    character set][the glyph][FCW2 restore]."""
+    character set][the glyph][FCW2 restore].
+
+    The value is decimal; its hex form is the alternate character set
+    symbol number (STS-83-0020V1-34), which names the symbols but not their
+    shapes:
+
+      14 filled circle (alternate landing site 1; landing sites)
+      15 filled diamond (alternate landing site 2)
+      16 cross, large (IIP, main plot)      17 cross, small (IIP, inset)
+      18 Shuttle planform (rotated)         19 Shuttle symbol (rotated)
+      1C heading arrow (rotated; up at zero)
+
+    Used by displays 0540G, 0543G and 3041G.  Which FCW2 bits select the
+    set is unconfirmed (see `fcw.FCW.altchar`)."""
 
     def build(self, deu):
         n = fcw.num(self.value)
@@ -641,9 +654,10 @@ class VcordOp(DDTOp):
 class AngleOp(DDTOp):
     """Character rotation.  Numeric ANGLE=n emits the rotation FCW (with the
     mode switch on the OFF->ON transition only); ANGLE=0 restores the mode
-    and emits the ANGZERO entry [4C00, 4000]; angles other than multiples
-    of 90 are unknown — refuse.  A variable ANGLE is the CASE 14 remote
-    form ([0x3800][PADR])."""
+    and emits the ANGZERO entry [4C00, 4000].  A variable ANGLE is the
+    CASE 14 remote form ([0x3800][PADR]).
+
+    Any angle is accepted: op 0x4 carries 12 bits at 360/4096 per unit."""
 
     def parse(self):
         self.value = self._vs() if self.value else ""
@@ -660,11 +674,7 @@ class AngleOp(DDTOp):
                 self.words = immed(deu.fcw2(rotated=False)) + [0x4C00, 0x4000]
                 deu.rotated = False
                 return
-            if n not in (90.0, 180.0, 270.0):
-                raise Error("ANGLE must be 0/90/180/270 or a variable: "
-                            "ANGLE = %s" % (self.value,))
-            self.words = immed(FCW.rotation(int(n) // 90)) \
-                + deu.enter_rotation()
+            self.words = immed(FCW.rotation(n)) + deu.enter_rotation()
         else:                                    # variable -> CASE 14 remote
             self.words = [0x3800, Padr(self.value)] + deu.enter_rotation()
 

@@ -74,17 +74,31 @@ class FCW:
       0x1  branch to a 12-bit DEU address (`Branch`); doubles as the
            fill-address I/O header word.  Encoding for targets >= 0x1000
            is unknown (see `deu_return`)
-      0x2  unknown (unused)
+      0x2  SUBLIST — `0010 ssss nnnnnnnn` + a Branch: draw `count` words
+           from there, then carry on.  `sector` is the target's 4K page;
+           the Branch carries the full address.  Not generated here; it
+           occurs in DEU memory
       0x3  mode-register write            `reg` selects the register:
              reg 0  FCW2 char/beam mode   mode_code, upright, altchar,
                                           altchar_rot
-             reg 1  FCW3 color            color_select, color
+             reg 1  FCW3 color            color_select, color,
+                                          hi_intensity
              reg 2  FCW1 attributes       intensity, blink, dash, axis_y
              reg 3  value display         vdisp
-      0x4  character rotation             quarter_turns
-      0x5  major-axis step                major_step
-      0x6  unknown (unused)
-      0x7  minor-axis step                minor_step
+      0x4  character rotation             angle / angle_degrees — 12 bits
+                                          at 360/4096 = 0.088 degrees
+      0x5  major-axis step                major_step — or, while FCW2's
+                                          angle-increment bit is set, the
+                                          angle-increment register (12
+                                          bits, 360/32768 per unit)
+      0x6  land-site label — a pair of words carrying three 7-bit
+           characters, the middle one split across them (bit 11 picks the
+           half).  Not generated here; `LSITE=` expands to it
+      0x7  bits 11-10 select: 01 a circle (9-bit radius at bit 1, centred
+           on the beam, which it does not move; `CIRCR=` expands to it,
+           bracketed by FCW2|0x0005 and a plain FCW2), 10 minor_step, 11
+           the same step under the special type generator.  00 is
+           unknown
       0x8  X beam position / translate    x, translate
       0x9  Y beam position / translate    y, translate
       0xA  vector slope word              y_major, sign_differ, slope
@@ -134,21 +148,40 @@ class FCW:
     reg = _field(10, 2, "op 0x3: destination register — 0 FCW2 (char/beam "
                         "mode), 1 FCW3 (color), 2 FCW1 (attributes), "
                         "3 value display")
-    # FCW2 (reg 0) — character / beam mode
-    mode_code = _field(0, 4, "FCW2: beam mode — 5 begin vector, 6 chars "
-                             "small, 7 chars large (rotation clears the "
-                             "upright bit, giving 2/3)")
+    # FCW2 (reg 0) — character / beam mode.  Ten bits: EOR, INCR, DLY,
+    # POLRX, POLRY, then the five beam gating bits AC5..AC1 (bits 4..0).
+    eor = _flag(9, "FCW2: end of refresh — the DEU stops interpreting here")
+    incr = _flag(8, "FCW2: an op 0x5 word writes the per-glyph rotation "
+                    "step rather than the character advance")
+    dly = _flag(7, "FCW2: DLY (meaning unknown)")
+    xy_ref = _field(3, 2, "FCW2: AC5+AC4 — the X/Y reference gate.  While "
+                          "clear the translate registers are held but not "
+                          "applied; both are set for a non-zero translate")
+    mode_code = _field(0, 3, "FCW2: beam mode, AC3..AC1 — bits 1-0 pick the "
+                             "generator (01 vector, 10 chars small, 11 "
+                             "chars large) and bit 2 is the upright bit, "
+                             "which rotation clears: a vector reads 5 "
+                             "upright / 1 rotated, small characters 6 / 2, "
+                             "large 7 / 3")
     upright = _flag(2, "FCW2: upright characters; cleared while rotation "
                        "is active")
-    altchar = _flag(6, "FCW2: select the alternate character set")
+    altchar = _flag(6, "FCW2: select the alternate character set, where "
+                       "`ALTCHAR=` is encoded.  Unconfirmed; bits 6/5 are "
+                       "also named POLRX/POLRY, a polar coordinate mode, "
+                       "which is a separate feature")
     altchar_rot = _flag(5, "FCW2: alternate-set variant used while "
-                           "rotation is active")
-    # FCW3 (reg 1) — color
+                           "rotation is active (see `altchar`)")
+    # FCW3 (reg 1) — color and double intensity
     color_select = _flag(7, "FCW3: color select enable (off = DEU default)")
-    color = _field(0, 7, "FCW3: color code (the DEU default word carries "
-                         "code 40)")
+    color = _field(0, 6, "FCW3: color code, six bits; the DEU default "
+                         "word carries code 40")
+    hi_intensity = _flag(6, "FCW3: double intensity, carried across a "
+                            "colour change.  Not written here — `INT=D` "
+                            "emits FCW1's bit 3 below")
     # FCW1 (reg 2) — drawing attributes
-    intensity = _flag(3, "FCW1: double intensity (INT=D/ON)")
+    intensity = _flag(3, "FCW1: double intensity (INT=D/ON).  Unconfirmed; "
+                         "FCW3 bit 6 (`hi_intensity`) carries the same "
+                         "attribute")
     blink = _flag(8, "FCW1: blink (BLINK=E)")
     dash = _flag(9, "FCW1: dashed lines (DASH=E/ON)")
     axis_y = _flag(5, "FCW1: spacing direction is the Y axis (AXIS=Y)")
@@ -156,7 +189,10 @@ class FCW:
     vdisp = _field(0, 10, "VDISP: value-display code")
 
     # ---- op 0x4 — character rotation --------------------------------------
-    quarter_turns = _field(10, 2, "op 0x4: rotation in 90-degree steps")
+    # A 12-bit angle over a full turn; the remote form carries continuously
+    # varying values, so nothing may assume multiples of 90.
+    angle = _field(0, 12, "op 0x4: character rotation in DEU angle units, "
+                          "360/4096 = 0.088 degrees each")
 
     # ---- op 0x5 / 0x7 — spacing steps --------------------------------------
     major_step = _signed(0, 11, "op 0x5: step along the major (spacing) "
@@ -165,13 +201,18 @@ class FCW:
                                 "-27 rows under AXIS=Y")
     minor_step = _signed(0, 8, "op 0x7: step along the minor axis, 8-bit "
                                "two's complement — -27 small, -32 large, "
-                               "+19 under AXIS=Y; bit 11 is always set "
-                               "(meaning unknown)")
+                               "+19 under AXIS=Y.  Bits 11-10 are the op 0x7 "
+                               "sub-selector and read 10 here")
+    circle_radius = _field(1, 9, "op 0x7 sub-selector 01: circle radius in "
+                                 "screen units, nine bits at bit 1, so the "
+                                 "low bit is always 0 and the radius "
+                                 "saturates at 511")
 
     # ---- op 0x8 / 0x9 — beam position --------------------------------------
-    x = _field(0, 12, "op 0x8: screen X, 0..1535 — cell column c sits at "
-                      "1042 + 19c; the `nnnA` absolute form at 1024 + nnn")
-    y = _field(0, 12, "op 0x9: screen Y — cell row r sits at 366 - 27r "
+    x = _field(0, 11, "op 0x8: screen X, 0..1535 — cell column c sits at "
+                      "1042 + 19c; the `nnnA` absolute form at 1024 + nnn.  "
+                      "Eleven bits; bit 11 selects the translate register")
+    y = _field(0, 11, "op 0x9: screen Y — cell row r sits at 366 - 27r "
                       "(rows run downward); the `nnnA` form at 1902 - nnn")
     translate = _flag(11, "op 0x8/0x9: write the X/Y TRANSLATE register "
                           "instead of the beam position (coordinates never "
@@ -187,6 +228,21 @@ class FCW:
                           "1022)")
     major_negative = _flag(11, "op 0xB: the major-axis delta is negative")
     major_len = _field(0, 11, "op 0xB: |major-axis delta| in screen units")
+
+    # ---- op 0x2 — SUBLIST ----------------------------------------------------
+    # Followed by a Branch giving the address.
+    sublist_sector = _field(8, 4, "op 0x2: the target's 4K page")
+    sublist_count = _field(0, 8, "op 0x2: words to draw from the target, "
+                                 "counted literally")
+
+    # ---- op 0x6 — land-site label -------------------------------------------
+    # A pair of words; bit 11 picks the half, and the middle character
+    # straddles them.  Use `lsite_words` / `lsite_text` rather than these.
+    lsite_second = _flag(11, "op 0x6: this is the pair's second word")
+    lsite_c1 = _field(4, 7, "op 0x6 word 1: the first character")
+    lsite_c2_hi = _field(0, 4, "op 0x6 word 1: the top 4 bits of the second")
+    lsite_c2_lo = _field(8, 3, "op 0x6 word 2: the low 3 bits of the second")
+    lsite_c3 = _field(1, 7, "op 0x6 word 2: the third character")
 
     # ---- op 0xC — glyphs ----------------------------------------------------
     g1 = _field(7, 7, "op 0xC: first glyph of the pair (0 in the "
@@ -262,11 +318,32 @@ class FCW:
         f.op, f.reg, f.vdisp = 0x3, 3, n
         return f
 
+    @property
+    def angle_degrees(self):
+        """The op 0x4 rotation in degrees."""
+        return self.angle * 360.0 / ANGLE_UNITS
+
+    @angle_degrees.setter
+    def angle_degrees(self, deg):
+        self.angle = int(round(deg * ANGLE_UNITS / 360.0)) % ANGLE_UNITS
+
     @classmethod
-    def rotation(cls, quarter_turns):
-        """Character-rotation FCW (turns = angle / 90)."""
+    def rotation(cls, degrees):
+        """Character-rotation FCW from an angle in degrees."""
         f = cls()
-        f.op, f.quarter_turns = 0x4, quarter_turns
+        f.op = 0x4
+        f.angle_degrees = degrees
+        return f
+
+    @classmethod
+    def angle_increment(cls, degrees):
+        """Angle-increment register write — op 0x5, the same opcode as the
+        major step, selected by FCW2's `incr` bit.  One unit is 360/32768
+        degrees; the field is 12 bits, so the range is 0..44.99 degrees and
+        anything past that wraps.  Not generated here."""
+        f = cls()
+        f.op = 0x5
+        f.word |= int(round(degrees * ANGINC_UNITS / 360.0)) & 0x0FFF
         return f
 
     @classmethod
@@ -326,15 +403,50 @@ class FCW:
         return cls.glyph_pair(0, g)
 
     @classmethod
+    def circle(cls, radius):
+        """Circle FCW (op 0x7 sub-selector 01): a circle of `radius` screen
+        units about the beam, which it does not move.  Not generated here;
+        `CIRCR=` expands to `circle_run` below."""
+        f = cls(0x7400)
+        f.circle_radius = int(round(radius))
+        return f
+
+    @classmethod
+    def circle_run(cls, radius, mode=None):
+        """A circle as drawn: FCW2 with the deflection bits gated on, the
+        circle, then FCW2 restored."""
+        mode = cls.char_mode() if mode is None else mode
+        gated = cls(mode.word | 0x0005)
+        return [gated, cls.circle(radius), cls(mode.word)]
+
+    @classmethod
+    def lsite_words(cls, text):
+        """The op 0x6 pair carrying a three-character land-site label — the
+        first three characters of a runway name.  Preceded by an XPOS/YPOS
+        pair.  Not generated here; `LSITE=` expands to it."""
+        a, b, c = [glyph(text[i]) if i < len(text) else 0x20 for i in range(3)]
+        w1, w2 = cls(0x6000), cls(0x6800)
+        w1.lsite_c1, w1.lsite_c2_hi = a, b >> 3
+        w2.lsite_c2_lo, w2.lsite_c3 = b & 7, c
+        return [w1, w2]
+
+    @staticmethod
+    def lsite_text(w1, w2):
+        """The three characters back out of an op 0x6 pair."""
+        w1, w2 = FCW(int(w1)), FCW(int(w2))
+        b = (w1.lsite_c2_hi << 3) | w2.lsite_c2_lo
+        return "".join(chr(g) for g in (w1.lsite_c1, b, w2.lsite_c3))
+
+    @classmethod
     def carrtn(cls):
         """Carriage-return glyph FCW (CR = glyph 0x0D)."""
         return cls.glyph_single(0x0D)
 
     @classmethod
     def deu_return(cls):
-        """The static-section terminator 0x19EE: branch back into the DEU's
-        own program.  Not built as a `Branch`: the encoding of targets
-        >= 0x1000 is unknown."""
+        """The static-section terminator 0x19EE: branch to the display
+        header at DEU address 0x19EE.  Not built as a `Branch`, which
+        counts from the top of DEU memory (see there)."""
         return cls(0x19EE)
 
 
@@ -343,8 +455,15 @@ class Branch(FCW):
     interpreter to DEU memory address `target`.  The same encoding doubles
     as the fill-address I/O header word ("load the following words at
     `target`").  Every CFIT slot is one of these (a display's DEULOC= is
-    the address OF such a slot).  The encoding of targets >= 0x1000 is
-    unknown (see `FCW.deu_return`)."""
+    the address OF such a slot).
+
+    DEU addresses are 13 bits over an 8K halfword memory, and the word
+    carries the address in bits 12-0: the opcode is 000 in bits 15-13 and
+    bit 12 is address bit 12.  Display lists occupy the upper half, so bit
+    12 is always set and every such word reads as op 0x1.  `target` is the
+    offset within that half, and `deu_address` the full address.  Known
+    addresses: 0x19EE the display header, 0x1A06 the uplink indicator,
+    0x1A0E the dynamic portion of the display."""
 
     def __init__(self, target):
         if not 0 <= target < 0x1000:
@@ -356,11 +475,30 @@ class Branch(FCW):
     def target(self):
         return self.word & 0x0FFF
 
+    @property
+    def deu_address(self):
+        """The 13-bit DEU memory address this branches to."""
+        return self.word & 0x1FFF
+
     def __repr__(self):
         return "Branch(0x%03X)" % self.target
 
 
+# ---- angle scaling ----------------------------------------------------------
+ANGLE_UNITS = 4096    # op 0x4 units per full turn (360/4096 = 0.088 deg)
+ANGINC_UNITS = 32768  # op 0x5 angle-increment units per turn (0.011 deg)
+
 # ---- screen geometry constants ----------------------------------------------
+#
+# Addressable units (AU) are the coordinate system the `nnnA` form writes in.
+# STS-83-0020V1-34/sect.3.4.3: "a 1024 x 731 (X, Y) CRT addressable unit grid
+# ... denoted in the table by specifying an A after the Y numerical entry".
+# One AU is one beam unit, and the character cells lie inside the grid:
+# column c at AU 18 + 19c, row r at AU 27r.
+#
+# Dynamic symbol coordinates are instead signed about the screen centre,
+# X +/-512 and Y +/-365.  Position words carry both forms and nothing in the
+# word distinguishes them.
 GRID = 1536          # screen-coordinate wrap (both axes)
 COL_PITCH = 19       # screen units per character column (24 under SIZE=L)
 ROW_PITCH = 27       # screen units per character row (32 under SIZE=L)
