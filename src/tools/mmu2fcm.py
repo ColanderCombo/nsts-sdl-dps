@@ -521,6 +521,8 @@ def unionSym(cfgName: str, owner: bytearray, info: list[dict],
       phase wins (overlay semantics).
     - relocations / unresolvedRelocations: kept only if the fixup site still
       belongs to that phase in the composed image (not overlaid later).
+    - storeProtect: each phase's map masked to the halfwords it still owns;
+      absent when no phase carries one.
     - modules: union by name."""
     def imported(entry):
         return entry.get("module", "").endswith(">")
@@ -618,6 +620,43 @@ def unionSym(cfgName: str, owner: bytearray, info: list[dict],
         log.info(f"dropped {droppedRel} relocations / {droppedUnres} "
                  f"unresolved at sites overlaid by later phases")
 
+    # Store protection, overlay-aware: each constituent's linker map masked
+    # to the halfwords it still owns in the composed image.  Omitted when no
+    # constituent carries one -- an empty map would claim the image is
+    # unprotected, which is a different statement from having no map.
+    protect = bytearray(MEM_HW)
+    mapped, bare = 0, []
+    for ph in info:
+        sp = ph["sym"].get("storeProtect")
+        if not sp or sp.get("unit") != "halfword":
+            bare.append(ph["name"])
+            continue
+        mapped += 1
+        idx = ph["index"]
+        for lo, hi in sp.get("ranges", []):
+            for a in range(max(lo, 0), min(hi, MEM_HW)):
+                if owner[a] == idx:
+                    protect[a] = 1
+    protRanges, a = [], 0
+    while a < MEM_HW:
+        if not protect[a]:
+            a += 1
+            continue
+        b = a
+        while b < MEM_HW and protect[b]:
+            b += 1
+        protRanges.append([a, b])
+        a = b
+    if mapped:
+        log.info(f"store protect: {sum(b - a for a, b in protRanges)} hw in "
+                 f"{len(protRanges)} ranges")
+        if bare:
+            log.info(f"store protect: no map from {'/'.join(bare)} -- "
+                     f"those halfwords compose unprotected")
+    else:
+        log.warning("no constituent carries a store-protect map; the image "
+                    "gets none (relink the phases to regenerate)")
+
     iplCutRepro = {}
     cutList = [{"phase": ph["phase"], "rangesHW": ph["loadRangesHW"]}
                for ph in info if ph.get("loadRangesHW") is not None]
@@ -636,6 +675,8 @@ def unionSym(cfgName: str, owner: bytearray, info: list[dict],
         "sections": sorted(sections, key=lambda s: (s["address"], s["name"])),
         "symbols": sorted(symbols, key=lambda s: (s["address"], s["name"])),
         "modules": modules,
+        **({"storeProtect": {"unit": "halfword", "ranges": protRanges}}
+           if mapped else {}),
         "relocations": sorted(relocations, key=lambda r: r["address"]),
         "unresolvedRelocations": sorted(unresolved,
                                         key=lambda r: r["imageOffsetHW"]),
