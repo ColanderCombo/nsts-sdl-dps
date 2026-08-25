@@ -248,6 +248,36 @@ def test_extract_fcmcmp_diffs():
     assert all(k in diffs[0] for k in ("section", "address", "hw_a", "hw_b"))
 
 
+def test_rld_annotation_keys_the_halfword_holding_the_address(tmp_path):
+    """A 4-byte ACON's annotation belongs on its SECOND halfword.
+
+    The first is the opcode, which is identical however the site resolved, so
+    an annotation attached there is never printed beside a difference -- which
+    is the only place it is any use.  A 2-byte YCON keeps its own halfword.
+    """
+    import json
+    from tools.fcmcmp import load_annotations
+
+    sym = {
+        "symbols": [],
+        "relocations": [
+            {"address": 0x1E4B2, "target": 0xF20005C0, "flags": 0x1C,
+             "symbol": "TFCMPFD1"},                      # ACON, 4 bytes
+            {"address": 0x02000, "target": 0x000A50, "flags": 0x00,
+             "symbol": "TFIVPS22"},                      # YCON, 2 bytes
+        ],
+    }
+    path = tmp_path / "sym.json"
+    path.write_text(json.dumps(sym))
+    _, addr_to_rld, = load_annotations(path)[:2]
+
+    assert 0x1E4B3 in addr_to_rld, "ACON annotation must sit on the address"
+    assert 0x1E4B2 not in addr_to_rld, "not on the opcode halfword"
+    assert "TFCMPFD1" in addr_to_rld[0x1E4B3]
+    assert 0x02000 in addr_to_rld, "a YCON is one halfword and keeps its own"
+    assert "TFIVPS22" in addr_to_rld[0x02000]
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
