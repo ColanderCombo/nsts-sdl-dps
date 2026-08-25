@@ -12,7 +12,7 @@ import re
 from . import kvt as _kvt
 from . import ddt as _ddt
 from . import static as _static
-from .deck import encodable_directives
+from .deck import DECK_SUFFIX, encodable_directives
 from .fcw import Branch, FCW
 from .model import Error, Segment, Padr, flatten
 from .ops import immed
@@ -104,6 +104,13 @@ def encode(hal):
     raises `Error`."""
     src = hal
     hal = os.path.basename(hal.replace("\\", "/"))
+    # The COMPOOL is named for the DISPLAY, not for the file the deck came
+    # in.  These decks were extensionless until it was established that they
+    # are DFG inputs; carrying the `.dfg` through would emit
+    # `CD0001.dfg: COMPOOL RIGID;` and name every generated COMPOOL after a
+    # filename that other modules cannot reference.
+    if hal.lower().endswith(DECK_SUFFIX):
+        hal = hal[:-len(DECK_SUFFIX)]
     ds = encodable_directives(src)
 
     # A deck led by CRTFMT= is a critical format: a bare CFT FCW array (no

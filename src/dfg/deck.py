@@ -70,12 +70,25 @@ def deck_dirs(root=None):
     return [os.path.join(root, d) for d in _DEFAULT_DECK_DIRS]
 
 
+#: The extension the display decks now carry.  They had none until it was
+#: established that they are DFG inputs, at which point the PASS tree renamed
+#: them; both spellings are still in circulation, so both resolve.
+DECK_SUFFIX = ".dfg"
+
+
 def find_deck(name, root=None):
-    """Absolute path of the deck named `name`, or None."""
+    """Absolute path of the deck named `name`, or None.
+
+    `name` may be given with or without the `.dfg` extension: a tree that
+    still uses the bare names and one that has been renamed both answer to
+    either spelling.  Directory order wins over spelling, so a deck found in
+    an earlier search directory is preferred whichever way it is spelt."""
+    stem = name[:-len(DECK_SUFFIX)] if name.lower().endswith(DECK_SUFFIX) else name
     for d in deck_dirs(root):
-        p = os.path.join(d, name)
-        if os.path.exists(p):
-            return p
+        for cand in (name, stem + DECK_SUFFIX, stem):
+            p = os.path.join(d, cand)
+            if os.path.exists(p):
+                return p
     return None
 
 
