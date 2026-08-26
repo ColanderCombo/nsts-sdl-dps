@@ -725,6 +725,19 @@ def _as_dirs(dirs) -> list:
     return [Path(d) for d in dirs]
 
 
+def _mirror_name(name: str) -> str:
+    """The mirror entry for one source member.
+
+    The mirror exists to give every member a .hal extension, because the
+    delivered source dirs hold extensionless PDS members.  A tree whose
+    members already carry .hal must not gain a second one: prepareINCLIB
+    names each PDS member from the file's stem, so a mirrored
+    `A01XTAB.hal.hal` is stowed as the member `A01XTAB.hal`, and the
+    compiler resolving `D INCLUDE A01XTAB` never finds it.
+    """
+    return name if name.endswith(".hal") else name + ".hal"
+
+
 def _hal_mirror(dirs, haltree) -> None:
     """Build a .hal-extensioned mirror of the (extensionless) HAL source
     dirs.  Each directory is mirrored under its basename.
@@ -749,7 +762,7 @@ def _hal_mirror(dirs, haltree) -> None:
         for f in srcdir.iterdir():
             if not f.is_file():
                 continue
-            link = dst / (f.name + ".hal")
+            link = dst / _mirror_name(f.name)
             if link in claimed:
                 continue
             claimed.add(link)
@@ -918,7 +931,7 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
     ppdir.mkdir(parents=True, exist_ok=True)
     pp_of: dict = {}
     for srcpath in sources:
-        mirror = haltree / srcpath.parent.name / (srcpath.name + ".hal")
+        mirror = haltree / srcpath.parent.name / _mirror_name(srcpath.name)
         out = ppdir / (srcpath.stem + ".hal")
         if mirror.exists():
             out.unlink(missing_ok=True)
@@ -1034,7 +1047,7 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
             binaries += sorted(hbin.glob("HALSFC-*"))
 
         def _mirror_bytes(p: Path) -> bytes:
-            m = haltree / p.parent.name / (p.name + ".hal")
+            m = haltree / p.parent.name / _mirror_name(p.name)
             return (m if m.exists() else p).read_bytes()
 
         cache = compilecache.CompileCache(
