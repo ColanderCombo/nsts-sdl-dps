@@ -28,6 +28,7 @@ def check(label, got, want):
 
 
 def main() -> int:
+    global passed
     # ---- geometry ----
     check("a tape holds 16384 blocks", M.BLOCKS_TOTAL, 8 * 8 * 8 * 32)
     check("which is 8.4 million halfwords",
@@ -80,6 +81,69 @@ def main() -> int:
         check(f"index {idx} round trips through an address",
               M.blockIndex(*M.blockAddr(idx)), idx)
 
+    # ---- the closing checksum, as the loader verifies it ----
+    #
+    # The System Software Loader sums a load block's halfwords 0..L-2 as
+    # 16 bits and compares the total with halfword L-1: the slot is a
+    # fullword, its first halfword is zero and contributes nothing, and
+    # the sum therefore runs over everything the block carries.  Written
+    # any other way the load reads correctly and is then rejected.
+    from ap101Utils.concard import ConcardDeck
+    from ap101Utils import mmbstamp
+    from ap101Utils.mmbstamp import load_phase_source, phase_load_blocks
+    deck = ConcardDeck(con80)
+    src = load_phase_source(con80)
+    mmuRoot = ROOT / "build" / "OI340700"
+    #
+    # Every built phase.  The partition the record is written from and the
+    # partition the in-core phase table is stamped from are the same one,
+    # and they part company only where `mmbstamp.fit_budget` has something
+    # to do -- a phase with no slack against its `ALLOC BLKS`.
+    area1 = mmbstamp.parse_area(con80, 1)
+    seen = badsum = badfit = badpart = 0
+    for phase in sorted(area1.mm_of_phase):
+        if not (mmuRoot / f"PHASE{phase:02d}.lib").exists():
+            continue
+        if phase not in range(3, 19) and phase != 2:
+            continue                        # the phase table covers 3..18
+        budget = area1.blks_of_phase.get(phase)
+        rec = M.phaseRecord(mmuRoot, deck, phase, src.ipl, src.mc,
+                            area1.mm_of_phase[phase], budget)
+        allblks, _mm, ncont, _crossed = phase_load_blocks(mmuRoot, phase, src)
+        lbs = [lb for lb in allblks if not lb.reserve]
+        # The record is what the phase table describes: NUM_CONT blocks,
+        # counting the ones `pack_mm` steps over at a track boundary.
+        if len(rec) // M.HW_PER_BLOCK != ncont:
+            badpart += 1
+        off = 0
+        for lb in lbs:
+            if lb.sot:                       # pushed to the start of a track
+                while (off // M.HW_PER_BLOCK + area1.mm_of_phase[phase]) & 0xFF:
+                    off += M.HW_PER_BLOCK
+            blk = rec[off:off + lb.length]
+            total = 0
+            for i in range(lb.length - 1):
+                total = (total + blk[i]) & 0xFFFF
+            if total != blk[lb.length - 1] or blk[lb.length - 2] != 0:
+                badsum += 1
+            seen += 1
+            off += lb.length
+            while off % M.HW_PER_BLOCK:      # a load block starts a tape block
+                off += 1
+        if off != len(rec):
+            badpart += 1                     # the two partitions disagree
+        if len(rec) % M.HW_PER_BLOCK:
+            badfit += 1
+        if budget is not None and len(rec) // M.HW_PER_BLOCK > budget:
+            badfit += 1
+    check("every load block closes on the checksum the loader computes",
+          badsum, 0)
+    check("...over a useful number of them", seen > 200, True)
+    check("...the record is built from the partition the phase table names",
+          badpart, 0)
+    check("...and holds the phase inside its allocation, whole tape blocks",
+          badfit, 0)
+
     # ---- the volume file ----
     vol = M.Volume()
     a = (5, 2, 6, 17)
@@ -119,6 +183,56 @@ def main() -> int:
         else:
             print("SKIP  ext/sim/dist/mmu.js not built "
                   "(cd ext/sim && npm run mmu:build)")
+
+    # ---- LOADMOD members ----
+    # A member is placed by the ALLOC of the function whose cards carry its
+    # LOADMOD statement, which is in a different member from the LOADMOD
+    # itself, so the join is what has to be right.
+    con80 = ROOT / "code" / "OI340700" / "CON80"
+    if con80.is_dir():
+        from tools.mmubuild import MMUDeck, build as mmuTree
+        places = mmuTree(MMUDeck(con80)).loadmod_allocations()
+        cf = [p for p in places if p.member == "DEUCFLM"]
+        check("the DEU critical formats are carried in three copies",
+              len(cf), 3)
+        check("...the first at the address GPCIPL reads",
+              sorted(p.addr for p in cf), ["44408", "44416", "44424"])
+        check("...eight blocks each", {p.blocks for p in cf}, {8})
+        check("...with the length the SYSTEM card declares",
+              {p.halfwords for p in cf}, {0xE4C})
+        check("...under their own functions",
+              sorted(p.label for p in cf),
+              ["DMACDFT1", "DMACDFT2", "DMACDFT3"])
+
+    # The record: image, pad to HWDS, and the closing (0000, sum16) slot
+    # the reader verifies.  A bare image is re-read forever.
+    with tempfile.TemporaryDirectory() as td:
+        img = Path(td) / "M.bin"
+        img.write_bytes(struct.pack(">3H", 0x1111, 0x2222, 0x3333))
+        rec = M.loadmodRecord(img, 1, 8)
+        check("a record is HWDS halfwords, then allocation fill",
+              rec[:9], [0x1111, 0x2222, 0x3333, M.STAGING_FILL, M.STAGING_FILL,
+                        M.STAGING_FILL, 0x0000,
+                        (0x1111 + 0x2222 + 0x3333 + 3 * M.STAGING_FILL) & 0xFFFF,
+                        M.STAGING_FILL])
+        check("...and fills its whole allocation", len(rec), M.HW_PER_BLOCK)
+        # No HWDS: the record is the image, padded even, plus the slot.
+        rec = M.loadmodRecord(img, 1, None)
+        check("without HWDS the slot follows the image",
+              rec[3:6], [M.STAGING_FILL, 0x0000,
+                         (0x1111 + 0x2222 + 0x3333 + M.STAGING_FILL) & 0xFFFF])
+        # An HWDS too small for the image is not fatal -- the record grows
+        # to hold it and the caller warns -- but an image too big for the
+        # ALLOCATION has nowhere to go.
+        check("a short HWDS still leaves room for the slot",
+              len(M.loadmodRecord(img, 1, 4)), M.HW_PER_BLOCK)
+        big = Path(td) / "big.bin"
+        big.write_bytes(b"\x00" * (2 * M.HW_PER_BLOCK))
+        try:
+            M.loadmodRecord(big, 1, None)
+            check("an image too big for its allocation is refused", True, False)
+        except ValueError:
+            passed += 1
 
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0

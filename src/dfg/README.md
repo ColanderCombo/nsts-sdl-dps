@@ -177,20 +177,19 @@ a shared static background resident in DEU memory, which `DEULOC=` displays
 draw over.  It compiles to a bare `CFT_<n>` FCW array — no DFT header, KVT or 
 DDT — ending with the `111E` exit-to-dynamics branch and two zeros.
 
-`deucflm` links these into the DEU critical-format load module
-(`MMUSYS5H: LOADMOD,MEMBER=DEUCFLM`).  `CFSYSIN` supplies the member list and
-layout:
+`deucflm` links them into the DEU critical-format load module
+(`MMUSYS5H: LOADMOD,MEMBER=DEUCFLM`), laid out by `CON80/CFSYSIN`.
+`con80build --critfmt` runs both steps for a whole tree:
 
-- at `ORIGIN` (0x0100): the CFIT — `CFITSIZE` one-word slots, each the branch
-  FCW `0x1000|body_addr` for its `CRTFMTCU` member (`SPARE` slots branch to
-  the shared `#PXD0000` "NO CFMT BKGD" body);
-- after the table: the bodies, packed in `CRTFMTCU` order;
-- `PAD`-word fill up to `CFBSIZE`, then one trailing checksum word — the
-  image is `CFBSIZE+1` halfwords.
+```
+build/bin/con80build --root code/OI340700 --out build/OI340700 --critfmt
+build/bin/deucflm code/OI340700/CON80/CFSYSIN \
+    -L build/OI340700/obj/critfmt -o DEUCFLM.bin
+```
 
-A display's `DEULOC=n` is exactly its background's CFIT slot address
-(`0x100 + slot`); `test_deucflm.py` cross-checks every display deck against
-the table.  Output is `<CRTFMTLM>.bin` (big-endian halfwords). 
+Output is `<CRTFMTLM>.bin`, big-endian halfwords, which `mmu2mmv --loadmod`
+puts on the tape.  `deucflm.py`'s header gives the image layout, and
+`test_deucflm.py` checks every display deck's `DEULOC=` against the table.
 
 ## How it reads
 

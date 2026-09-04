@@ -1,43 +1,28 @@
 #!/usr/bin/env python3
 """mmu2mmv -- write the built phases onto a mass memory tape volume (.mmv).
 
-The MMU load-build cards say where everything goes.  An ALLOC card gives a
-member's tape address as five decimal digits FTSBB -- file, track,
-subfile, and a two-digit block -- and how many 512-halfword blocks it may
-occupy; a PHASE card says which memory-configuration phase that member
-is.  Joining the two gives phase -> tape address, which is what
-`ap101Utils.mmbstamp.parse_area` already builds for the in-core phase
-tables.  This takes the same map, finds each phase's linked load module
-under the con80build output, and lays its tape record into its
-allocation.
+An ALLOC card gives a member's tape address as five decimal digits FTSBB
+-- file, track, subfile, and a two-digit block -- and the number of
+512-halfword blocks it may occupy; a PHASE card says which phase that
+member is.  This joins the two, finds each phase's linked load module
+under the con80build output, and lays its tape record into its allocation.
 
-The tape record of a phase is its LOAD BLOCKS, back to back:
-`mmbstamp.derive_load_blocks` partitions the phase's linkedit image into
-them, each block running from its first halfword to a closing 2-halfword
-checksum slot.  The Mass Memory Build stages a block from an INIT=C6C6
-buffer, so every halfword of the block the phase does not itself supply
--- alignment pad, the gap the fill rule opens, an allocation-only csect
--- is C6C6, and the slot carries (0000, sum16 of the block before it).
-That is the same content model `mmu2fcm --stamp-checksums` reads back
-when it emulates the load, so a block written here and loaded there round
-trips.
+A phase's tape record is its load blocks back to back, each running from
+its first halfword to a closing 2-halfword checksum slot.  The Mass Memory
+Build stages a block from an INIT=C6C6 buffer, so every halfword the phase
+does not supply is C6C6, and the slot carries (0000, sum16 of the block
+before it).
 
-What this does NOT generate: the mass memory DIRECTORY, the transaction
-and message tables, and the IPL phase table -- the ground build's own
-data structures, which live in their own allocations and are what a GPC
-consults to find any of this.  A volume from here therefore has the
-phases at the right addresses and nothing to tell a GPC they are
-there.  `--report` lists every allocation and says which of them
-were filled.
+`--loadmod NAME=FILE` supplies a LOADMOD member's image as raw big-endian
+halfwords, written into every allocation naming it.  The IPL bootstrap
+copy is written from PHASE01; see `bootRecord`.
 
-The `DIRECTRY` cards that declare those tables are read and rendered by
-`tools.mmubuild` (`--directories`, `--image`); what is still missing here
-is writing the result -- into the tape image for a free-standing one, and
-into the owning phase's load module for a `DMMD=YES` one, which belongs
-beside the other stamped tables in `ap101Utils.mmbstamp`.
+Not generated: the mass memory directory, the transaction and message
+tables.  `--report` lists every allocation and says which were filled.
 
 Usage:
   mmu2mmv --con80 code/OI340700/CON80 --mmu build/mmu --out tape.mmv
+  mmu2mmv --loadmod DEUCFLM=build/OI340700/DEUCFLM.bin --out tape.mmv
   mmu2mmv --report
 """
 from __future__ import annotations
@@ -76,10 +61,9 @@ POOL_PARENT = mmbstamp.POOL_PARENT
 #
 # The volume file
 #
-# Sparse, because a full tape is 16 MB and a real one is mostly blank:
-# a header, a directory of block indices, then one 512-halfword block per
-# directory entry, big-endian throughout.  ext/sim/mmu/volume.coffee
-# reads and writes the same thing and documents the layout.
+# Sparse: a header, a directory of block indices, then one 512-halfword
+# block per directory entry, big-endian.  ext/sim/mmu/volume.coffee
+# documents the layout.
 #
 
 MAGIC = b"MMUVOL01"
@@ -158,7 +142,8 @@ def fmtCard(track: int, file: int, subfile: int, block: int) -> str:
 #
 
 def phaseRecord(mmuRoot: Path, deck: ConcardDeck, phase: int,
-                ipl: set[int], mc: set[int]) -> list[int]:
+                ipl: set[int], mc: set[int], mmAddr: int = 0,
+                budget: int | None = None) -> list[int]:
     """The halfwords the Mass Memory Build would write for this phase:
     its load blocks back to back, staging fill in every halfword the
     phase does not supply, and each block's closing checksum."""
@@ -171,16 +156,22 @@ def phaseRecord(mmuRoot: Path, deck: ConcardDeck, phase: int,
     look = mmbstamp.protection_lookup(sym, mmbstamp.deck_protection(deck, root))
     fill = mmbstamp.fill_rule(sym, deck, root,
                               mmbstamp.map_extents(mmuRoot, deck, root))
-    parent = POOL_PARENT.get(phase, 2)
-    parentPool = mmbstamp.pool_next_hw(
-        LibModule.read(mmuRoot / f"PHASE{parent:02d}.lib"))
+    parentPool = mmbstamp.pool_own_start(mmuRoot, phase)
+    # The same partition the phase table is built from, RESERVE regions
+    # included.
+    reserves = mmbstamp.reserve_regions(
+        sym, mmbstamp.deck_reserved(deck, root))
     lbs = mmbstamp.derive_load_blocks(lib, parentPool, look,
                                       himem=phase in ipl, fill=fill,
-                                      mc=phase in mc)
+                                      mc=phase in mc, reserves=reserves)
 
-    # The phase's own text, by halfword address.  An auto-generated stack
-    # is allocation with no tape text, so the staging fill covers it --
-    # the same cut mmu2fcm makes when it reads these blocks back.
+    # The same trim and packing the in-core phase table is stamped from;
+    # the reader takes both from the table.  Called even with no budget,
+    # because packing is what sets `sot`.
+    mmbstamp.fit_budget(lbs, mmAddr, budget)
+
+    # The phase's text by halfword address.  An auto-generated stack has
+    # no tape text, so the staging fill covers it.
     text: dict[int, int] = {}
     for x in lib.extents:
         base = x.address // 2
@@ -190,8 +181,21 @@ def phaseRecord(mmuRoot: Path, deck: ConcardDeck, phase: int,
         for h in range(a, b):
             text.pop(h, None)
 
+    # FCMCKSUM lies inside a load block, so it goes in before the blocks
+    # are cut.
+    for h, v in mmbstamp.ssl_checksum_slots(text, sym):
+        text[h] = v
+
     out: list[int] = []
+    cur = mmAddr                              # MM block, low byte = block in track
     for lb in lbs:
+        if lb.reserve:                        # allocation only: no record
+            continue
+        if lb.sot:                            # pushed to the next track
+            skip = mmbstamp.TRACK_BLOCKS - (cur & 0xFF)
+            out.extend([STAGING_FILL] * (skip * HW_PER_BLOCK))
+            cur = (cur & ~0xFF) + 0x100
+        cur += -(-lb.length // HW_PER_BLOCK)
         slot = lb.length - 2                  # offset of the checksum slot
         block = [text.get(lb.start + i, STAGING_FILL) for i in range(lb.length)]
         total = 0
@@ -200,10 +204,7 @@ def phaseRecord(mmuRoot: Path, deck: ConcardDeck, phase: int,
         block[slot] = 0x0000
         block[slot + 1] = total
         out.extend(block)
-        # A load block is a whole number of tape blocks: the merge rule
-        # that builds them caps a block at 16384 halfwords, which is 32
-        # tape blocks exactly, so they are counted in tape blocks and each
-        # starts on one.
+        # A load block is a whole number of tape blocks, and starts on one.
         while len(out) % HW_PER_BLOCK:
             out.append(STAGING_FILL)
     return out
@@ -237,6 +238,203 @@ def otherAllocations(con80: Path, area: int,
     return out
 
 
+def loadmodRecord(path: Path, blocks: int,
+                  halfwords: int | None) -> list[int]:
+    """A LOADMOD member's tape record: the image over an INIT=C6C6 buffer,
+    closing on the same (0000, sum16) checksum a phase's load block does.
+
+    HWDS halfwords long when the SYSTEM card gives one; the rest of the
+    allocation stays fill.
+    """
+    data = path.read_bytes()
+    if len(data) % 2:
+        raise ValueError(f"{path}: odd byte count, not whole halfwords")
+    words = [int.from_bytes(data[i:i + 2], "big") for i in range(0, len(data), 2)]
+    # Room for the slot, on a fullword: an odd-length image pads to even
+    # first.
+    need = len(words) + (len(words) & 1) + 2
+    length = max(halfwords or 0, need)
+    if length > blocks * HW_PER_BLOCK:
+        raise ValueError(f"{path}: record of {length} halfwords does not fit "
+                         f"{blocks} blocks")
+    rec = words + [STAGING_FILL] * (length - len(words))
+    slot = length - 2
+    total = 0
+    for i in range(slot):
+        total = (total + rec[i]) & 0xFFFF
+    rec[slot] = 0x0000
+    rec[slot + 1] = total
+    rec += [STAGING_FILL] * (blocks * HW_PER_BLOCK - len(rec))
+    return rec
+
+
+#
+# The IPL bootstrap copy
+#
+
+SECTOR_HW = 0x8000                        # halfwords a BSR/DSR sector spans
+BOOT_PHASE = 1                            # PHASE01: FCMBOOT + the SSL's PSA
+_COPY_IPL_RE = re.compile(r"^(\S+)\s+COPY,IPL\s*;")
+
+
+def iplCopy(con80: Path, area: int) -> dict | None:
+    """The bootstrap copy's allocation, or None if this area has none.
+
+    `FMAIPL2 COPY,IPL;` on MMUSYSn names the member; its ALLOC card on
+    MMUDATn places it.  Area 1 carries the only one.
+    """
+    member = None
+    for ln in (con80 / f"MMUSYS{area}").read_text(errors="replace").splitlines():
+        m = _COPY_IPL_RE.match(ln)
+        if m:
+            member = m.group(1)
+            break
+    if member is None:
+        return None
+    for ln in (con80 / f"MMUDAT{area}").read_text(errors="replace").splitlines():
+        m = _ALLOC_RE.match(ln)
+        if m and m.group(1) == member:
+            t, f, sf, b = fromMm16(mmbstamp.mm16(m.group(2)))
+            return {"member": member, "card": m.group(2),
+                    "address": fmtAddr(t, f, sf, b),
+                    "allocBlocks": int(m.group(3)) if m.group(3) else None}
+    log.warning("%s COPY,IPL has no ALLOC card in MMUDAT%d", member, area)
+    return None
+
+
+def bootRecord(mmuRoot: Path, con80: Path) -> list[int]:
+    """The IPL bootstrap copy: sector zero as the microcode loader leaves it.
+
+    A flat record, one sector, PHASE01's linkedit text over the ALLOC
+    card's INIT=C6C6 staging fill.  The reader is IOP microcode with no
+    load-block machinery: it enters the PSW at halfword 0x14 of the PSA the
+    record carries.  The IPL phase table is stamped into FCMPTAD1/2/3,
+    which read X'FFFF' unstamped.
+    """
+    from ap101Utils import mmbstamp as mb
+    libPath = mmuRoot / f"PHASE{BOOT_PHASE:02d}.lib"
+    symPath = (mmuRoot / f"PHASE{BOOT_PHASE:02d}"
+               / f"PHASE{BOOT_PHASE:02d}.sym.json")
+    lib = LibModule.read(libPath)
+    sym = json.loads(symPath.read_text())
+
+    rec = [STAGING_FILL] * SECTOR_HW
+    for x in lib.extents:
+        base = x.address // 2
+        if base + x.hwLength > SECTOR_HW:
+            raise ValueError(f"{libPath}: extent at {base:#07x} runs past "
+                             f"sector zero, which the bootstrap must fit")
+        for i in range(x.hwLength):
+            rec[base + i] = (x.data[2 * i] << 8) | x.data[2 * i + 1]
+
+    sslpt, notes = mb.generate_sslpt(mmuRoot, con80)
+    for n in notes:
+        log.debug("sslpt: %s", n)
+    image = mb.stamp_boot(
+        b"".join(w.to_bytes(2, "big") for w in rec), sym, sslpt)
+    return [int.from_bytes(image[i:i + 2], "big")
+            for i in range(0, len(image), 2)]
+
+
+def placeIplCopy(con80: Path, mmuRoot: Path, area: int,
+                 vol: Volume) -> dict | None:
+    """Write the bootstrap copy into its allocation.  Returns the row the
+    report prints, or None when the area declares no COPY,IPL member."""
+    row = iplCopy(con80, area)
+    if row is None:
+        return None
+    try:
+        words = bootRecord(mmuRoot, con80)
+    except Exception as e:                               # noqa: BLE001
+        row["status"] = f"failed: {e}"
+        log.warning("%s: %s", row["member"], e)
+        return row
+    used = len(words) // HW_PER_BLOCK
+    row["blocks"] = used
+    row["halfwords"] = len(words)
+    avail = row["allocBlocks"]
+    if avail is not None and used > avail:
+        row["status"] = f"OVERSIZE {used} > {avail} allocated"
+        log.warning("%s needs %d blocks, %s allocates %d",
+                    row["member"], used, row["card"], avail)
+        return row
+    t, f, sf, b = fromMm16(mmbstamp.mm16(row["card"]))
+    first = blockIndex(t, f, sf, b)
+    row["status"] = "written"
+    clash = sorted(set(vol.blocks) & set(range(first, first + used)))
+    if clash:
+        a = blockAddr(clash[0])
+        row["status"] += (f", OVERLAPS {len(clash)} block(s) from "
+                          f"{fmtAddr(*a)}")
+        log.warning("%s overlaps %d block(s) already written, from %s",
+                    row["member"], len(clash), fmtAddr(*a))
+    for i in range(used):
+        vol.write(first + i, words[i * HW_PER_BLOCK:(i + 1) * HW_PER_BLOCK])
+    return row
+
+
+def placeLoadmods(con80: Path, images: dict[str, Path],
+                  vol: Volume) -> list[dict]:
+    """Write each supplied LOADMOD member into every allocation that
+    carries it.  Returns a row per allocation, supplied or not, so the
+    report lists the empty ones."""
+    from tools.mmubuild import MMUDeck, build as mmuTree
+
+    rows: list[dict] = []
+    try:
+        placements = mmuTree(MMUDeck(con80)).loadmod_allocations()
+    except Exception as e:                               # noqa: BLE001
+        log.warning("LOADMOD allocations unavailable: %s", e)
+        return rows
+
+    for pl in placements:
+        t, f, sf, b = fromMm16(mmbstamp.mm16(pl.addr))
+        row = {
+            "member": pl.member, "label": pl.label, "sysid": pl.sysid,
+            "card": pl.addr, "address": fmtAddr(t, f, sf, b),
+            "allocBlocks": pl.blocks, "halfwords": pl.halfwords,
+        }
+        rows.append(row)
+        src = images.get(pl.member)
+        if src is None:
+            row["status"] = "not supplied"
+            continue
+        try:
+            words = loadmodRecord(src, pl.blocks, pl.halfwords)
+        except Exception as e:                           # noqa: BLE001
+            row["status"] = f"failed: {e}"
+            log.warning("%s: %s", pl.member, e)
+            continue
+        n = (src.stat().st_size + 1) // 2
+        row["blocks"] = pl.blocks
+        row["imageHalfwords"] = n
+        if n > pl.blocks * HW_PER_BLOCK:
+            row["status"] = (f"OVERSIZE {n} halfwords > "
+                             f"{pl.blocks * HW_PER_BLOCK} allocated")
+            log.warning("%s needs %d halfwords, %s allocates %d",
+                        pl.member, n, pl.addr, pl.blocks * HW_PER_BLOCK)
+            continue
+        # HWDS is the record's length: the image plus its pad and
+        # checksum slot.
+        need = n + (n & 1) + 2
+        if pl.halfwords is not None and need > pl.halfwords:
+            log.warning("%s needs %d halfwords with its checksum, %s declares "
+                        "HWDS=%d", pl.member, need, pl.label, pl.halfwords)
+        first = blockIndex(t, f, sf, b)
+        clash = sorted(set(vol.blocks) & set(range(first, first + pl.blocks)))
+        row["status"] = "written"
+        if clash:
+            a = blockAddr(clash[0])
+            row["status"] += (f", OVERLAPS {len(clash)} block(s) "
+                              f"from {fmtAddr(*a)}")
+            log.warning("%s overlaps %d block(s) already written, from %s",
+                        pl.member, len(clash), fmtAddr(*a))
+        for i in range(pl.blocks):
+            vol.write(first + i,
+                      words[i * HW_PER_BLOCK:(i + 1) * HW_PER_BLOCK])
+    return rows
+
+
 def directoryAddress(con80: Path) -> str | None:
     """MMDIR on the master IPL card: where a GPC looks for the tape directory.
     """
@@ -248,10 +446,14 @@ def directoryAddress(con80: Path) -> str | None:
 # Driver
 #
 
-def buildVolume(con80: Path, mmuRoot: Path, area: int,
-                vol: Volume) -> tuple[list[dict], list[dict], str | None]:
-    """Lay every allocated phase onto `vol`.  Returns (per-phase rows, the
-    area's non-phase allocations, the directory's tape address)."""
+def buildVolume(con80: Path, mmuRoot: Path, area: int, vol: Volume,
+                loadmods: dict[str, Path] | None = None
+                ) -> tuple[list[dict], list[dict], str | None, list[dict],
+                           dict | None]:
+    """Lay every allocated phase onto `vol`, then the IPL bootstrap copy,
+    then every supplied LOADMOD member.  Returns (per-phase rows, the
+    area's non-phase allocations, the directory's tape address,
+    per-LOADMOD-allocation rows, the bootstrap copy's row)."""
     deck = ConcardDeck(con80)
     table = mmbstamp.parse_area(con80, area)
     ipl = mmbstamp.ipl_phases(con80)
@@ -280,7 +482,8 @@ def buildVolume(con80: Path, mmuRoot: Path, area: int,
             row["status"] = "not built"
             continue
         try:
-            words = phaseRecord(mmuRoot, deck, phase, ipl, table.mc_phases)
+            words = phaseRecord(mmuRoot, deck, phase, ipl, table.mc_phases,
+                                mm, table.blks_of_phase.get(phase))
         except Exception as e:                       # noqa: BLE001
             row["status"] = f"failed: {e}"
             log.warning("phase %d: %s", phase, e)
@@ -311,11 +514,18 @@ def buildVolume(con80: Path, mmuRoot: Path, area: int,
         for i in range(used):
             vol.write(first + i,
                       words[i * HW_PER_BLOCK:(i + 1) * HW_PER_BLOCK])
-    return (rows, otherAllocations(con80, area, phaseMembers),
-            directoryAddress(con80))
+    iplRow = placeIplCopy(con80, mmuRoot, area, vol)
+    lmRows = placeLoadmods(con80, loadmods or {}, vol)
+    lmMembers = {r["label"] for r in lmRows}
+    if iplRow is not None:
+        lmMembers.add(iplRow["member"])
+    others = [o for o in otherAllocations(con80, area, phaseMembers)
+              if o["member"] not in lmMembers]
+    return (rows, others, directoryAddress(con80), lmRows, iplRow)
 
 
 def report(rows: list[dict], others: list[dict], mmdir: str | None,
+           lmRows: list[dict] | None = None, iplRow: dict | None = None,
            out=sys.stdout) -> None:
     print(f"{'phase':>5}  {'card':<5}  {'t/f/s/b':<10}  {'blocks':>6}"
           f"  {'alloc':>5}  flags  status", file=out)
@@ -332,6 +542,27 @@ def report(rows: list[dict], others: list[dict], mmdir: str | None,
     if len(clean) != len(placed):
         print(f"{len(placed) - len(clean)} of them do not fit their "
               f"allocation -- see the status column", file=out)
+
+    if iplRow:
+        print(f"\n{'member':<9}  {'card':<5}  {'t/f/s/b':<10}  "
+              f"{'blocks':>6}  {'alloc':>5}  status", file=out)
+        print(f"  {iplRow['member']:<7}  {iplRow['card']:<5}  "
+              f"{iplRow['address']:<10}  {iplRow.get('blocks', ''):>6}  "
+              f"{str(iplRow['allocBlocks'] or ''):>5}  {iplRow['status']}",
+              file=out)
+        print("the IPL bootstrap copy: what the microcode loader reads into "
+              "sector zero", file=out)
+
+    if lmRows:
+        print(f"\n{'member':<9}  {'function':<9}  {'card':<5}  "
+              f"{'t/f/s/b':<10}  {'alloc':>5}  status", file=out)
+        for r in lmRows:
+            print(f"{r['member']:<9}  {r['label']:<9}  {r['card']:<5}  "
+                  f"{r['address']:<10}  {r['allocBlocks']:>5}  {r['status']}",
+                  file=out)
+        placedLm = [r for r in lmRows if "blocks" in r]
+        print(f"{len(placedLm)} of {len(lmRows)} load-module allocations "
+              f"written", file=out)
 
     if not others:
         return
@@ -369,6 +600,12 @@ def main(argv=None):
                     help="also write the tape map as JSON")
     ap.add_argument("--report", action="store_true",
                     help="print the tape map and do not write a volume")
+    ap.add_argument("--loadmod", action="append", default=[],
+                    metavar="NAME=FILE",
+                    help="a LOADMOD member's image, as raw big-endian "
+                         "halfwords, written into every allocation that "
+                         "carries it (e.g. DEUCFLM=build/…/DEUCFLM.bin); "
+                         "repeatable")
     ap.add_argument("--write-protect", action="store_true",
                     help="mark the volume write protected")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -379,14 +616,26 @@ def main(argv=None):
     if not a.con80.is_dir():
         ap.error(f"{a.con80}: card deck not found")
 
+    images: dict[str, Path] = {}
+    for spec in a.loadmod:
+        name, _, path = spec.partition("=")
+        if not path:
+            ap.error(f"--loadmod {spec}: expected NAME=FILE")
+        p = Path(path)
+        if not p.is_file():
+            ap.error(f"--loadmod {spec}: {p} not found")
+        images[name.upper()] = p
+
     vol = Volume(writeProtect=a.write_protect)
-    rows, others, mmdir = buildVolume(a.con80, a.mmu, a.area, vol)
-    report(rows, others, mmdir)
+    rows, others, mmdir, lmRows, iplRow = buildVolume(a.con80, a.mmu, a.area,
+                                                     vol, images)
+    report(rows, others, mmdir, lmRows, iplRow)
 
     if a.manifest:
         a.manifest.write_text(json.dumps(
             {"area": a.area, "con80": str(a.con80), "mmu": str(a.mmu),
-             "phases": rows}, indent=2) + "\n")
+             "phases": rows, "loadmods": lmRows, "iplCopy": iplRow},
+            indent=2) + "\n")
         log.info("manifest -> %s", a.manifest)
 
     if a.report:

@@ -35,7 +35,9 @@ Generation rules:
     pool's closing checksum slot) comes from the phase and the pool start
     from its first pool extent at/above the parent phase's cursor;
     re-supplies of parent-phase pool cells below that are not tape
-    payload and are dropped.
+    payload and are dropped.  The region is bounded below by
+    Z1_POOL_START_HW; under it is the PSA, which a phase supplies like any
+    other content.
   * Upper-memory (sector >= 8) extents are listed only for IPL-set phases
     (MMLOAD IPL,PH=(...)): the overlay BCE builder ignores HIMEM LBs
     and only the SSL loads upper memory at IPL.
@@ -57,6 +59,14 @@ Generation rules:
     cross a track (256-block) boundary: it skips to the next track and
     carries the SOT flag.  NUM_CONT_MM_BLKS counts data blocks plus
     track-skip waste; bit0 (0x8000) = the span crossed a track boundary.
+  * RESERVE regions: a csect a `RESERVE` card allocates carries no text,
+    so the load module has no extent for it, and it still takes a
+    load-block descriptor -- allocation only, flags bit 2 (X'2000'), no
+    checksum slot, no tape payload, no MM blocks, never merged into a
+    group carrying any.  The loader unprotects a phase's load blocks
+    before it reads, and the memory fill ahead of the load leaves
+    everything above the IPL program protected; one such region holds the
+    loader's transfer buffers.
   * Unassigned phases get the placeholder the MMB emits: 
     one LB descriptor (8000, 0610, 0004), mm addr 0, ncont 1.
 """
@@ -70,7 +80,8 @@ from pathlib import Path
 
 from ap101Utils.concard import (ConcardDeck, expand_directives,
                                 layout_program)
-from ap101Utils.conlayout import default_protected as _class_default
+from ap101Utils.conlayout import (Z1_POOL_START_HW,
+                                  default_protected as _class_default)
 from ap101Utils.libModule import LibModule
 
 GPT_SIZE = 1093                  # #PFCMGPT halfwords (64 + 3*343)
@@ -78,10 +89,38 @@ CPHA_SIZE = 57                   # #PCDCPHA halfwords (19 rows x 3 areas)
 GPT_CSECT = "#PFCMGPT"
 CPHA_CSECT = "#PCDCPHA"
 
+# The IPL phase table the bootstrap loader hands the System Software
+# Loader: one 0x100-hw area per PASS copy, three copies back to back.
+# Each area is a 3-hw descriptor for every phase of the IPL set --
+# halfword index of its first load-block descriptor, load-block count, MM
+# address of its first load block -- followed by the load-block
+# descriptors themselves, packed in the same phase order.  Descriptor
+# halfword 0 doubles as the "this system was mass-memory built" flag: the
+# loader skips the whole load when it is zero.
+SSLPT_CSECT = "FCMSSLPT"
+SSLPT_STRIDE = 0x100             # halfwords per PASS-copy area
+SSLPT_COPIES = 3                 # PASS copies 1..3 = MM areas 1..3
+SSLPT_SIZE = SSLPT_STRIDE * SSLPT_COPIES
+
+# The copy of that table the bootstrap loader carries, three areas of the
+# same stride inside csect FCMBOOT.  Halfword zero of an unstamped area
+# reads X'FFFF', the signal that the area was never mass memory built.
+BOOT_PT_SYMS = ("FCMPTAD1", "FCMPTAD2", "FCMPTAD3")
+
+# Length and checksum of the loader itself, summed over [SSLSTART, SSLEND)
+# as 16-bit halfwords.  The copy in the image is checked before control
+# reaches the loader, so these are stamped last, over the finished image.
+CKSUM_CSECT = "FCMCKSUM"
+CKSUM_LENGTH_OFF = 0             # SSLENGTH
+CKSUM_SUM_OFF = 3                # SSLCKSUM
+SSL_START_SYM = "SSLSTART"
+SSL_END_SYM = "SSLEND"
+
 BANK_HW = 0x8000                 # halfwords per 32K bank (one DSR value)
 LB_CAP_HW = 16384                # merge cap: 32 MMU blocks; single checksum
                                  # groups may exceed it
 BLOCK_HW = 512                   # MMU block
+RESERVE_BIT = 0x2000             # load-block flags: allocation only
 TRACK_BLOCKS = 256               # blocks per track (track = +0x100 in mm16)
 HIMEM_SECTOR = 8                 # FCMHIMEM: sector >= 8 = upper memory
 FILL = 0xC6C6                    # MMB staging-buffer fill (INIT=C6C6)
@@ -179,13 +218,19 @@ def parse_area(con80: Path, area: int) -> AreaTable:
     return out
 
 
-def ipl_phases(con80: Path) -> set[int]:
-    """The IPL-loaded phase set from the MMLOAD card (IPL,PH=(...))."""
+def ipl_load_order(con80: Path) -> tuple[int, ...]:
+    """The IPL-loaded phases in card & load order (IPL,PH=(...)).
+    """
     for ln in (con80 / "MMLOAD").read_text(errors="replace").splitlines():
         m = _IPL_RE.search(ln)
         if m and not ln.lstrip().startswith("*"):
-            return {int(p) for p in m.group(1).split(",")}
+            return tuple(int(p) for p in m.group(1).split(","))
     raise StampError(f"{con80}/MMLOAD: no IPL,PH=(...) card")
+
+
+def ipl_phases(con80: Path) -> set[int]:
+    """The IPL-loaded phase set from the MMLOAD card (IPL,PH=(...))."""
+    return set(ipl_load_order(con80))
 
 
 # ---------------------------------------------------------------------------
@@ -223,6 +268,21 @@ def deck_protection(deck: ConcardDeck, root: str) -> dict[str, bool]:
             finalize(v == "SET")
     finalize()
     return prot
+
+
+def deck_reserved(deck: ConcardDeck, root: str) -> set[str]:
+    """The csects a RESERVE card allocates without loading any text."""
+    return {op.operand for op in layout_program(deck, root)
+            if op.verb == "RESERVE"}
+
+
+def reserve_regions(sym: dict, names: set[str]) -> list[tuple[int, int]]:
+    """[start, end) of each RESERVE-carded csect the phase placed."""
+    return sorted(
+        (s["address"], s["address"] + s["size"])
+        for s in sym.get("sections", ())
+        if str(s.get("name", "")).strip() in names
+        and s.get("address") is not None and s.get("size"))
 
 
 def protection_lookup(sym: dict, prot: dict[str, bool]):
@@ -464,6 +524,7 @@ class LoadBlock:
     content_start: int | None = None   # set when _open_bank_tails backed the
                                        # block up over free memory: the lowest
                                        # halfword it must still cover
+    reserve: bool = False        # allocation only: no data on the tape
 
     @property
     def sector(self) -> int:
@@ -476,23 +537,38 @@ class LoadBlock:
             flags |= 0x8000
         if self.sot:
             flags |= 0x4000
+        if self.reserve:
+            flags |= RESERVE_BIT
         return addr, flags, self.length
+
+
+def pool_own_start(mmu_root: Path, phase: int) -> int:
+    """Where a phase's Z1 pool cells begin."""
+    parent = POOL_PARENT.get(phase, 2)
+    if parent == phase:
+        return Z1_POOL_START_HW
+    return pool_next_hw(LibModule.read(Path(mmu_root)
+                                       / f"PHASE{parent:02d}.lib"))
 
 
 def derive_load_blocks(lib: LibModule, parent_pool: int, look,
                        himem: bool, fill: FillRule | None = None,
-                       mc: bool = False) -> list[LoadBlock]:
+                       mc: bool = False,
+                       reserves: 'list[tuple[int, int]] | None' = None
+                       ) -> list[LoadBlock]:
     """The phase's LB partition from its .lib extents (rules in the module
     docstring).  Without a FillRule the groups are csect-tight.  mc=True
     marks a memory-configuration anchor phase (MC=n on its PHASE card),
-    whose bank tails are padded through the bank end."""
+    whose bank tails are padded through the bank end.  `reserves` are the
+    phase's allocation-only regions."""
     pool = pool_next_hw(lib)
-    # [start, content_end, protected, tail csect, prot votes true/total]
+    # [start, content_end, protected, tail csect, prot votes true/total,
+    #  reserve]
     units: list[list] = []
     pool_start = None
     for x in sorted(lib.extents, key=lambda x: x.address):
         s, e = x.address // 2, x.address // 2 + x.hwLength
-        if e <= pool:                        # Z1 pool area extent
+        if Z1_POOL_START_HW <= s and e <= pool:    # Z1 pool area extent
             if s >= parent_pool and pool_start is None:
                 pool_start = s               # own cells begin here
             continue                         # (re-supplies dropped)
@@ -505,10 +581,22 @@ def derive_load_blocks(lib: LibModule, parent_pool: int, look,
                      if v is not None]
             units.append([s, roundfw(pe), False,
                           fill.tail_at(pe) if fill else None,
-                          sum(votes), len(votes)])
+                          sum(votes), len(votes), False])
             s = pe
     if pool_start is not None:               # pool: ZCON constants; its
-        units.append([pool_start, pool - 2, True, None, 1, 1])  # cursor has
+        units.append([pool_start, pool - 2, True, None, 1, 1, False])
+    # A RESERVE-carded csect has no text and no extent naming it
+    for rs, re_ in (reserves or ()):
+        if not himem and rs >= HIMEM_SECTOR * BANK_HW:
+            continue
+        s = rs
+        while s < re_:                       # split at bank boundaries
+            bnd = (s // BANK_HW + 1) * BANK_HW
+            pe = min(re_, bnd)
+            votes = [v for v in (look(h) for h in range(s, pe))
+                     if v is not None]
+            units.append([s, pe, False, None, sum(votes), len(votes), True])
+            s = pe
     units.sort()                             # the closing slot in it already
 
     # Coalesce the fullword pad the linker leaves between an odd-length
@@ -517,7 +605,8 @@ def derive_load_blocks(lib: LibModule, parent_pool: int, look,
     # and not the fragments.
     runs: list[list] = []
     for u in units:
-        if runs and u[0] == runs[-1][1] and u[0] // BANK_HW == runs[-1][0] // BANK_HW:
+        if (runs and u[0] == runs[-1][1] and not u[6] and not runs[-1][6]
+                and u[0] // BANK_HW == runs[-1][0] // BANK_HW):
             c = runs[-1]
             c[1], c[3] = u[1], u[3]
             c[4] += u[4]
@@ -541,6 +630,8 @@ def derive_load_blocks(lib: LibModule, parent_pool: int, look,
     def close(u) -> int:
         """End of the LB: the 2-hw checksum slot follows the pad when the
         free space has room for it, else it overlays the pad's last 2 hw."""
+        if u[6]:
+            return u[1]
         p = pad(u)
         bnd = (u[0] // BANK_HW + 1) * BANK_HW
         room = fill.free_after(u[1], bnd) if fill else 2
@@ -559,15 +650,18 @@ def derive_load_blocks(lib: LibModule, parent_pool: int, look,
             # The cap is measured on what the merged LB would actually END
             # at:
             if (u[0] in (c[1] + p, c[1] + p + 2, c[1] + q, c[1] + q + 2)
+                    and not u[6] and not c[6]
                     and u[2] == c[2]
                     and u[0] // BANK_HW == c[0] // BANK_HW
                     and not (fill and fill.starts_block(u[0]))
-                    and close([c[0], u[1], u[2], u[3]]) - c[0] <= LB_CAP_HW):
+                    and close([c[0], u[1], u[2], u[3], 0, 0, False])
+                        - c[0] <= LB_CAP_HW):
                 c[1], c[3] = u[1], u[3]
                 continue
         merged.append(list(u))
 
-    lbs = [LoadBlock(u[0], close(u) - u[0], u[2]) for u in merged]
+    lbs = [LoadBlock(u[0], close(u) - u[0], u[2], reserve=u[6])
+           for u in merged]
     if fill:
         lbs = _open_bank_tails(lbs, fill)
         if mc:
@@ -582,6 +676,9 @@ def _extend_mc_bank_tails(lbs: list[LoadBlock], fill: FillRule
     at most one LBLN staging buffer (FILL_PAD_HW)"""
     out = []
     for i, lb in enumerate(lbs):
+        if lb.reserve:
+            out.append(lb)
+            continue
         bnd = (lb.start // BANK_HW + 1) * BANK_HW
         end = lb.start + lb.length
         nxt = lbs[i + 1].start if i + 1 < len(lbs) else None
@@ -606,6 +703,9 @@ def _open_bank_tails(lbs: list[LoadBlock], fill: FillRule) -> list[LoadBlock]:
     LBLN in halfwords, and the one phase that declares it uses 2048."""
     out = []
     for i, lb in enumerate(lbs):
+        if lb.reserve:
+            out.append(lb)
+            continue
         bnd = (lb.start // BANK_HW + 1) * BANK_HW
         prev_end = (lbs[i - 1].start + lbs[i - 1].length) if i else 0
         if (lb.start + lb.length != bnd            # does not end the bank
@@ -657,7 +757,9 @@ def pack_mm(lbs: list[LoadBlock], mm_start: int) -> tuple[int, bool]:
     cur = mm_start
     for lb in lbs:
         lb.sot = False               # re-runnable: fit_budget packs repeatedly
-        blocks = -(-lb.length // BLOCK_HW)
+        # An allocation-only block has nothing on the tape, so it consumes
+        # no MM blocks and cannot start a track.
+        blocks = 0 if lb.reserve else -(-lb.length // BLOCK_HW)
         if (cur & 0xFF) + blocks > TRACK_BLOCKS:
             cur = (cur & ~0xFF) + 0x100      # no LB crosses a track: skip
             lb.sot = True
@@ -708,17 +810,16 @@ def phase_load_blocks(mmu_root: Path, phase: int, src: PhaseSource
         raise StampError(f"{lib_path} missing -- cannot derive load blocks "
                          f"(phase {phase} is MMUSYS-assigned)")
     lib = LibModule.read(lib_path)
-    parent = POOL_PARENT.get(phase, 2)
-    parent_pool = pool_next_hw(
-        LibModule.read(mmu_root / f"PHASE{parent:02d}.lib"))
+    parent_pool = pool_own_start(mmu_root, phase)
     sym = json.load(open(mmu_root / f"PHASE{phase:02d}"
                          / f"PHASE{phase:02d}.sym.json"))
     root = f"OFTMP@{phase}"
     look = protection_lookup(sym, deck_protection(src.deck, root))
     fill = fill_rule(sym, src.deck, root, map_extents(mmu_root, src.deck, root))
+    reserves = reserve_regions(sym, deck_reserved(src.deck, root))
     lbs = derive_load_blocks(lib, parent_pool, look,
                              himem=phase in src.ipl, fill=fill,
-                             mc=phase in src.mc)
+                             mc=phase in src.mc, reserves=reserves)
     mm = src.areas[1].mm_of_phase[phase]
     ncont, crossed = fit_budget(lbs, mm, src.areas[1].blks_of_phase.get(phase))
     return lbs, mm, ncont, crossed
@@ -807,16 +908,21 @@ def generate(mmu_root: Path, con80: Path) -> PhaseTables:
 # Image stamping
 # ---------------------------------------------------------------------------
 
-def stamp(image: bytes, sym: dict, tables: PhaseTables) -> bytes:
-    """Overlay the generated tables at the csects' composed addresses."""
-    at = {s["name"]: s for s in sym.get("sections", [])}
-    buf = bytearray(image)
+def table_csects(tables: PhaseTables) -> list[tuple[str, list[int], int]]:
+    """(csect, values, declared size) for every table that was generated."""
     from ap101Utils.g3dat import G3DAT_CSECT, G3DAT_SIZE
     todo = [(GPT_CSECT, tables.gpt, GPT_SIZE),
             (CPHA_CSECT, tables.cpha, CPHA_SIZE)]
     if tables.g3dat:
         todo.append((G3DAT_CSECT, tables.g3dat, G3DAT_SIZE))
-    for name, words, want in todo:
+    return todo
+
+
+def stamp(image: bytes, sym: dict, tables: PhaseTables) -> bytes:
+    """Overlay the generated tables at the csects' composed addresses."""
+    at = {s["name"]: s for s in sym.get("sections", [])}
+    buf = bytearray(image)
+    for name, words, want in table_csects(tables):
         sec = at.get(name)
         if sec is None:
             raise StampError(f"{name} not present in the composed image -- "
@@ -830,3 +936,303 @@ def stamp(image: bytes, sym: dict, tables: PhaseTables) -> bytes:
         buf[off:off + 2 * want] = b"".join(
             w.to_bytes(2, "big") for w in words)
     return bytes(buf)
+
+
+# ---------------------------------------------------------------------------
+# The IPL set's tables: the phase table the SSL walks, and its own checksum
+# ---------------------------------------------------------------------------
+
+def generate_sslpt(mmu_root: Path, con80: Path) -> tuple[list[int], list[str]]:
+    """The IPL phase table, SSLPT_SIZE halfwords: one area per PASS copy.
+
+    The load blocks are the same partition the in-core phase table and the
+    tape image are built from, so only the MM address differs between
+    copies, each reading it from its area's ALLOC cards.
+    """
+    mmu_root, con80 = Path(mmu_root), Path(con80)
+    src = load_phase_source(con80)
+    order = ipl_load_order(con80)
+    notes: list[str] = []
+
+    lbs_of = {p: phase_load_blocks(mmu_root, p, src)[0] for p in order}
+    out: list[int] = []
+    for copy in range(1, SSLPT_COPIES + 1):
+        mm_of = src.areas[copy].mm_of_phase
+        missing = [p for p in order if p not in mm_of]
+        if missing:
+            raise StampError(f"area {copy} has no ALLOC for IPL phase(s) "
+                             f"{missing} -- cannot address the load")
+        descs: list[int] = []
+        blocks: list[int] = []
+        index = 3 * len(order)            # past the descriptors themselves
+        for p in order:
+            lbs = lbs_of[p]
+            descs += [index, len(lbs), mm_of[p]]
+            for lb in lbs:
+                blocks += list(lb.words())
+            index += 3 * len(lbs)
+        area = descs + blocks
+        if len(area) > SSLPT_STRIDE:
+            raise StampError(f"IPL phase table for copy {copy} is "
+                             f"{len(area)} hw, over the {SSLPT_STRIDE} hw "
+                             f"area (phases {order}, "
+                             f"{sum(len(lbs_of[p]) for p in order)} LBs)")
+        notes.append(f"copy {copy}: {len(area)} of {SSLPT_STRIDE} hw, "
+                     + ", ".join(f"ph {p} {len(lbs_of[p])} LB @"
+                                 f"{mm_of[p]:04X}" for p in order))
+        out += area + [0] * (SSLPT_STRIDE - len(area))
+    return out, notes
+
+
+def ssl_extent(sym: dict) -> tuple[int, int]:
+    """[first halfword, count) of the loader the IPL checksums."""
+    at = {s["name"]: s["address"] for s in sym.get("symbols", ())
+          if s.get("name") is not None}
+    try:
+        start, end = at[SSL_START_SYM], at[SSL_END_SYM]
+    except KeyError as e:
+        raise StampError(f"{e.args[0]} not in the composed image -- is the "
+                         f"IPL phase in the composition?") from None
+    if end <= start:
+        raise StampError(f"{SSL_END_SYM} {end:#x} is not above "
+                         f"{SSL_START_SYM} {start:#x}")
+    return start, end - start
+
+
+def stamp_ipl(image: bytes, sym: dict, sslpt: list[int]) -> bytes:
+    """Overlay the IPL phase table, then the loader's length and checksum."""
+    at = {s["name"]: s for s in sym.get("sections", ())}
+    buf = bytearray(image)
+
+    sec = at.get(SSLPT_CSECT)
+    if sec is None:
+        raise StampError(f"{SSLPT_CSECT} not present in the composed image "
+                         f"-- is the IPL phase in the composition?")
+    if sec["size"] < SSLPT_SIZE:
+        raise StampError(f"{SSLPT_CSECT} is {sec['size']} hw, expected "
+                         f">= {SSLPT_SIZE}")
+    off = sec["address"] * 2
+    buf[off:off + 2 * len(sslpt)] = b"".join(
+        w.to_bytes(2, "big") for w in sslpt)
+
+    start, count = ssl_extent(sym)
+    total = sum(int.from_bytes(buf[2 * h:2 * h + 2], "big")
+                for h in range(start, start + count)) & 0xFFFF
+    sec = at.get(CKSUM_CSECT)
+    if sec is None:
+        raise StampError(f"{CKSUM_CSECT} not present in the composed image")
+    if sec["size"] <= CKSUM_SUM_OFF:
+        raise StampError(f"{CKSUM_CSECT} is {sec['size']} hw, expected "
+                         f"> {CKSUM_SUM_OFF}")
+    for slot, value in ((CKSUM_LENGTH_OFF, count), (CKSUM_SUM_OFF, total)):
+        h = sec["address"] + slot
+        buf[2 * h:2 * h + 2] = value.to_bytes(2, "big")
+    return bytes(buf)
+
+
+def ssl_checksum_slots(text: dict[int, int],
+                       sym: dict) -> list[tuple[int, int]]:
+    at = {s["name"]: s for s in sym.get("sections", ())}
+    sec = at.get(CKSUM_CSECT)
+    if sec is None or sec["size"] <= CKSUM_SUM_OFF:
+        return []
+    try:
+        start, count = ssl_extent(sym)
+    except StampError:
+        return []
+    if any(h not in text for h in (start, start + count - 1)):
+        return []                     # the loader is not this phase's text
+    total = sum(text.get(h, 0) for h in range(start, start + count)) & 0xFFFF
+    return [(sec["address"] + CKSUM_LENGTH_OFF, count),
+            (sec["address"] + CKSUM_SUM_OFF, total)]
+
+
+def stamp_boot(image: bytes, sym: dict, sslpt: list[int]) -> bytes:
+    """Overlay the phase table onto the bootstrap loader's three areas.
+
+    FCMPTAD1/2/3 are a 256-halfword area per PASS copy, reserved as a
+    single 768 word space.
+    """
+    at = {s["name"]: s["address"] for s in sym.get("symbols", ())
+          if s.get("name") is not None}
+    missing = [n for n in BOOT_PT_SYMS if n not in at]
+    if missing:
+        raise StampError(f"{', '.join(missing)} not in the composed image "
+                         f"-- is the bootstrap phase in the composition?")
+    addrs = [at[n] for n in BOOT_PT_SYMS]
+    want = [addrs[0] + i * SSLPT_STRIDE for i in range(SSLPT_COPIES)]
+    if addrs != want:
+        raise StampError(
+            f"{BOOT_PT_SYMS} are at "
+            f"{', '.join(f'{a:#07x}' for a in addrs)}; the table is one "
+            f"block of {SSLPT_COPIES} contiguous {SSLPT_STRIDE}-hw areas")
+    buf = bytearray(image)
+    off = addrs[0] * 2
+    buf[off:off + 2 * len(sslpt)] = b"".join(
+        w.to_bytes(2, "big") for w in sslpt)
+    return bytes(buf)
+
+
+# ---------------------------------------------------------------------------
+# Load-module stamping
+# ---------------------------------------------------------------------------
+
+SIDECAR_SUFFIX = ".mmbstamp.json"   # beside PHASEnn.lib
+
+
+@dataclass
+class LibStamp:
+    """One table written into (or restored to) one phase's load module."""
+    phase: int
+    csect: str
+    address: int                 # halfword address
+    before: list[int]            # what the load module carried
+    after: list[int]             # what it carries now
+
+    @property
+    def changed(self) -> bool:
+        return self.before != self.after
+
+
+def sidecar_path(lib_path: Path) -> Path:
+    """Where the pre-stamp halfwords for one phase are recorded."""
+    return Path(lib_path).with_suffix(SIDECAR_SUFFIX)
+
+
+def _phase_libs(mmu_root: Path) -> dict[int, Path]:
+    out = {}
+    for p in sorted(Path(mmu_root).glob("PHASE*.lib")):
+        m = re.fullmatch(r"PHASE(\d+)", p.stem)
+        if m:
+            out[int(m.group(1))] = p
+    return out
+
+
+def _lib_sym(lib_path: Path) -> dict:
+    """A phase's manifest, which is where the csect addresses come from."""
+    stem = Path(lib_path).stem
+    cand = Path(lib_path).parent / stem / f"{stem}.sym.json"
+    if not cand.exists():
+        cand = Path(lib_path).with_suffix(".sym.json")
+    if not cand.exists():
+        raise StampError(f"{lib_path}: no .sym.json beside it")
+    return json.loads(cand.read_text())
+
+
+def _extent_for(lib: LibModule, address: int, count: int):
+    """The one text extent carrying [address, address+count), or None.
+
+    A csect lies inside one extent, extents being contiguous runs of
+    placed sections; straddling two means the manifest and the module
+    disagree about where it is, and returns None.
+    """
+    for x in lib.extents:
+        base = x.address // 2
+        if base <= address and address + count <= base + x.hwLength:
+            return x
+    return None
+
+
+def _splice(lib: LibModule, address: int, words: list[int],
+            csect: str) -> list[int]:
+    """Write `words` at halfword `address`; return what was there."""
+    x = _extent_for(lib, address, len(words))
+    if x is None:
+        raise StampError(
+            f"{csect} at {address:#x} ({len(words)} hw) is not inside one "
+            f"text extent of {lib.name or 'the module'}")
+    off = 2 * (address - x.address // 2)
+    buf = bytearray(x.data)
+    before = [int.from_bytes(buf[off + 2 * i:off + 2 * i + 2], "big")
+              for i in range(len(words))]
+    buf[off:off + 2 * len(words)] = b"".join(
+        w.to_bytes(2, "big") for w in words)
+    x.data = bytes(buf)
+    return before
+
+
+def stamp_libs(mmu_root: Path, tables: PhaseTables, *,
+               dry_run: bool = False) -> list[LibStamp]:
+    """Write the generated tables into the phase load modules that carry
+    them, recording what each one held so `restore_libs` can undo it.
+    """
+    mmu_root = Path(mmu_root)
+    libs = _phase_libs(mmu_root)
+    if not libs:
+        raise StampError(f"no PHASE*.lib in {mmu_root}")
+
+    wanted = table_csects(tables)
+    modules: dict[int, LibModule] = {}
+    owners: dict[str, list[int]] = {name: [] for name, _, _ in wanted}
+    secs: dict[tuple[int, str], dict] = {}
+    for n, path in sorted(libs.items()):
+        at = {s["name"]: s for s in _lib_sym(path).get("sections", [])}
+        if not any(name in at for name, _, _ in wanted):
+            continue
+        lib = modules[n] = LibModule.read(path)
+        for name, _, want in wanted:
+            sec = at.get(name)
+            if sec is None:
+                continue
+            if _extent_for(lib, sec["address"], want) is None:
+                continue                      # declared, not carried
+            owners[name].append(n)
+            secs[(n, name)] = sec
+
+    for name, _, _ in wanted:
+        if not owners[name]:
+            raise StampError(
+                f"no phase load module in {mmu_root} carries {name} -- "
+                f"the tables have nowhere to go")
+        if len(owners[name]) > 1:
+            raise StampError(
+                f"{name} is carried by phases "
+                f"{', '.join(map(str, owners[name]))} -- one load module "
+                f"has to own it")
+
+    out: list[LibStamp] = []
+    for n in sorted(modules):
+        mine = [(name, words, want) for name, words, want in wanted
+                if (n, name) in secs]
+        if not mine:
+            continue
+        path, lib = libs[n], modules[n]
+        stamps: list[LibStamp] = []
+        for name, words, want in mine:
+            sec = secs[(n, name)]
+            if sec["size"] < want:
+                raise StampError(f"{name} is {sec['size']} hw in phase {n}, "
+                                 f"expected >= {want}")
+            before = _splice(lib, sec["address"], list(words), name)
+            stamps.append(LibStamp(n, name, sec["address"], before,
+                                   list(words)))
+        if not dry_run:
+            side = sidecar_path(path)
+            if not side.exists():
+                side.write_text(json.dumps(
+                    {"module": path.name,
+                     "tables": [{"csect": s.csect, "address": s.address,
+                                 "before": s.before} for s in stamps]},
+                    indent=1) + "\n")
+            lib.write(path)
+        out.extend(stamps)
+    return out
+
+
+def restore_libs(mmu_root: Path, *, dry_run: bool = False) -> list[LibStamp]:
+    mmu_root = Path(mmu_root)
+    out: list[LibStamp] = []
+    for n, path in sorted(_phase_libs(mmu_root).items()):
+        side = sidecar_path(path)
+        if not side.exists():
+            continue
+        rec = json.loads(side.read_text())
+        lib = LibModule.read(path)
+        for t in rec.get("tables", []):
+            after = _splice(lib, t["address"], list(t["before"]), t["csect"])
+            out.append(LibStamp(n, t["csect"], t["address"], after,
+                                list(t["before"])))
+        if not dry_run:
+            lib.write(path)
+            side.unlink()
+    return out

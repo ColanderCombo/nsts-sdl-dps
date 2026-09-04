@@ -1186,6 +1186,93 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
     return ok, work_fail
 
 
+def critfmt(con80: Path, srcdirs, objdir: Path, gendir: Path,
+            halsc: str, python: str, pass_rel32: Path,
+            out: Path, verbose: int = 0) -> tuple[int, list[str]]:
+    """dfg + halsc each member CFSYSIN names, then `deucflm` links them
+    into <out>/DEUCFLM.bin.  Returns (compiled, failures)."""
+    from dfg.deucflm import parse_cfsysin
+
+    cfsysin = con80 / "CFSYSIN"
+    if not cfsysin.is_file():
+        print(f"  [critfmt] no {cfsysin} — nothing to build")
+        return 0, []
+    slots, params = parse_cfsysin(cfsysin)
+    members = list(dict.fromkeys(slots))   # SPARE slots share one body
+
+    objdir.mkdir(parents=True, exist_ok=True)
+    gendir.mkdir(parents=True, exist_ok=True)
+    cfdir = (gendir / "critfmt").resolve()
+    cfdir.mkdir(parents=True, exist_ok=True)
+
+    src_root = Path(__file__).resolve().parent.parent
+    env = {**os.environ, "PYTHONUTF8": "1",
+           "PYTHONPATH": os.pathsep.join([str(pass_rel32), str(src_root),
+                                          os.environ.get("PYTHONPATH", "")])}
+
+    def deck_of(name: str) -> Path | None:
+        for d in srcdirs:
+            p = Path(d) / name
+            if p.is_file():
+                return p
+        return None
+
+    def is_compool(deck: Path, name: str) -> bool:
+        """True when the member is delivered as the HAL/S compool itself,
+        and so skips dfg."""
+        head = deck.read_text(errors="replace")[:4096]
+        return re.search(r"^\s*%s:\s*COMPOOL\b" % re.escape(name),
+                         head, re.M) is not None
+
+    ok, fails = 0, []
+    for csect in members:
+        name = csect[2:] if csect.startswith("#P") else csect
+        deck = deck_of(name)
+        if deck is None:
+            print(f"  [critfmt] {name}: deck not found on "
+                  + ":".join(str(d) for d in srcdirs), file=sys.stderr)
+            fails.append(name)
+            continue
+        halout = cfdir / f"{name}.hal"
+        if is_compool(deck, name):
+            halout = deck
+        else:
+            r = _run([*_tool("dfg", python), str(deck), "-o", str(halout)],
+                     verbose=verbose, env=env, label=f"dfg {name}")
+            if r.returncode != 0 or not halout.exists():
+                tail = ((r.stderr or "").strip().splitlines()[-1:] or ["?"])[0]
+                print(f"  [dfg FAIL] {name}: {tail[:70]}", file=sys.stderr)
+                fails.append(name)
+                continue
+        obj = objdir / f"{name}.obj"
+        r = _run([halsc, f"--parm={halorder.get_parms(name)}", "-o", str(obj),
+                  f"--workdir={cfdir / (name + '.work')}", str(halout)],
+                 verbose=verbose, env=env, label=f"halsc {name}")
+        if r.returncode != 0 or not obj.exists():
+            print(f"  [halsc FAIL] {name}", file=sys.stderr)
+            fails.append(name)
+            continue
+        ok += 1
+
+    if fails:
+        return ok, fails
+    image = out / f"{params['CRTFMTLM']}.bin"
+    linker = _tool("deucflm", python)      # no wrapper -> the module
+    if linker[0] == python:
+        linker = [python, "-m", "dfg.deucflm"]
+    r = _run([*linker, str(cfsysin),
+              "-L", str(objdir), "-o", str(image)],
+             verbose=verbose, env=env, label="deucflm")
+    if r.returncode != 0 or not image.exists():
+        tail = ((r.stderr or "").strip().splitlines()[-1:] or ["?"])[0]
+        print(f"  [deucflm FAIL] {tail[:70]}", file=sys.stderr)
+        fails.append(params["CRTFMTLM"])
+    else:
+        print(f"  [critfmt] {image} "
+              f"({image.stat().st_size // 2} halfwords)")
+    return ok, fails
+
+
 def display(sources, objdir: Path, gendir: Path, halsc: str, python: str,
             pass_rel32: Path, srcdirs, incl80,
             deck_root: Path | None, verbose: int = 0,
@@ -1460,6 +1547,9 @@ def main(
     run_display: Annotated[bool, typer.Option("--display",
         help="build the display decks (dfg generate -> preprocess -> "
              "halsc against a scratch TEMPLIB copy); run after --hal")] = False,
+    run_critfmt: Annotated[bool, typer.Option("--critfmt",
+        help="build the DEU critical-format load module from CON80/CFSYSIN "
+             "into <out>/DEUCFLM.bin")] = False,
     run_link: Annotated[bool, typer.Option("--link",
         help="link the built objects into <out>/<target>.fcm "
              "with CON80 (lnk101 --concard)")] = False,
@@ -1584,6 +1674,26 @@ def main(
             print((r.stderr or "").rstrip(), file=sys.stderr)
         raise typer.Exit(r.returncode)
 
+    if run_critfmt and not build_all:
+        deckdir = Path(con80) if con80 \
+            else (Path(root) / "CON80" if root else None)
+        if deckdir is None:
+            raise typer.BadParameter("--critfmt needs --root or --con80")
+        tree = Path(root) if root else None
+        srcdirs = ([Path(d) for d in src] if src
+                   else [tree / d for d in SOURCE_DIRS] if tree else [])
+        _require_dirs([("--con80", deckdir),
+                       *[("--src", d) for d in srcdirs]])
+        outp = Path(out)
+        ok, fails = critfmt(deckdir, srcdirs, outp / "obj" / "critfmt",
+                            outp / "gen", os.path.abspath(halsc), python,
+                            pass_rel32.resolve(), outp, verbose)
+        print(f"built {ok} critical-format deck(s)"
+              + (f"; {len(fails)} failed" if fails else ""))
+        if fails:
+            print("  failed:", " ".join(sorted(fails)), file=sys.stderr)
+        raise typer.Exit(1 if fails else 0)
+
     # --build-all: run the whole MMU software build -- every phase segment
     # of the master deck in OFTMP order (each as a `--phase N` sub-build,
     # inheriting the tree/step options), then one cross-phase resolution at
@@ -1600,7 +1710,8 @@ def main(
         # Validate every directory the selected steps will need across ALL
         # phases before phase 1 starts (the per-phase sub-builds re-check,
         # but by then earlier phases have already run).
-        do_all = not (run_assemble or run_hal or run_display or run_link)
+        do_all = not (run_assemble or run_hal or run_display or run_link
+                      or run_critfmt)
         tree = Path(root) if root else None
         need = [("--con80", deckdir)]
         need += ([("--src", Path(d)) for d in src] if src
@@ -1743,6 +1854,15 @@ def main(
                         if not keep_going:
                             raise typer.Exit(1)
                     linked.add(pid)
+        if run_critfmt or do_all:          # tree-level: once, not per phase
+            print(f"===== critical formats =====", flush=True)
+            subprocess.run(
+                [python, "-m", "con80.con80build", "--critfmt",
+                 "--out", out, "--con80", str(deckdir),
+                 *(["--root", root] if root else []),
+                 *sum((["--src", d] for d in src), []),
+                 *(["--pass-rel32", str(pass_rel32)] if pass_rel32 else []),
+                 *(["-v"] * verbose)])
         print(f"===== cross-phase resolution =====", flush=True)
         r = subprocess.run(
             [python, "-m", "con80.con80build", "--resolve-phases",

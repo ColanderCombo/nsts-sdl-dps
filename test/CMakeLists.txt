@@ -316,6 +316,79 @@ set_tests_properties(libmodule PROPERTIES
 )
 
 # ---------------------------------------------------------------------
+# tools.mmu2fcm (GPC load emulation composing phase .libs into a
+# configuration .fcm) plus the two Mass-Memory-Build stamp generators it
+# drives: ap101Utils.mmbstamp (#PFCMGPT/#PCDCPHA) and ap101Utils.g3dat
+# (FCMG3DAT, the G3 archive destination address table).
+add_test(NAME mmu2fcm
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_mmu2fcm.py"
+)
+set_tests_properties(mmu2fcm PROPERTIES
+    LABELS "ap101Utils"
+    TIMEOUT 120
+)
+
+# ---------------------------------------------------------------------
+# tools.mmu2mmv (the built phases laid onto a mass memory tape volume):
+# the tape geometry and the two address forms -- an ALLOC card's FTSBB
+# with the file above the track, and the track-first form a unit reports
+# on the bus -- plus the .mmv file layout, read back by ext/sim/mmu when
+# that bundle is built.
+add_test(NAME mmu2mmv
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_mmu2mmv.py"
+)
+set_tests_properties(mmu2mmv PROPERTIES
+    LABELS "ap101Utils"
+    TIMEOUT 120
+)
+
+# ---------------------------------------------------------------------
+# tools.mmustamp (the Mass-Memory-Build tables written into the phase load
+# modules): which module owns a table -- every phase referencing a compool
+# declares it, one carries it -- and that the sidecar keeps the linkedit
+# content, so re-stamping preserves the baseline and --restore inverts.
+add_test(NAME mmustamp
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_mmustamp.py"
+)
+set_tests_properties(mmustamp PROPERTIES
+    LABELS "ap101Utils"
+    TIMEOUT 120
+)
+
+# ---------------------------------------------------------------------
+# tools.asmimage (assemble one AP-101 program and locate it at a fixed
+# address): the addressing forms an IOP program uses -- an 18-bit absolute
+# address, a negative addend on a command table base, a program-counter-
+# relative displacement -- and that ext/sim's committed IPL microcode image
+# still matches the source beside it.
+add_test(NAME asmimage
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_asmimage.py"
+)
+set_tests_properties(asmimage PROPERTIES
+    LABELS "tools"
+    TIMEOUT 120
+)
+
+# ---------------------------------------------------------------------
+# The located image as the simulator writes it to storage: the MSC
+# program, the two BCE programs, the receive sequence, and the three mass
+# memory command words the record address decides.
+if(EXISTS "${CMAKE_SOURCE_DIR}/ext/sim/test/test_iplmicro.cjs")
+    add_test(NAME iplmicro
+        COMMAND node "${CMAKE_SOURCE_DIR}/ext/sim/test/test_iplmicro.cjs"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/ext/sim"
+    )
+    set_tests_properties(iplmicro PROPERTIES
+        LABELS "gpc-sim"
+        TIMEOUT 120
+    )
+endif()
+
+# ---------------------------------------------------------------------
 # ap101Utils.halorder (con80build template closure inputs): D INCLUDE
 # TEMPLATE card forms (with/without a blank after the col-1 'D'),
 # display-deck INCLUDE= seeding, transitive seed closure, and the
@@ -365,6 +438,26 @@ set_tests_properties(dfg_deucflm PROPERTIES
     LABELS "dfg"
     TIMEOUT 120
 )
+# The critical formats as a build step: con80build --critfmt resolves the
+# CFSYSIN members to decks, runs dfg + halsc on each, and links DEUCFLM.
+# The unit above gates the image's structure, this the wiring.  Needs the
+# toolchain and the OI tree.
+if(EXISTS "${CMAKE_SOURCE_DIR}/code/OI340700/CON80/CFSYSIN")
+    add_test(NAME dfg_critfmt_build
+        COMMAND "${CMAKE_BINARY_DIR}/bin/con80build"
+            --root "${CMAKE_SOURCE_DIR}/code/OI340700"
+            --out "${CMAKE_CURRENT_BINARY_DIR}/critfmt"
+            --critfmt
+    )
+    set_tests_properties(dfg_critfmt_build PROPERTIES
+        LABELS "dfg"
+        TIMEOUT 300
+        # The step exits nonzero on any failure; this catches the case
+        # that would not -- no members, so nothing linked.
+        PASS_REGULAR_EXPRESSION "DEUCFLM.bin"
+    )
+endif()
+
 add_custom_target(test-dfg
     COMMAND "${CMAKE_CTEST_COMMAND}" -L dfg --output-on-failure
     DEPENDS uv_sync

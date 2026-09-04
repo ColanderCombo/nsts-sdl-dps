@@ -158,7 +158,23 @@ list(APPEND GPC_SIM_SOURCES
     "${SIM_DIR}/esbuild/esbuild.gpc.config.js"
     "${SIM_DIR}/electron-esbuild.config.yaml"
     "${SIM_DIR}/package.json"
+    "${SIM_DIR}/gpc/gen/fakeipl.json"
 )
+
+set(IPL_MICRO_ASM "${SIM_DIR}/gpc/asm/fakeipl.asm")
+set(IPL_MICRO_JSON "${SIM_DIR}/gpc/gen/fakeipl.json")
+add_custom_command(
+    OUTPUT "${IPL_MICRO_JSON}"
+    COMMAND "${CMAKE_BINARY_DIR}/bin/asmimage" "${IPL_MICRO_ASM}"
+            --origin 0x3FF80
+            --out "${IPL_MICRO_JSON}"
+            --listing "${SIM_DIR}/gpc/gen/fakeipl.lst"
+    DEPENDS "${IPL_MICRO_ASM}"
+    COMMENT "Assembling the IPL microcode IOP programs"
+    VERBATIM
+)
+add_custom_target(ipl-micro DEPENDS "${IPL_MICRO_JSON}")
+add_dependencies(ipl-micro asm101 lnk101)
 
 set(GPC_SIM_STAMP "${CMAKE_BINARY_DIR}/gpc-sim.stamp")
 set(GPC_NPM_STAMP "${CMAKE_BINARY_DIR}/gpc-npm.stamp")
@@ -182,6 +198,7 @@ add_custom_command(
     VERBATIM
 )
 add_custom_target(gpc-sim ALL DEPENDS "${GPC_SIM_STAMP}")
+add_dependencies(gpc-sim ipl-micro)
 
 # Self-contained package target — invokes electron-builder to produce a
 # distributable binary for the host platform.  Output lands in

@@ -4,6 +4,8 @@
 # Subcommands:
 #   gpc run <fcm>       — batch execution
 #   gpc debug <fcm>     — interactive REPL debugger
+#   gpc dbg-serve <fcm> — headless debugger on a socket
+#   gpc dbg-client ...  — send a command to a dbg-serve session
 #   gpc dump <fcm>      — FCM dump report
 #   gpc disasm <fcm>    — disassembly listing
 #

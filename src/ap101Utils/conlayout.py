@@ -51,6 +51,7 @@ BANK_SIZE_HW = 0x8000 # == 32K HW's, 64KB
 # after it land past the reserve instead of packing right behind the pool
 # content.
 Z1_MAGIC_OVERLAY = "Z1"
+Z1_POOL_START_HW = 0x1A8   # LOWCORE's OVERLAY Z1: the PSA ends here
 Z1_POOL_END_HW   = 0x51E   # DSES ($ZDSECLR) start == top of the Z1 pool region
 
 # AUTOCALL / orphan-flush placement pins come from a linkorder.json pins
@@ -139,7 +140,7 @@ class LayoutEngine:
             # ZCON pool's per-config growth.  run() promotes this reserve
             # into `occupied` for decks that do not own the Z1 overlay
             # themselves (see the promotion note there).
-            self.base_occupied.append((0x1A8, Z1_POOL_END_HW))
+            self.base_occupied.append((Z1_POOL_START_HW, Z1_POOL_END_HW))
             self.base_occupied.sort()
 
     def _next_free(self, lc: int, size: int, ignore=None) -> int:
@@ -204,7 +205,7 @@ class LayoutEngine:
         # buffer_block/_next_free flush.  A Z1-OWNING deck must NOT get the
         # reserve in `occupied`: its pinned `OVERLAY Z1` island and the
         # following islands legitimately live there.
-        z1_reserve = (0x1A8, Z1_POOL_END_HW)
+        z1_reserve = (Z1_POOL_START_HW, Z1_POOL_END_HW)
         z1_promoted = None      # pinned islands _next_free past it (pin wins)
         if z1_reserve in self.base_occupied \
                 and not any(o.verb == "OVERLAY"

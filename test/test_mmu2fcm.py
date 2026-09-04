@@ -88,11 +88,17 @@ def runMmbstamp():
           str([i for i, lb in enumerate(lbs) if lb.sot]))
 
     # -- load-block derivation from a synthetic phase ------------------------
+    # The Z1 pool lives in [Z1_POOL_START_HW, zconPoolNext); the synthetic
+    # one here is placed inside that window because the region is bounded
+    # BELOW as well -- what lies under it is the PSA, which a phase
+    # supplies and carries like any other content.
+    Z1 = mmbstamp.Z1_POOL_START_HW
     lib = LibModule(name='PHASE99')
-    lib.linkState = {'zconPoolNext': 2 * 0x120}   # pool cursor at hw 0x120
+    lib.linkState = {'zconPoolNext': 2 * (Z1 + 0x38)}
     lib.extents = [
-        Extent(2 * 0x0E0, b'\x11\x11' * 2),   # re-supply below parent cursor
-        Extent(2 * 0x100, b'\x22\x22' * 16),  # own pool cells
+        Extent(2 * 0x000, b'\x99\x99' * 8),   # the PSA: under the pool
+        Extent(2 * (Z1 + 0x08), b'\x11\x11' * 2),   # re-supply below parent
+        Extent(2 * (Z1 + 0x18), b'\x22\x22' * 16),  # own pool cells
         Extent(2 * 0x200, b'\x33\x33' * 14),  # unit [0x200,0x210)
         Extent(2 * 0x210, b'\x44\x44' * 16),  # contiguous: merges
         Extent(2 * 0x300, b'\x55\x55' * 10),  # P0 unit [0x300,0x30C)
@@ -102,19 +108,24 @@ def runMmbstamp():
     ]
     prot = {0x30C: True, 0x30D: True, 0x30E: True, 0x30F: True}
     look = lambda hw: prot.get(hw, False)     # noqa: E731
-    lbs = mmbstamp.derive_load_blocks(lib, parent_pool=0x100, look=look,
+    lbs = mmbstamp.derive_load_blocks(lib, parent_pool=Z1 + 0x18, look=look,
                                       himem=False)
     got = [(lb.start, lb.length, lb.protected) for lb in lbs]
     check('lb_derive', got == [
-        (0x100, 0x20, True),        # pool: [own start, zconPoolNext), prot
+        (0x000, 0xA, False),        # the PSA is content, not pool
+        (Z1 + 0x18, 0x20, True),    # pool: [own start, zconPoolNext), prot
         (0x200, 0x22, False),       # two checksum groups merged
         (0x300, 0xC, False),        # split at protection change
         (0x30C, 0x6, True),
         (0x7FF0, 0x10, False),      # capped at the bank boundary
         (0x8000, 0x12, False),      # remainder in bank 1
     ], str([(hex(a), hex(b), c) for a, b, c in got]))
-    check('lb_words', lbs[5].words() == (0x8000, 0x0610, 0x12),
-          str(lbs[5].words()))
+    check('lb_words', lbs[6].words() == (0x8000, 0x0610, 0x12),
+          str(lbs[6].words()))
+    # ...and the phase table therefore carries low core, which is what
+    # makes the loader unprotect it before the read.
+    check('lb_psa_words', lbs[0].words() == (0x0000, 0x0600, 0xA),
+          str(lbs[0].words()))
     # merge cap: two adjacent 8200-hw groups stay separate (> 16384 merged)
     lib2 = LibModule(name='PHASE98')
     lib2.extents = [Extent(2 * 0x1000, b'\x9A' * 2 * 8198),
@@ -134,6 +145,44 @@ def runMmbstamp():
     check('lb_odd_pad', [(lb.start, lb.length) for lb in lbsp]
           == [(0x1000, 0x1E)],          # 0x1000..0x101C incl. the checksum
           str([(hex(lb.start), hex(lb.length)) for lb in lbsp]))
+
+    # -- RESERVE: a region the deck allocates and loads nothing into.
+    # No extent names it, so it is handed in.  It takes a load block,
+    # allocation only: the reserve flag, the length as allocated with no
+    # checksum slot, and no merge with the text either side of it.
+    libr = LibModule(name='PHASE94')
+    libr.extents = [Extent(2 * 0x1000, b'\xD1' * 2 * 0x10),
+                    Extent(2 * 0x1400, b'\xD2' * 2 * 0x10)]
+    lbsr = mmbstamp.derive_load_blocks(libr, 0, lambda hw: False, False,
+                                       reserves=[(0x1012, 0x1400)])
+    check('lb_reserve', [(lb.start, lb.length, lb.reserve) for lb in lbsr]
+          == [(0x1000, 0x12, False),      # text, with its checksum slot
+              (0x1012, 0x3EE, True),      # allocation only, no slot
+              (0x1400, 0x12, False)],
+          str([(hex(lb.start), hex(lb.length), lb.reserve) for lb in lbsr]))
+    check('lb_reserve_flag', lbsr[1].words() == (0x1012, 0x2600, 0x3EE),
+          str([hex(w) for w in lbsr[1].words()]))
+    # It carries no tape, so it costs the phase no MM blocks.
+    ncontR, _ = mmbstamp.pack_mm(lbsr, 0)
+    check('lb_reserve_packs_free', ncontR == 2, str(ncontR))
+    # A run that a reserve region interrupts does not merge across it.
+    lbsr2 = mmbstamp.derive_load_blocks(libr, 0, lambda hw: False, False,
+                                        reserves=[(0x1012, 0x1014)])
+    check('lb_reserve_no_merge',
+          [(lb.start, lb.length, lb.reserve) for lb in lbsr2]
+          == [(0x1000, 0x12, False), (0x1012, 0x2, True),
+              (0x1400, 0x12, False)],
+          str([(hex(lb.start), hex(lb.length), lb.reserve) for lb in lbsr2]))
+    # A reserve region that spans a bank boundary splits like any other.
+    libb = LibModule(name='PHASE92')
+    libb.extents = [Extent(2 * 0x100, b'\xD3' * 2 * 0x10)]
+    lbsb = mmbstamp.derive_load_blocks(libb, 0, lambda hw: False, False,
+                                       reserves=[(0x7FF0, 0x8010)])
+    check('lb_reserve_bank_split',
+          [(lb.start, lb.length) for lb in lbsb if lb.reserve]
+          == [(0x7FF0, 0x10), (0x8000, 0x10)],
+          str([(hex(lb.start), hex(lb.length))
+               for lb in lbsb if lb.reserve]))
 
     # -- FillRule: the LE's pad past an auto-placed group tail ---------------
     lib3 = LibModule(name='PHASE97')
@@ -254,6 +303,64 @@ def runMmbstamp():
         check('stamp_missing', False, 'no error for missing csect')
     except mmbstamp.StampError:
         check('stamp_missing', True)
+
+
+def runIplTables():
+    """stamp_ipl(): the IPL phase table lands at its csect, and the
+    loader's length and checksum are taken over [SSLSTART, SSLEND) of the
+    finished image -- after the table itself is written."""
+    sslptAt, cksAt, sslAt = 0x200, 0x300, 0x100
+    sym = {
+        'sections': [
+            {'name': mmbstamp.SSLPT_CSECT, 'address': sslptAt,
+             'size': mmbstamp.SSLPT_SIZE},
+            {'name': mmbstamp.CKSUM_CSECT, 'address': cksAt, 'size': 4},
+        ],
+        'symbols': [
+            {'name': mmbstamp.SSL_START_SYM, 'address': sslAt},
+            {'name': mmbstamp.SSL_END_SYM, 'address': sslAt + 4},
+        ],
+    }
+    image = bytearray(0x1000)
+    for i, w in enumerate((0x1234, 0xFFFF, 0x0001, 0xABCD)):
+        image[2 * (sslAt + i):2 * (sslAt + i) + 2] = w.to_bytes(2, 'big')
+    sslpt = [(i * 7) & 0xFFFF for i in range(mmbstamp.SSLPT_SIZE)]
+    out = mmbstamp.stamp_ipl(bytes(image), sym, sslpt)
+
+    def hw(a):
+        return int.from_bytes(out[2 * a:2 * a + 2], 'big')
+
+    check('ipl_sslpt_head', hw(sslptAt) == sslpt[0], hex(hw(sslptAt)))
+    check('ipl_sslpt_tail',
+          hw(sslptAt + mmbstamp.SSLPT_SIZE - 1) == sslpt[-1])
+    check('ipl_sslpt_bounded', hw(sslptAt + mmbstamp.SSLPT_SIZE) == 0,
+          'wrote past the csect')
+    check('ipl_ssl_len', hw(cksAt + mmbstamp.CKSUM_LENGTH_OFF) == 4,
+          str(hw(cksAt + mmbstamp.CKSUM_LENGTH_OFF)))
+    want = (0x1234 + 0xFFFF + 0x0001 + 0xABCD) & 0xFFFF
+    check('ipl_ssl_cksum', hw(cksAt + mmbstamp.CKSUM_SUM_OFF) == want,
+          f'{hw(cksAt + mmbstamp.CKSUM_SUM_OFF):04X} != {want:04X}')
+    check('ipl_extent', mmbstamp.ssl_extent(sym) == (sslAt, 4))
+
+    # a composition without the IPL phase names the missing csect
+    for drop in (mmbstamp.SSLPT_CSECT, mmbstamp.CKSUM_CSECT):
+        thin = dict(sym, sections=[x for x in sym['sections']
+                                   if x['name'] != drop])
+        try:
+            mmbstamp.stamp_ipl(bytes(image), thin, sslpt)
+            check(f'ipl_missing_{drop}', False, 'no error')
+        except mmbstamp.StampError as e:
+            check(f'ipl_missing_{drop}', drop in str(e), str(e))
+
+    # an area too small to hold the table is a finding, not a truncation
+    small = dict(sym, sections=[dict(x, size=8)
+                                if x['name'] == mmbstamp.SSLPT_CSECT else x
+                                for x in sym['sections']])
+    try:
+        mmbstamp.stamp_ipl(bytes(image), small, sslpt)
+        check('ipl_small', False, 'no error for an undersized csect')
+    except mmbstamp.StampError:
+        check('ipl_small', True)
 
 
 def runG3dat():
@@ -500,6 +607,7 @@ def run():
               'CLI image differs from compose()')
 
     runMmbstamp()
+    runIplTables()
     runG3dat()
     runTapeText()
     runChecksumSlots()

@@ -17,6 +17,7 @@ repositories:
   - nsts-sim-gpc
     - `gpc run`: AP-101 batch emulator
     - `gpc debug`: AP-101 debugger (REPL)
+    - `gpc dbg-serve`/`gpc dbg-client`: the same debugger on a socket
     - `gpc gui`: AP-101 debugger GUI
   - Halmat: HALMAT intermediate-code tooling
 
@@ -177,10 +178,19 @@ build/bin/con80build --root code/OI340600 --out build/OI340600 --build-all
 
 `--phase N` builds one phase (its load module lands at
 `<out>/PHASE0N.lib`, with MAP dependencies resolved from the earlier
-phases' modules); `--build-all` builds every phase in master-deck order
-and then cross-resolves the load modules (`--resolve-phases` runs that
-step alone).  `build/bin/mmu2fcm` then composes phase load modules into
-a single memory image.
+phases' modules); `--build-all` builds every phase in master-deck order,
+builds the DEU critical formats, and then cross-resolves the load modules
+(`--resolve-phases` and `--critfmt` run those steps alone).
+
+`--critfmt` builds the DEU critical-format load module from
+`CON80/CFSYSIN`, described in `src/dfg/README.md`:
+
+```
+build/bin/con80build --root code/OI340700 --out build/OI340700 --critfmt
+```
+
+`build/bin/mmu2fcm` then composes phase load modules into a single memory
+image.
 
 Useful extras: `--plan` resolves and classifies the worklist without
 building anything, `--emit-cmake FILE` writes a standalone CMake recipe
@@ -223,7 +233,39 @@ EBCDIC-coded System and I-Load Identifier words a loader writes at low
 core (halfwords 0x1C and 0x20) — they are load-time values, not part of
 any load module, so omitting them leaves the words zero.
 `--stamp-phase-tables` additionally generates and stamps the
-mass-memory phase tables into the image.
+mass-memory phase tables into the image, `--stamp-ipl-tables` the IPL
+set's own, and `--boot` composes the machine the IPL microcode leaves
+behind.
+
+That stamps a composed **image**.  `mmustamp` writes the same values into
+the phase **load module**, which is what `mmu2mmv` builds each tape record
+from:
+
+```
+build/bin/mmustamp --mmu build/OI340700 --con80 code/OI340700/CON80
+build/bin/mmustamp --mmu build/OI340700 --report      # say what, change nothing
+build/bin/mmustamp --mmu build/OI340700 --restore     # put the linkedit content back
+```
+
+Run it after a relink and before `mmu2mmv`; it mutates the linkedit
+output, and `--restore` undoes that.  `src/tools/mmustamp.py` and
+`src/ap101Utils/mmbstamp.py` hold the detail.
+
+### Writing a mass memory tape: mmu2mmv
+
+`mmu2mmv` lays the built phases onto a `.mmv` tape volume at the
+addresses the MMU build's ALLOC cards give them, which is what the
+simulated mass memory unit serves to a GPC during an IPL:
+
+```
+build/bin/mmu2mmv --con80 code/OI340700/CON80 --mmu build/OI340700 \
+    --loadmod DEUCFLM=build/OI340700/DEUCFLM.bin \
+    --out build/mmu/mmu.mmv
+build/bin/mmu2mmv --con80 code/OI340700/CON80 --mmu build/OI340700 --report
+ext/sim/GPC.sh run --ipl-mm --real-time      # no image: it loads itself
+```
+
+`src/tools/mmu2mmv.py` holds the tape layout and the `LOADMOD` members.
 
 ### Disassembling/Listing a build image: mafgen
 

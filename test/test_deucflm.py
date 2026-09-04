@@ -68,8 +68,9 @@ def main():
     if params.get("CRTFMTLM") != "DEUCFLM":
         problems.append("CRTFMTLM parsed as %r" % params.get("CRTFMTLM"))
     # 20 CRTFMTCU entries (16 members + 4 SPARE), padded with spares to the
-    # 32 CFIT slots.
-    if len(slots) != 32 or slots.count(deucflm.SPARE) != 16:
+    # 30 format slots -- the last two of the 32 CFIT halfwords are the exit
+    # stub, not slots.
+    if len(slots) != 30 or slots.count(deucflm.SPARE) != 14:
         problems.append("CRTFMTCU slots: %d with %d SPARE"
                         % (len(slots), slots.count(deucflm.SPARE)))
 
@@ -102,6 +103,18 @@ def main():
         problems.append("word before checksum %04X != PAD %04X"
                         % (image[-2], params["PAD"]))
 
+    # The exit stub closes the CFIT: a sector-qualified jump to CFITDBA, and
+    # PAD -- the word every body ends on -- is the branch that reaches it.
+    exit_at = origin + cfitsize - deucflm.EXIT_WORDS
+    stub = image[exit_at - origin:cfitsize]
+    if stub != deucflm.exit_stub(params):
+        problems.append("exit stub at %04X is %s, not %s"
+                        % (exit_at, ["%04X" % w for w in stub],
+                           ["%04X" % w for w in deucflm.exit_stub(params)]))
+    if params["PAD"] & 0x0FFF != exit_at & 0x0FFF or params["PAD"] >> 12 != 1:
+        problems.append("PAD %04X is not the branch to the exit stub at %04X"
+                        % (params["PAD"], exit_at))
+
     starts = set()
     for i, name in enumerate(slots):
         w = image[i]
@@ -132,8 +145,8 @@ def main():
         for p in problems:
             print("  " + p)
         return 1
-    print("ALL PASS: DEUCFLM %d halfwords, %d slots, %d bodies"
-          % (len(image), cfitsize, len(starts)))
+    print("ALL PASS: DEUCFLM %d halfwords, %d slots + exit stub, %d bodies"
+          % (len(image), len(slots), len(starts)))
     return 0
 
 

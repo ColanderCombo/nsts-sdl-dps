@@ -75,6 +75,10 @@ def generate(
                              help="Treat NAME as an AMT-mode deck (PMF=/AMTx= "
                              "cards -> CDA_Pnn_AMT moding-table compool). "
                              "Auto-detected from the deck when omitted."),
+    dfb: Optional[Path] = typer.Option(None, "--dfb",
+                                       help="Write the deck's static section "
+                                       "as a raw big-endian halfword stream "
+                                       "(a .dfb) instead of HAL/S source."),
 ) -> None:
     """Translate display NAME into HAL/S COMPOOL source."""
     if sdflib:
@@ -82,6 +86,10 @@ def generate(
     if deck_root:
         import os
         os.environ["DFG_DECK_ROOT"] = str(deck_root)
+
+    if dfb is not None:
+        _write_dfb(name, dfb)
+        return
 
     # AMT mode: the CDAPnn decks are moding-table inputs, not display decks.
     # Purely syntactic (no SDF), so it branches before display encoding.
@@ -123,6 +131,26 @@ def generate(
         sys.stdout.write(text)
     else:
         Path(output).write_text(text)
+
+
+def _write_dfb(name, out):
+    """The deck's static section as the big-endian halfword stream a
+    display unit draws."""
+    import struct
+    from .deck import encodable_directives, resolve_deck
+    from .static import build_static
+
+    path = resolve_deck(name)
+    if path is None:
+        typer.echo("error: no deck %s" % name, err=True)
+        raise typer.Exit(2)
+    ds = list(encodable_directives(path))
+    segs = build_static(ds, crtfmt=any(k == "CRTFMT" for k, _ in ds))
+    if not segs:
+        typer.echo("error: %s has no static section" % name, err=True)
+        raise typer.Exit(1)
+    words = [int(w) & 0xFFFF for seg in segs for w in seg.words]
+    Path(out).write_bytes(struct.pack(">%dH" % len(words), *words))
 
 
 def main():

@@ -417,6 +417,21 @@ class Edge:
 
 
 @dataclass
+class LoadmodAlloc:
+    """One placement of a LOADMOD member: the member, the function whose
+    allocation carries it, and where that allocation is."""
+    member: str              # DEUCFLM
+    label: str               # DMACDFT1 -- the function
+    sysid: str | None        # SYS5
+    addr: str                # 44408, the five-digit FTSBB card form
+    blocks: int              # BLKS
+    halfwords: int | None    # SYSTEM HWDS, the expected member length
+    init: str | None         # ALLOC INIT fill
+    sys_source: str          # the MMUSYS member holding the LOADMOD card
+    alloc_source: str        # the MMUDAT member holding the ALLOC card
+
+
+@dataclass
 class MMUBuild:
     deck: MMUDeck
     root: str
@@ -457,6 +472,49 @@ class MMUBuild:
     def loadmods(self) -> list[Statement]:
         """LOADMOD statements -- cross-links to CONCARD linkedit members."""
         return self._by_verb("LOADMOD")
+
+    def loadmod_allocations(self) -> list["LoadmodAlloc"]:
+        """Where each LOADMOD member goes on the tape.
+
+        A LOADMOD statement names a member; the place is the ALLOC card of
+        the function the statement sits under.  Both are keyed by that
+        function's label, in two members -- the PHASE/SYSTEM cards in
+        MMUSYSnx, the ALLOC card in MMUDATnx -- and the join turns
+        `LOADMOD,MEMBER=DEUCFLM` into "8 blocks at 44408".  The SYSTEM
+        card's HWDS is the expected member length.
+
+        One member may be allocated several times: the DEU loads are
+        carried in three copies, one per PASS area, one function each.
+        """
+        alloc = {st.label: st for st in self.allocations() if st.label}
+        system = {st.label: st for st in self.systems() if st.label}
+        # A LOADMOD card carries no label; the function it belongs to is
+        # the labelled card before it in the same member.
+        label_at: dict[tuple[str, int], str] = {}
+        for src in {st.source for st in self.loadmods()}:
+            cur = ""
+            for st in self.statements(src):
+                if st.label:
+                    cur = st.label
+                label_at[(src, st.line_no)] = cur
+        out: list[LoadmodAlloc] = []
+        for st in self.loadmods():
+            member = st.params.get("MEMBER")
+            label = label_at.get((st.source, st.line_no), "")
+            a = alloc.get(label)
+            if not member or a is None:
+                continue
+            sy = system.get(label)
+            hwds = sy.params.get("HWDS") if sy else None
+            out.append(LoadmodAlloc(
+                member=member, label=label,
+                sysid=a.params.get("SYSID"),
+                addr=a.params.get("ADDR", ""),
+                blocks=int(a.params.get("BLKS", "0") or 0),
+                halfwords=int(hwds, 16) if hwds else None,
+                init=a.params.get("INIT"),
+                sys_source=st.source, alloc_source=a.source))
+        return out
 
     def directories(self, member: str | None = None) -> list[Directory]:
         """DIRECTRY statements paired with the DATA/DMMD card that fills them.

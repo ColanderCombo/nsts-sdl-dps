@@ -395,7 +395,7 @@ class FcmImage:
                                                        root))
         lib.extents = staged        # region-cut extents never reach the MMB
         lbs = mmbstamp.derive_load_blocks(
-            lib, mmbstamp.pool_next_hw(LibModule.read(parent_lib)), look,
+            lib, mmbstamp.pool_own_start(mmu_root, n), look,
             himem=n in src.ipl, fill=fill, mc=n in src.mc)
         return [lb.start + lb.length - 2 for lb in lbs]
 

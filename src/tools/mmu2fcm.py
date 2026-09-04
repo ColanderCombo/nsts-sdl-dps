@@ -40,6 +40,22 @@ FILL_SPLIT_HW = 0x20000              # C9FB below, C6C6 at/above
 BANK_HW = 0x8000                     # 32K-hw bank; a checksum slot never
                                      # crosses into the next bank
 SLOT_FILL = b"\xC6\xC6"              # MMB INIT=C6C6 staging buffer
+SECTOR_HW = 0x8000                   # one BSR/DSR sector: a bootstrap copy
+BOOT_PHASE = 1                       # PHASE01, the FMAIPL2 bootstrap copy
+
+
+def bootImage(image: bytes, mmuRoot: Path, con80: Path) -> bytes:
+    """The bootstrap copy over the IPL fill `compose` laid down (POO
+    2.5.3.3), one sector.  Control reaches the loader through the system
+    reset PSW at halfword 0x14 of the PSA the record carries."""
+    from tools.mmu2mmv import bootRecord
+    rec = bootRecord(mmuRoot, con80)
+    if len(rec) != SECTOR_HW:
+        raise ValueError(f"bootstrap record is {len(rec)} hw, not one "
+                         f"{SECTOR_HW} hw sector")
+    buf = bytearray(image)
+    buf[0:2 * SECTOR_HW] = b"".join(w.to_bytes(2, "big") for w in rec)
+    return bytes(buf)
 
 
 def slotHalfwords(endHW: int) -> range:
@@ -622,8 +638,8 @@ def unionSym(cfgName: str, owner: bytearray, info: list[dict],
 
     # Store protection, overlay-aware: each constituent's linker map masked
     # to the halfwords it still owns in the composed image.  Omitted when no
-    # constituent carries one -- an empty map would claim the image is
-    # unprotected, which is a different statement from having no map.
+    # constituent carries one; an empty map would claim the image is
+    # unprotected.
     protect = bytearray(MEM_HW)
     mapped, bare = 0, []
     for ph in info:
@@ -710,7 +726,7 @@ def stampIdentifiers(image, systemId=None, iloadId=None):
         off = base * 2
         buf[off:off + psaIdent.IDENT_BYTES] = raw
         log.info(f"stamped {name} identifier {text} at hw {base:#06x} "
-                 f"({raw.hex().upper()}) -- post-IPL memory, NOT load module")
+                 f"({raw.hex().upper()}) -- post-IPL memory")
     return bytes(buf)
 
 
@@ -748,13 +764,10 @@ def stampChecksums(image, owner, info, mmuRoot: Path, src, skip: set,
         n = ph["phase"]
         if n is None or n in skip or (n != 2 and n not in src.assigned):
             continue                  # OPS0DSP pseudo-phase / boot / IPL-cut
-        # phase_load_blocks, not a private derive_load_blocks call: it
-        # is the single definition of a phase's load-block partition,
-        # because it also runs fit_budget, which backs a bank tail up to
-        # keep the phase inside its ALLOC BLKS.  It reads the .lib fresh
-        # off disk, i.e. uncut, which is also deliberate -- the MMB sums a
-        # block over the tape's own record, not over what this
-        # configuration ends up loading.
+        # phase_load_blocks is the one definition of a phase's partition:
+        # it also runs fit_budget, which backs a bank tail up to keep the
+        # phase inside its ALLOC BLKS.  It reads the .lib uncut, off disk,
+        # because the MMB sums a block over the tape record.
         lbs = mmbstamp.phase_load_blocks(Path(mmuRoot), n, src)[0]
         # The tape record, not the .lib: an auto-generated @-stack is
         # allocation with no tape text, so the MMB's staging fill covers
@@ -763,13 +776,10 @@ def stampChecksums(image, owner, info, mmuRoot: Path, src, skip: set,
         wrote = 0
         for lb in lbs:
             slot = lb.start + lb.length - 2
-            # Same test as fcmImage._checksum_slots' `owner[a] < order`,
-            # deliberately: a configuration loads phase by phase and a
-            # later phase's block tail overwrites an earlier phase's
-            # text, so only text at or after this block's own load order
-            # can take the slot away.  A stamped value that happens to
-            # equal the C6C6 staging fill is not a memory-vs-load-module
-            # difference; listing.py's fill test leaves it unstarred.
+            # The test fcmImage._checksum_slots uses, `owner[a] < order`:
+            # a configuration loads phase by phase and a later phase's
+            # block tail overwrites an earlier phase's text, so only text
+            # at or after this block's load order takes the slot away.
             if (slot + 2 > MEM_HW
                     or owner[slot] >= ph["index"]
                     or owner[slot + 1] >= ph["index"]):
@@ -789,7 +799,7 @@ def stampChecksums(image, owner, info, mmuRoot: Path, src, skip: set,
         buf[2 * slot:2 * slot + 4] = bytes(2) + v.to_bytes(2, "big")
     if stamped:
         log.info(f"stamped {len(stamped)} load-block checksum slots -- "
-                 f"Mass-Memory-Build tape content, NOT load module")
+                 f"Mass-Memory-Build content")
     return (bytes(buf), sorted(stamped),
             [[a, lbSlot[a]] for a in sorted(lbSlot)])
 
@@ -814,22 +824,28 @@ def main(argv=None):
                     help="output directory (default: <mmu>/<config>)")
     ap.add_argument("--system-id", metavar="MM.NNP.JJA",
                     help="stamp the PASS System Identifier at hw 0x1C "
-                         "(e.g. 29.01A.01B);")
+                         "(e.g. 29.01A.01B)")
     ap.add_argument("--iload-id", metavar="XX.Y.Z.AS.BB",
                     help="stamp the I-Load Identifier at hw 0x20 "
                          "(e.g. 29.1.0.00.0B)")
     ap.add_argument("--stamp-phase-tables",
                     action=argparse.BooleanOptionalAction, default=False,
                     help="generate and stamp the Mass-Memory-Build tape "
-                         "tables (#PFCMGPT, #PCDCPHA, FCMG3DAT) into the "
-                         "composed image.")
+                         "tables (#PFCMGPT, #PCDCPHA, FCMG3DAT)")
     ap.add_argument("--stamp-g3dat", action="store_true",
-                    help="stamp ONLY the G3 archive destination address "
-                         "table (FCMG3DAT); redundant with "
-                         "--stamp-phase-tables, which now includes it")
+                    help="stamp just the G3 archive destination address "
+                         "table (FCMG3DAT)")
     ap.add_argument("--stamp-checksums",
                     action=argparse.BooleanOptionalAction, default=False,
                     help="compute and stamp each tape load block's checksum")
+    ap.add_argument("--stamp-ipl-tables",
+                    action=argparse.BooleanOptionalAction, default=False,
+                    help="generate and stamp the IPL set's tables "
+                         "(FCMSSLPT, FCMCKSUM)")
+    ap.add_argument("--boot", action="store_true",
+                    help="compose the machine as the IPL microcode leaves "
+                         "it; implies --phases 1 and names the output "
+                         "BOOT")
     ap.add_argument("--con80", type=Path, required=True,
                     help="CON80 deck directory")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -850,6 +866,10 @@ def main(argv=None):
         print(listConfigs(configs))
         return 0
 
+    if args.boot and not args.phases:
+        args.phases = str(BOOT_PHASE)
+        if args.config == "SSW":              # the parser default
+            args.config = "BOOT"
     if args.phases:
         phases = [int(p) for p in args.phases.split(",")]
     elif args.config in configs:
@@ -902,6 +922,16 @@ def main(argv=None):
         mcf = configs[args.config].mcf_phases
     sym = unionSym(args.config, owner, info, ops0, mcfPhases=mcf)
     sym["ownerPhaseRunsHW"] = ownerRuns(owner, info)
+    if args.boot:
+        from ap101Utils import mmbstamp
+        try:
+            image = bootImage(image, args.mmu, args.con80)
+        except (mmbstamp.StampError, ValueError) as e:
+            ap.error(str(e))
+        sym["storeProtect"] = {"unit": "halfword", "ranges": [[0, MEM_HW]]}
+        log.info(f"bootstrap copy over sector zero ({SECTOR_HW} hw), "
+                 f"{mmbstamp.BOOT_PT_SYMS[0]} stamped, "
+                 f"{MEM_HW} hw store protected")
     try:
         image = stampIdentifiers(image, args.system_id, args.iload_id)
     except psaIdent.IdentError as e:
@@ -921,8 +951,7 @@ def main(argv=None):
                   f" (no {_g3.G3DAT_CSECT}: see notes)")
         log.info(f"stamped {mmbstamp.GPT_CSECT} ({mmbstamp.GPT_SIZE} hw), "
                  f"{mmbstamp.CPHA_CSECT} ({mmbstamp.CPHA_SIZE} hw)"
-                 f"{_extra} -- Mass-Memory-Build tape content, NOT load "
-                 f"module")
+                 f"{_extra} -- Mass-Memory-Build content")
     if args.stamp_g3dat:
         from ap101Utils import g3dat as g3datmod
         from ap101Utils import mmbstamp
@@ -934,8 +963,20 @@ def main(argv=None):
         for n in dat.notes:
             log.debug(f"g3dat: {n}")
         log.info(f"stamped {g3datmod.G3DAT_CSECT} ({g3datmod.G3DAT_SIZE} hw, "
-                 f"{len(dat.entries)} entries) -- Mass-Memory-Build tape "
-                 f"content, NOT load module")
+                 f"{len(dat.entries)} entries) -- Mass-Memory-Build content")
+    if args.stamp_ipl_tables:
+        from ap101Utils import mmbstamp
+        try:
+            sslpt, notes = mmbstamp.generate_sslpt(args.mmu, args.con80)
+            image = mmbstamp.stamp_ipl(image, sym, sslpt)
+        except mmbstamp.StampError as e:
+            ap.error(str(e))
+        for n in notes:
+            log.debug(f"sslpt: {n}")
+        start, count = mmbstamp.ssl_extent(sym)
+        log.info(f"stamped {mmbstamp.SSLPT_CSECT} ({mmbstamp.SSLPT_SIZE} hw) "
+                 f"and {mmbstamp.CKSUM_CSECT} over {count} hw at "
+                 f"{start:#07x} -- Mass-Memory-Build content")
     if args.stamp_checksums:
         from ap101Utils import mmbstamp
         try:
