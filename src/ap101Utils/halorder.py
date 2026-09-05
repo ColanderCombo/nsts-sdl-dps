@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-from . import cards
+from . import cards, members
 from pathlib import Path
 
 
@@ -133,7 +133,7 @@ def _code_lines(path) -> list[str]:
     code/directive cards the compiler sees.
     """
     path = Path(path)
-    cmap = _cardtype_map(path.stem)
+    cmap = _cardtype_map(members.name(path))
     lines: list[str] = []
     for raw in open(path, errors="replace"):
         c = raw[:1]

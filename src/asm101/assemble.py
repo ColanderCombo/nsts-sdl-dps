@@ -26,6 +26,7 @@ from .cardreader import joinOperand
 from .larkparse import Aif, Equ, parse
 from .statement import Statement
 from ap101Utils.objModule import Module
+from ap101Utils import members
 from . import model101tables
 from .model101 import (
     generateObjectCode, sectionOffset,
@@ -609,17 +610,14 @@ class Assemble:
         else:
           fname = line.split()[2]
         for library in self.libraries:
-          for candidate in (fname + ".asm", fname):
-            fcopy = os.path.join(library, candidate)
-            if os.path.exists(fcopy) and os.path.isfile(fcopy):
-              found = True
-              self._log(f"  COPY {fname} from {self._relpath(library)}")
-              self._read_source_file(fcopy, sv_locals, sequence,
-                                    copy=True, printable=printable,
-                                    depth=depth,
-                                    library_scan=library_scan)
-              break
-          if found:
+          fcopy = members.find(fname, [library], (".asm",))
+          if fcopy is not None:
+            found = True
+            self._log(f"  COPY {fname} from {self._relpath(library)}")
+            self._read_source_file(str(fcopy), sv_locals, sequence,
+                                  copy=True, printable=printable,
+                                  depth=depth,
+                                  library_scan=library_scan)
             break
         if not found:
           raise AssemblyError(f"File {fname} for COPY not found")
@@ -949,25 +947,24 @@ class Assemble:
     if name in self._no_library_member:
       return False
     for library in self.libraries:
-      for candidate in (name, name + ".asm"):
-        path = os.path.join(library, candidate)
-        if os.path.isfile(path):
-          self._log(f"  on-demand macro {name} from {self._relpath(library)}")
-          # Give the library scan its OWN throwaway sequence namespace rather
-          # than the shared 'self.sequence_global_locals' that the primary
-          # source uses.  In library_scan mode the member's open-code AIF/AGO
-          # are never executed (gated out before the branch handlers), so its
-          # file-level sequence symbols are only ever written, never read --
-          # recording them in the shared dict pollutes the primary source's
-          # namespace.  (Concretely: GENERATE defines a '.END' sequence symbol;
-          # leaking it made FPMIHPC2's open-code 'AGO .END' resolve to the
-          # "wrong file" and silently no-op, so its end-of-routine deferred
-          # block re-ran forever until the ACTR budget tripped.)
-          self._read_source_file(path, svGlobalLocals, {},
-                                copy=False, printable=False, depth=0,
-                                library_scan=True)
-          if name in self.macros:
-            return True
+      path = members.find(name, [library], (".asm",))
+      if path is not None:
+        self._log(f"  on-demand macro {name} from {self._relpath(library)}")
+        # Give the library scan its OWN throwaway sequence namespace rather
+        # than the shared 'self.sequence_global_locals' that the primary
+        # source uses.  In library_scan mode the member's open-code AIF/AGO
+        # are never executed (gated out before the branch handlers), so its
+        # file-level sequence symbols are only ever written, never read --
+        # recording them in the shared dict pollutes the primary source's
+        # namespace.  (Concretely: GENERATE defines a '.END' sequence symbol;
+        # leaking it made FPMIHPC2's open-code 'AGO .END' resolve to the
+        # "wrong file" and silently no-op, so its end-of-routine deferred
+        # block re-ran forever until the ACTR budget tripped.)
+        self._read_source_file(str(path), svGlobalLocals, {},
+                              copy=False, printable=False, depth=0,
+                              library_scan=True)
+        if name in self.macros:
+          return True
     self._no_library_member.add(name)
     return False
 
@@ -990,7 +987,7 @@ class Assemble:
     #
     source_file_names = []
     for source_file in self.source_files:
-      source_file_names.append(source_file.stem)
+      source_file_names.append(members.name(source_file))
       self._log(f"Reading source file {self._relpath(source_file)}")
       self._read_source_file(str(source_file), svGlobalLocals,
                             self.sequence_global_locals,
@@ -1267,7 +1264,7 @@ class Assemble:
     data = {
         "version": 2,
         "tool": f"{PROGRAM} {VERSION}",
-        "source": self.source_files[-1].stem if self.source_files else None,
+        "source": members.name(self.source_files[-1]) if self.source_files else None,
         "sections": sections,
         "symbols": symbols,
         # [section, startByte, endByte, 'DC'|'DS', letter, elements,
@@ -1437,7 +1434,7 @@ class Assemble:
                     
         if stmt.copy:
           if not in_copy:
-            member_name = Path(stmt.file or "").stem
+            member_name = members.name(stmt.file or "")
             if stmt.printable:
               lines_this_page += 1
               f.write(f"         START OF COPY MEMBER {member_name:<8} RVL {rvl:02d} CONCATENATION NO. {concat:03d}  NEST {nest:03d}\n")

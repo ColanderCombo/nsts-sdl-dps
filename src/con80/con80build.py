@@ -32,7 +32,7 @@ from typing import Annotated, Optional
 os.environ["TYPER_USE_RICH"] = "0"  # disable fancy formatting
 import typer
 
-from ap101Utils import cards, concard, halorder
+from ap101Utils import cards, concard, halorder, members
 
 from . import compilecache
 
@@ -166,13 +166,20 @@ _RUNTIME_RE = re.compile(r"^(#?[QZ]|#?L|#?0|\$0|\$Y|\$X|#Y|#T)")
 # Patch-area decks: a source PCHnnSRC (SSSRC) is assembled to an object
 # whose CON80 object-library member name is PCHnnTXT -- the deck pulls it in
 # with INCLUDE SYSLIBL1(PCHnnTXT) and then INSERTs the csects it defines.
+# The source file is matched by its member name, so PCH10SRC and
+# PCH10SRC.asm are the same deck.
 _PATCH_SRC_RE = re.compile(r"^PCH\d+SRC$")
 _PATCH_MEMBER_RE = re.compile(r"^PCH\d+TXT$")
 
 
-def patch_member(src_name: str) -> str:
+def is_patch_source(path) -> bool:
+    """Whether a source filename or Path is a PCHnnSRC patch deck."""
+    return bool(_PATCH_SRC_RE.match(members.name(path)))
+
+
+def patch_member(src_name) -> str:
     """PCHnnSRC source filename -> PCHnnTXT object-library member name."""
-    return src_name[:-3] + "TXT"
+    return members.name(src_name)[:-3] + "TXT"
 
 
 # An IS-macro invocation in a patch deck: <label> IS <len>,<prefix>,<fill>.
@@ -216,15 +223,19 @@ class SourceIndex:
             for p in sorted(sub.iterdir()):
                 if not p.is_file():
                     continue
+                # Lookups name the member (an INCLUDE member, a csect
+                # stem); the file may carry a .asm or .hal on top of it.
+                nm = members.name(p)
+                self.by_name.setdefault(nm, p)
                 self.by_name.setdefault(p.name, p)
-                self.by_stem6.setdefault(p.name[:6], p)
+                self.by_stem6.setdefault(nm[:6], p)
                 # Some source filenames embed a '#' that is NOT part of the
                 # 6-char stem encoded in the csect name (e.g. the file
                 # DCI#STK backs csect #DDCISTK -> stem DCISTK).
                 # Index a '#'-stripped stem too so those resolve; setdefault
                 # keeps an exact-named file's claim on the key.
-                stripped = p.name.replace("#", "")[:6]
-                if stripped != p.name[:6]:
+                stripped = nm.replace("#", "")[:6]
+                if stripped != nm[:6]:
                     self.by_stem6.setdefault(stripped, p)
 
     def resolve(self, module: str) -> Path | None:
@@ -369,7 +380,7 @@ def included_csects(graph, src: SourceIndex) -> dict:
             continue
         # Patch decks define their csects through the IS macro, so the generic
         # CSECT/ENTRY scan finds nothing -- derive the names from the IS lines.
-        if _PATCH_SRC_RE.match(f.name):
+        if is_patch_source(f):
             for nm in patch_csects(f):
                 provided.setdefault(nm, f)
             continue
@@ -393,7 +404,7 @@ def patch_index(src: SourceIndex) -> dict[str, Path]:
         if not sub.is_dir():
             continue
         for p in sorted(sub.iterdir()):
-            if p.is_file() and _PATCH_SRC_RE.match(p.name):
+            if p.is_file() and is_patch_source(p):
                 for nm in patch_csects(p):
                     idx.setdefault(nm, p)
     return idx
@@ -433,7 +444,7 @@ def resolve_worklist(deck_dir: Path, root: str, src: SourceIndex,
         # filename-stem heuristic (which conflates split-source csects like
         # #DDCICYC -> DCI#DATA with the code file DCICYC).
         path = csect_defs.get(m) or src.resolve(m) or provided.get(m)
-        if path is not None and _PATCH_SRC_RE.match(path.name):
+        if path is not None and is_patch_source(path):
             patches.setdefault(path, patch_member(path.name))
             continue
         if path is None:
@@ -619,7 +630,7 @@ def assemble(sources, objdir: Path, mlib: Path, python: str,
              tolerable: int = 4, verbose: int = 0) -> tuple[int, list[str]]:
     """Assemble each source with asm101 into objdir/<stem>.obj.  Returns
     (ok_count, failures)."""
-    items = [(s, objdir / (s.stem + ".obj")) for s in sources]
+    items = [(s, objdir / (members.name(s) + ".obj")) for s in sources]
     return _assemble(items, objdir, mlib, python, tolerable, verbose)
 
 
@@ -667,7 +678,7 @@ def _deck_template_seeds(path: Path, overlays=()) -> list[str]:
                D INCLUDE TEMPLATEs.
     """
     extra = []
-    pre = _overlay_hal(overlays, path.stem)
+    pre = _overlay_hal(overlays, members.name(path))
     if pre is not None:
         extra = halorder.parse_hal(pre)[1]
     from dfg import amt
@@ -710,7 +721,7 @@ def _mirror_rewrite(path: Path) -> str | None:
     """The materialized mirror text for a deck that any build-layer
     source rewrite applies to, or None to mirror the pristine file.
     Currently only native-CARDTYPE comment remaps."""
-    chars = _native_comment_chars(path.stem)
+    chars = _native_comment_chars(members.name(path))
     if not chars:
         return None
     return comment_native_cards(path.read_bytes().decode("latin-1"), chars)
@@ -726,8 +737,9 @@ def _as_dirs(dirs) -> list:
 
 
 def _hal_mirror(dirs, haltree) -> None:
-    """Build a .hal-extensioned mirror of the (extensionless) HAL source
-    dirs.  Each directory is mirrored under its basename.
+    """Mirror the HAL source dirs with every member stored as
+    `<member>.hal`, whichever spelling the source tree uses.  Each
+    directory is mirrored under its basename.
 
     Most entries are symlinks to the pristine source.  Decks needing a
     build-layer source rewrite (see _mirror_rewrite: native-CARDTYPE
@@ -749,7 +761,7 @@ def _hal_mirror(dirs, haltree) -> None:
         for f in srcdir.iterdir():
             if not f.is_file():
                 continue
-            link = dst / (f.name + ".hal")
+            link = dst / members.filename(f, ".hal")
             if link in claimed:
                 continue
             claimed.add(link)
@@ -886,13 +898,13 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
         # the unit to NONHAL).  Reuse only when both members are present;
         # otherwise recompile (the compile cache makes that a fetch).
         def _real_sdf(p):
-            m = sdflib / f"##{p.stem[:6]:<6}.sdf"
+            m = sdflib / f"##{members.name(p)[:6]:<6}.sdf"
             # a 3,360-byte member is compile_stub's declaration-only seed
             # stub, not a real PASS3 SDF
             return m.exists() and m.stat().st_size > 3360
         reused = [p for p in extra
-                  if (tmplobj / (p.stem + ".obj")).exists()
-                  and (templib / f"@@{p.stem[:6]}").exists()
+                  if (tmplobj / (members.name(p) + ".obj")).exists()
+                  and (templib / f"@@{members.name(p)[:6]}").exists()
                   and _real_sdf(p)]
         extra = [p for p in extra if p not in set(reused)]
     sources = worklist + extra
@@ -918,8 +930,8 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
     ppdir.mkdir(parents=True, exist_ok=True)
     pp_of: dict = {}
     for srcpath in sources:
-        mirror = haltree / srcpath.parent.name / (srcpath.name + ".hal")
-        out = ppdir / (srcpath.stem + ".hal")
+        mirror = haltree / srcpath.parent.name / members.filename(srcpath, ".hal")
+        out = ppdir / members.filename(srcpath, ".hal")
         if mirror.exists():
             out.unlink(missing_ok=True)
             out.write_bytes(mirror.read_bytes())
@@ -942,7 +954,7 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
             shutil.rmtree(sdflib)
     for p in sources:
         for d in (objdir, tmplobj):
-            (d / (p.stem + ".obj")).unlink(missing_ok=True)
+            (d / (members.name(p) + ".obj")).unlink(missing_ok=True)
     if not incremental:
         _run([python, str(pass_rel32 / "prepareTEMPLIB"), "--clear"],
              verbose=verbose, cwd=str(gendir), env=env, label="prepareTEMPLIB")
@@ -1034,7 +1046,7 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
             binaries += sorted(hbin.glob("HALSFC-*"))
 
         def _mirror_bytes(p: Path) -> bytes:
-            m = haltree / p.parent.name / (p.name + ".hal")
+            m = haltree / p.parent.name / members.filename(p, ".hal")
             return (m if m.exists() else p).read_bytes()
 
         cache = compilecache.CompileCache(
@@ -1044,8 +1056,8 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
 
     def _verify_hit(srcpath, obj, parm, key):
         """--cache-verify: force a compile and compare against cached file"""
-        tout, sout = _private_out(srcpath.stem + ".verify")
-        fresh = outdir / (srcpath.stem + ".verify.obj")
+        tout, sout = _private_out(members.name(srcpath) + ".verify")
+        fresh = outdir / (members.name(srcpath) + ".verify.obj")
         r, _wd = _run_halsc(srcpath, fresh, parm, tout, sout)
         if r.returncode != 0 or not fresh.exists():
             print(f"  [cache-verify] {srcpath.name}: recompile FAILED but a "
@@ -1072,19 +1084,19 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
                     shutil.copyfile(m, dest / m.name)
 
     def _run_halsc(srcpath, obj, parm, tout, sout):
-        workdir = gendir / (srcpath.stem + ".work")
+        workdir = gendir / (members.name(srcpath) + ".work")
         cmd = [halsc, f"--parm={parm}",
                f"--templib={templib}", f"--templib-out={tout}",
                f"--inclib-ebcdic={inclib}",
                f"--sdf={sout}", f"--sdfi={sdflib}", f"--workdir={workdir}",
                "-o", str(obj), str(pp_of.get(srcpath, srcpath))]
-        r = _run(cmd, verbose=verbose, env=env, label=f"halsc {srcpath.stem}")
+        r = _run(cmd, verbose=verbose, env=env, label=f"halsc {members.name(srcpath)}")
         return r, workdir
 
     def compile_one(srcpath, obj=None):
         dest = objdir if srcpath in objdir_units else tmplobj
-        obj = obj or dest / (srcpath.stem + ".obj")
-        parm = halorder.get_parms(srcpath.stem)
+        obj = obj or dest / (members.name(srcpath) + ".obj")
+        parm = halorder.get_parms(members.name(srcpath))
         ckey = (cache.key(srcpath, unit_name.get(srcpath), parm)
                 if cache is not None else None)
         if ckey:
@@ -1098,7 +1110,7 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
                         _verify_hit(srcpath, obj, parm, k)
                     return True, ""
             cache.missed()
-        tout, sout = _private_out(srcpath.stem)
+        tout, sout = _private_out(members.name(srcpath))
         r, workdir = _run_halsc(srcpath, obj, parm, tout, sout)
         out = r.stdout + r.stderr
         if r.returncode == 0 and obj.exists():
@@ -1116,7 +1128,7 @@ def hal(sources, objdir: Path, gendir: Path, halsc: str, python: str,
         optrpt = workdir / "opt.rpt"
         opttxt = optrpt.read_text(errors="replace") if optrpt.exists() else ""
         if "ZO3" in opttxt and "DOWNGRADED" not in opttxt:
-            tout, sout = _private_out(srcpath.stem)
+            tout, sout = _private_out(members.name(srcpath))
             r, workdir = _run_halsc(srcpath, obj, parm + ",X1", tout, sout)
             out = r.stdout + r.stderr
             if r.returncode == 0 and obj.exists():
@@ -1303,7 +1315,7 @@ def display(sources, objdir: Path, gendir: Path, halsc: str, python: str,
     dispdir.mkdir(parents=True, exist_ok=True)
     if not templib.is_dir():
         print(f"  [display] no {templib} — run --hal first", file=sys.stderr)
-        return 0, [p.stem for p in sources]
+        return 0, [members.name(p) for p in sources]
     haltree = (gendir / "haltree").resolve()
     with _timed("step", "hal_mirror"):
         _hal_mirror([*srcdirs, *_as_dirs(incl80)], haltree)
@@ -1317,7 +1329,7 @@ def display(sources, objdir: Path, gendir: Path, halsc: str, python: str,
 
     def build_one(srcpath) -> str | None:
         """Generate + compile one deck; returns its name on failure."""
-        name = srcpath.stem
+        name = members.name(srcpath)
         halout = dispdir / f"{name}.hal"
         pre = _overlay_hal(overlay, name)
         if pre is not None:
@@ -1420,10 +1432,10 @@ def worklist_objects(objdir: Path, by_type: dict, patches: dict) -> list[Path]:
     ASM/HAL/DISPLAY/AMT source and PCHnnTXT.obj for each patch, filtered to
     those that exist.
     """
-    want = [objdir / (p.stem + ".obj") for p in by_type["ASM"]]
-    want += [objdir / (p.stem + ".obj") for p in by_type["HAL"]]
-    want += [objdir / (p.stem + ".obj") for p in by_type["DISPLAY"]]
-    want += [objdir / (p.stem + ".obj") for p in by_type.get("AMT", [])]
+    want = [objdir / (members.name(p) + ".obj") for p in by_type["ASM"]]
+    want += [objdir / (members.name(p) + ".obj") for p in by_type["HAL"]]
+    want += [objdir / (members.name(p) + ".obj") for p in by_type["DISPLAY"]]
+    want += [objdir / (members.name(p) + ".obj") for p in by_type.get("AMT", [])]
     want += [objdir / (member + ".obj") for member in patches.values()]
     have = [o for o in want if o.exists()]
     if len(have) != len(want):
@@ -2193,13 +2205,13 @@ def main(
                     if n not in nosource_seen:
                         nosource_seen.add(n)
                     continue
-                if p.stem in stub_syms:
+                if members.name(p) in stub_syms:
                     # LIBRARY-stub cards name the library MEMBER; a demand
                     # for one of its inner symbols is suppressed the same
                     # way.
                     continue
-                if (objdir / f"{p.stem}.obj").exists():
-                    _sdfm = gendir / "SDFLIB" / f"##{p.stem[:6]:<6}.sdf"
+                if (objdir / f"{members.name(p)}.obj").exists():
+                    _sdfm = gendir / "SDFLIB" / f"##{members.name(p)[:6]:<6}.sdf"
                     sdf_ok = (classify(p) == "ASM"
                               or (_sdfm.exists()
                                   and _sdfm.stat().st_size > 3360))
@@ -2233,7 +2245,7 @@ def main(
                 if p not in by_type[kind]:
                     by_type[kind].append(p)   # joins the link's object list
                 autocalled.append({"symbol": n, "source": str(p),
-                                   "member": p.name, "wave": wave})
+                                   "member": members.name(p), "wave": wave})
             if not newsrc and not relist:
                 converged = True
                 break
@@ -2286,7 +2298,7 @@ def main(
                  else "(autocall gated off for this job)"))
 
     if steps_running and phase is not None and objdir.is_dir():
-        expected = {(p.stem + ".obj")
+        expected = {(members.name(p) + ".obj")
                     for lst in by_type.values() for p in lst}
         expected |= {member + ".obj" for member in patches.values()}
         stale = sorted(f.name for f in objdir.glob("*.obj")

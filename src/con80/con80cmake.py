@@ -18,7 +18,7 @@ import os
 import shlex
 from pathlib import Path
 
-from ap101Utils import halorder
+from ap101Utils import halorder, members
 
 
 def _q(p) -> str:
@@ -133,7 +133,7 @@ set(INCENV ${CMAKE_COMMAND} -E env PYTHONUTF8=1 \
     # ---- ASM + patch objects (independent -> parallel) ---------------------
     w("# ---- AP-101 assembly (parallel) ----")
     asm_objs: list[str] = []
-    items = [(p, p.stem) for p in asm_sources]
+    items = [(p, members.name(p)) for p in asm_sources]
     items += [(p, member) for p, member in sorted(patches.items())]
     for srcpath, objstem in items:
         obj = f"${{OBJDIR}}/{objstem}.obj"
@@ -154,7 +154,7 @@ add_custom_command(OUTPUT "{obj}"
     # ---- HAL chain ----------------------------------------------------------
     w("""\
 # ---- HAL/S (serial chain: shared TEMPLIB, template order) ----
-# Mirror the extensionless sources as *.hal for the PASS tools, then
+# Mirror the sources as <member>.hal for the PASS tools, then
 # initialise TEMPLIB/INCLIB.""")
     incl_dirs = [Path(d).resolve() for d in _as_dirs(incl80)]
     mirror_dirs = [*srcdirs, *incl_dirs]
@@ -170,7 +170,7 @@ add_custom_command(OUTPUT "{obj}"
     # Clearing TEMPLIB invalidates every HAL object: templates are inputs to
     # every unit, and a stale object would short-circuit the retry pass (its
     # template never re-enters the fresh TEMPLIB, starving dependent units).
-    hal_objs = " ".join(f'"${{OBJDIR}}/{p.stem}.obj"' for p in order
+    hal_objs = " ".join(f'"${{OBJDIR}}/{members.name(p)}.obj"' for p in order
                         if p in worklist_set)
     w(f"""\
 add_custom_command(OUTPUT "${{GEN}}/stamps/hal_setup"
@@ -213,11 +213,11 @@ add_custom_command(OUTPUT "{stamp}"
 # Worklist + closure units, topological order.  A failed unit still
 # stamps (its object is simply absent), so the chain and link proceed.""")
     for p in order:
-        stem = p.stem
+        stem = members.name(p)
         dest = "${OBJDIR}" if p in worklist_set else "${GEN}/tmpl_obj"
         obj = f"{dest}/{stem}.obj"
         pp = f"${{GEN}}/pp/{stem}.hal"
-        rel = f"{p.parent.name}/{p.name}.hal"
+        rel = f"{p.parent.name}/{members.filename(p, '.hal')}"
         parm = halorder.get_parms(stem)
         work = f"${{GEN}}/{stem}.work"
         stamp = f"${{GEN}}/stamps/hal_{stem}"
@@ -271,7 +271,7 @@ try() {
 }
 units() {""")
     for p in order:
-        stem = p.stem
+        stem = members.name(p)
         dest = "$OBJDIR" if p in worklist_set else "$GEN/tmpl_obj"
         w(f'  "$1" {stem} "{dest}" {halorder.get_parms(stem)}')
     w("""\
@@ -310,7 +310,7 @@ sh "${{GEN}}/hal_retry.sh"
 # compiled unit's template, so displays compile against a scratch
 # TEMPLIB copy (also the textual fallback); serialized for the same
 # reason.""")
-        disp_objs = " ".join(f'"${{OBJDIR}}/{p.stem}.obj"' for p in displays)
+        disp_objs = " ".join(f'"${{OBJDIR}}/{members.name(p)}.obj"' for p in displays)
         w(f"""\
 add_custom_command(OUTPUT "${{GEN}}/stamps/disp_setup"
   COMMAND ${{CMAKE_COMMAND}} -E rm -rf "${{GEN}}/disp_TEMPLIB"
@@ -321,7 +321,7 @@ add_custom_command(OUTPUT "${{GEN}}/stamps/disp_setup"
   DEPENDS "{hal_end}" COMMENT "scratch TEMPLIB for displays" VERBATIM)""")
         prev = '${GEN}/stamps/disp_setup'
         for p in displays:
-            name = p.stem
+            name = members.name(p)
             hal_out = f"${{GEN}}/displays/{name}.hal"
             pp = f"${{GEN}}/displays/{name}.pp.hal"
             obj = f"${{OBJDIR}}/{name}.obj"
@@ -355,9 +355,9 @@ add_custom_command(OUTPUT "{stamp}"
 # ---- link (lnk101 --concard: deck read for placement only) ----
 # The worklist's objects, filtered at build time to those that built.""")
     w(f'file(WRITE "${{GEN}}/link_objs.txt"')
-    link_names = ([p.stem for p in asm_sources]
-                  + [p.stem for p in hal_worklist]
-                  + [p.stem for p in displays]
+    link_names = ([members.name(p) for p in asm_sources]
+                  + [members.name(p) for p in hal_worklist]
+                  + [members.name(p) for p in displays]
                   + [member for member in patches.values()])
     for nm in link_names:
         w(f'  "${{OBJDIR}}/{nm}.obj\\n"')

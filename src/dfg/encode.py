@@ -6,7 +6,6 @@
 # FCW list, the DDT, an alignment terminator, and PAD fill — built as annotated
 # `Segment`s. 
 #
-import os
 import re
 
 from . import kvt as _kvt
@@ -17,6 +16,7 @@ from .fcw import Branch, FCW
 from .model import Error, Segment, Padr, flatten
 from .ops import immed
 from .resolve import char_inits, w0_resolver
+from ap101Utils import members
 
 
 def _fmtnum(hdrval, name=None):
@@ -36,7 +36,7 @@ class Encoded:
 
     def __init__(self, hal, segments, pages, kvt_idx, stat_idx, ddt_idx, total,
                  names, hdrval="", rate_counts=None, src=None, crtfmt=False):
-        self.hal = hal                   # display name (deck basename)
+        self.hal = hal                   # display name (the deck's member name)
         self.src = src or hal            # what locates the deck: a path or the name
         self.crtfmt = crtfmt             # critical-format (CRTFMT= deck) -> CFT array
         self.segments = segments
@@ -103,7 +103,7 @@ def encode(hal):
     deriving every word from the deck.  A word the deck does not determine
     raises `Error`."""
     src = hal
-    hal = os.path.basename(hal.replace("\\", "/"))
+    hal = members.name(hal)      # the COMPOOL is named for the display
     ds = encodable_directives(src)
 
     # A deck led by CRTFMT= is a critical format: a bare CFT FCW array (no

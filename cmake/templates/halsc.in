@@ -81,7 +81,8 @@ done
 [[ -f "$SOURCE_FILE" ]] || die "$SOURCE_FILE: No such file"
 
 SOURCE_FILE="$(realpath "$SOURCE_FILE")"
-SOURCE_NAME="$(basename "${SOURCE_FILE%.*}")"
+SOURCE_NAME="$(basename "$SOURCE_FILE")"
+SOURCE_NAME="${SOURCE_NAME%%.*}"       # the member name: FOO, FOO.hal and FOO.pp.hal are one unit
 ORIG_PWD="$PWD"
 
 # Resolve output paths

@@ -17,7 +17,7 @@ import re
 
 import lark
 
-from ap101Utils import cards
+from ap101Utils import cards, members
 
 # The deck card language.  A statement is an optional branch label
 # (`MIDWAY:`) plus a directive — `KEY = value` or a bare flag (`STAT`).
@@ -71,12 +71,11 @@ def deck_dirs(root=None):
 
 
 def find_deck(name, root=None):
-    """Absolute path of the deck named `name`, or None."""
-    for d in deck_dirs(root):
-        p = os.path.join(d, name)
-        if os.path.exists(p):
-            return p
-    return None
+    """Path of the deck named `name`, or None.  `name` is the display name
+    (`CG3011`) or a filename carrying an extension (`CG3011.dfg`); the deck
+    is found under either spelling, the search directory order first."""
+    p = members.find(name, deck_dirs(root))
+    return None if p is None else str(p)
 
 
 def resolve_deck(name_or_path, root=None):

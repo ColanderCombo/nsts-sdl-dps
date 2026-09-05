@@ -12,6 +12,7 @@ os.environ["TYPER_USE_RICH"] = "0" # Disable fancy formatting
 import typer
 
 from .assemble import Assemble, AssemblyError
+from ap101Utils import members
 
 
 class March(str, Enum):
@@ -69,7 +70,7 @@ def assemble(
   """
 
   if object_file is None:
-    object_file = Path(source_files[-1].stem + ".obj")
+    object_file = Path(members.filename(source_files[-1], ".obj"))
 
   try:
     assembler = Assemble(

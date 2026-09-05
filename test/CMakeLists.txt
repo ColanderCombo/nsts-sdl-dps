@@ -407,6 +407,18 @@ set_tests_properties(con80_halorder PROPERTIES
 # STRPDT R-card dispositions (the phase-15/16 DQ7/PM1 wave was the guessed
 # R->M default activating INCL80/STRPDT's unqualified NAME declares inside
 # the SM compools; flight compiles them as comments there).
+# ap101Utils.members: a member found and named the same whether its file
+# is stored bare or with a .asm/.hal/.dfg extension, through every tool
+# that reads a source tree.
+add_test(NAME members
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_members.py"
+)
+set_tests_properties(members PROPERTIES
+    LABELS "ap101Utils"
+    TIMEOUT 60
+)
+
 add_test(NAME con80_mirror
     COMMAND "${SDL_VENV_PYTHON}"
         "${CMAKE_CURRENT_SOURCE_DIR}/test_con80_mirror.py"
