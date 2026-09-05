@@ -40,6 +40,7 @@ from typing import Optional
 import typer
 
 from . import compool
+from . import ddt
 from .encode import encode, Error
 from .emit import to_hal, n_untyped
 
@@ -71,6 +72,10 @@ def generate(
                                           "OI340600 build's gen/SDFLIB]."),
     deck_root: Optional[Path] = typer.Option(None, "--deck-root",
                                              help="OI root holding SSSRC/APPLSRC."),
+    release: str = typer.Option("OI340600", "--release",
+                                help="PASS release whose generator quirks to "
+                                "reproduce (rate-group allowances): OI340600 "
+                                "or OI340700."),
     amt: bool = typer.Option(False, "--amt",
                              help="Treat NAME as an AMT-mode deck (PMF=/AMTx= "
                              "cards -> CDA_Pnn_AMT moding-table compool). "
@@ -81,6 +86,12 @@ def generate(
                                        "(a .dfb) instead of HAL/S source."),
 ) -> None:
     """Translate display NAME into HAL/S COMPOOL source."""
+    try:
+        ddt.set_release(release)
+    except KeyError:
+        typer.echo("error: unknown --release %s (expected one of: %s)"
+                   % (release, ", ".join(sorted(ddt._RC_RELEASES))), err=True)
+        raise typer.Exit(2)
     if sdflib:
         compool.set_sdflib(str(sdflib))
     if deck_root:

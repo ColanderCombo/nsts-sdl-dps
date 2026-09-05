@@ -256,9 +256,34 @@ _BLT6 = frozenset((
 ))
 
 # GROUP-level allowances added on top of the derived max-walk, keyed by
-# (display, rate-group ordinal).  Generator allowances only — the runtime
-# needs no more than the walk; the rule producing them is unknown.
-_RC_GROUP_ALLOWANCE = {("CG0500", 1): 2, ("CG0500", 2): 3}
+# (display, rate-group ordinal, 0-based).  Generator allowances only — the
+# runtime needs no more than the walk; the rule producing them is unknown.
+#
+# The rule being unknown, the tables are empirical and therefore PER-RELEASE:
+# a display that gains or loses content between releases gets a different
+# allowance, and a display present in only one release appears in only one
+# table.  `set_release` picks the one in force; OI340600 is the default.
+_RC_GROUP_ALLOWANCE_OI340600 = {("CG0500", 1): 2, ("CG0500", 2): 3}
+
+# CS2050 and CS2120 are OI340700 displays (OI340600's CS2120 is an unrelated
+# 1068-halfword S/L DPA PERIPHERAL page).  Both walk short against the DASS
+# dump of OI340700 by the amounts below; with them the two decks reproduce
+# their dumped compools exactly, 734 and 884 halfwords.
+_RC_GROUP_ALLOWANCE_OI340700 = {("CG0500", 1): 2, ("CG0500", 2): 3,
+                                ("CS2050", 0): 1,
+                                ("CS2120", 0): 6, ("CS2120", 1): 1}
+
+_RC_RELEASES = {"OI340600": _RC_GROUP_ALLOWANCE_OI340600,
+                "OI340700": _RC_GROUP_ALLOWANCE_OI340700}
+
+_RC_GROUP_ALLOWANCE = _RC_GROUP_ALLOWANCE_OI340600
+
+
+def set_release(release):
+    """Select the PASS release whose generator allowances to reproduce.
+    Raises KeyError on an unknown release."""
+    global _RC_GROUP_ALLOWANCE
+    _RC_GROUP_ALLOWANCE = _RC_RELEASES[release]
 
 
 def _cascade_idioms(nodes):
