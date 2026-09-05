@@ -226,20 +226,41 @@ def isNumberD2(ast):
 # AS037F1's IEUF8M DECOMP: same-section USING entries only (the subtraction
 # must cancel to a bare int), smallest displacement <= 'limit' wins, highest
 # register on ties ('<=' -- DECOMP rejects only a strictly-higher
-# displacement).  Also the body of 'findB2D2', whose limit is the 12-bit
-# displacement field's 4095.
+# displacement).  Also the body of 'findB2D2', whose limit is the RS AM=0
+# displacement field's 65535.
+def csectOf(value):
+  """The control section a hashed value lies in: the term's name for a
+  DSECT or EXTRN, else the CSECT whose laid-out range holds the offset (the
+  evaluator carries every CSECT of an assembly in the first CSECT's address
+  space, so the term alone does not tell them apart).  None for an absolute
+  value, and the term's name before the layout exists."""
+  section, offset = unhash(value)
+  if section is None or offset is None:
+    return None
+  if section not in sects or sects[section].dsect:
+    return section
+  return resolveCSect(offset, sects, section)
+
+
 def unUsing(using, hashed, limit=0xFFFFFF):
   b2 = None
   d2 = None
+  hsect = csectOf(hashed)
   for i in range(len(using)):
     u = using[i]
     if u == None:
       continue
     # 'hashed - base' cancels the section term to a bare int only when both
     # are in the same section; a still-relocatable difference (cross-section)
-    # is a 'Reloc', never a valid base displacement, so skip it.
+    # is a 'Reloc', never a valid base displacement, so skip it.  Two CSECTs
+    # of one assembly share a term, so the operand and the base must also
+    # range onto the same CSECT: BILDNEW5's `STH R3,MSG257A` under
+    # `USING STM4,R0` names a field of the LINES CSECT from GPCIPL and is
+    # BBF3 504D, the absolute form with a relocation.
     j = hashed - u[0]
     if not isinstance(j, int) or j < 0 or j > limit:
+      continue
+    if hsect != csectOf(u[0]):
       continue
     if d2 == None or j <= d2:
       b2 = i
@@ -1557,14 +1578,15 @@ def generateObjectCode(source, macros, log=None, march="ap101s"):
     
   # For a D2(B2)/D2(X2,B2) operand written as just D2, pick a base register
   # from 'USING' and return (B2, adjusted D2) with the base subtracted, or
-  # None,None if none fits.  'd2' is hashed; there is no upper limit on the
-  # returned D2 -- the caller checks whether it fits.  This mirrors AS037F1's
-  # IEUF8M DECOMP (same-section entries, smallest displacement, highest
-  # register on ties -- DECOMP rejects only a strictly-higher displacement).
+  # None,None if none fits.  'd2' is hashed.  This mirrors AS037F1's IEUF8M
+  # DECOMP (same-section entries, smallest displacement, highest register on
+  # ties -- DECOMP rejects only a strictly-higher displacement) with the
+  # limit of the RS AM=0 form's 16-bit displacement field: BILDNEW5's
+  # `LA R4,STMWAIT` under `USING FAILDATA,B0` is base 0 plus 1988.
   def findB2D2(d2):
     if not isinstance(d2, Reloc):
       return None, (_num(d2) & 0xFFFFFF)
-    return unUsing(using, d2, limit=4095)
+    return unUsing(using, d2, limit=0xFFFF)
 
   #-----------------------------------------------------------------------
   # Per-operation handlers.

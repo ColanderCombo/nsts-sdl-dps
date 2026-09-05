@@ -2012,6 +2012,49 @@ def integration_tests():
       check(f"at_indirect_{label}", want in line,
             f"{desc}: expected {want!r} in listing line {line.strip()!r}")
 
+    # An RS operand under a USING resolves to that base register whenever
+    # the displacement fits the AM=0 form's 16-bit field.  findB2D2's
+    # limit is 0xFFFF; at 4095 (Assembler F's 12-bit field) BILDNEW5's
+    # `LA R4,STMWAIT` under `USING FAILDATA,B0` assembled as the no-base
+    # form ECF3 1DF6 where the flight listing has ECF0 1988.
+    wdlst = td / "wd.lst"
+    rc, out = assemble(
+        ["-o", str(td / "wd.obj"), "-l", str(wdlst),
+         str(FIX / "feat_using_wide_disp.asm")])
+    check("using_wide_disp_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
+    wdtext = wdlst.read_text(errors="replace") if wdlst.exists() else ""
+    for label, want, desc in [
+        ("L0", "ECF0 1988", "LA R4,STMWAIT -> base R0, displacement 1988"),
+        ("L1", "1EF0 17C2", "L R6,BUMPWRDN -> base R0, displacement 17C2"),
+        ("L2", "37F0 17C2", "ST R7,BUMPWRDN -> base R0, displacement 17C2"),
+    ]:
+      line = next((l for l in wdtext.splitlines()
+                   if re.search(r"\d+ " + label + r"\s", l)), "")
+      check(f"using_wide_disp_{label}", want in line,
+            f"{desc}: expected {want!r} in listing line {line.strip()!r}")
+
+    # A USING base applies within its control section.  Two CSECTs of one
+    # assembly share a relocation term in the evaluator, so unUsing ranges
+    # the operand and the base onto their CSECTs (csectOf) and rejects a
+    # cross-CSECT pair; the reference then takes the no-base form with a
+    # relocation.  BLAB is 0x24 past the start of the combined layout, an
+    # in-range displacement that used to take base R1 and lose its RLD.
+    xclst = td / "xc.lst"
+    rc, out = assemble(
+        ["-o", str(td / "xc.obj"), "-l", str(xclst),
+         str(FIX / "feat_using_cross_csect.asm")])
+    check("using_cross_csect_assembles", rc == 0, f"rc={rc}\n{out.strip()[-400:]}")
+    xctext = xclst.read_text(errors="replace") if xclst.exists() else ""
+    for label, want, desc in [
+        ("L0", "1CF3 0024", "L R4,BLAB across CSECTs -> no base, address 0024"),
+        ("L1", "1C09", "L R4,TAB+4 in the USING's CSECT -> SRS over base R1"),
+        ("L2", "ECF3 1795", "LA R4,BFAR across CSECTs -> no base, address 1795"),
+    ]:
+      line = next((l for l in xctext.splitlines()
+                   if re.search(r"\d+ " + label + r"\s", l)), "")
+      check(f"using_cross_csect_{label}", want in line,
+            f"{desc}: expected {want!r} in listing line {line.strip()!r}")
+
     # A multi-suboperand DC's label names its first suboperand.  Each
     # suboperand handler calls commonProcessing (which assigns the label),
     # so `PTR DC Y(SYM),X'2'` used to put PTR on the trailing X byte (odd
