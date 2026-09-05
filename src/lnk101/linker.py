@@ -421,6 +421,10 @@ class Linker:
         self.appliedRelocations = []
         self.unresolvedRelocations = []
         self.csectTable = {}
+        # The contents of every CSECT-table entry marked
+        # "linkInfo": "placement": defined, so the symbol table carries
+        # them, and never used to resolve a relocation (loadExternalSyms).
+        self.placementOnlySymbols = set()
         self.deadERsLogged = set()
         # CON80 NOCALLER (NCAL): unresolved externals are tolerated and left
         # in the image (the linkage editor's automatic-library-call is off).
@@ -1250,7 +1254,15 @@ class Linker:
 
                 elif reloc.relId in module.externals:
                     ext = module.externals[reloc.relId]
-                    if ext.resolved and ext.resolvedSection and ext.resolvedSection.baseAddress is not None:
+                    # A placement-only symbol names a field of a section this
+                    # configuration does not load.  The original link had no
+                    # definition for it and left the site as assembled; the
+                    # reference is an unresolved external here and is recorded
+                    # in unresolvedRelocations.
+                    if ext.name in self.placementOnlySymbols:
+                        resolved = False
+                        lenient = True
+                    elif ext.resolved and ext.resolvedSection and ext.resolvedSection.baseAddress is not None:
                         targetAddr = ext.resolvedSection.baseAddress
                     else:
                         resolved = False
@@ -2319,8 +2331,30 @@ class Linker:
             added = True
             log.info(f"External sym '{symName}' @ {baseAddr}  len={lengthBytes}")
 
+            # "linkInfo": "placement": the entry supplies an address and no
+            # linkage.  A CSECT table carries a section the configuration
+            # does not load when a ZCON in this configuration points at a
+            # module loaded in another; the ZCON needs the address the code
+            # has there.  The section is placed and its contents are
+            # defined, so the symbol table the AP-101S emulators read is
+            # complete.  The contents resolve no relocation: no module in
+            # this configuration supplied them, and the original link left
+            # those sites as assembled.  In OI340600's GNC9, FIOPDSPG's
+            # `#LBR TFCMPFD1` and `#LBR TFCMPFD2` name two fields of
+            # #DDPLLIG, whose overlay DPLLIGHT is absent from that
+            # configuration's memory map, and the flight image holds 0000 at
+            # both sites.
+            #
+            # The section name resolves; the ZCON case names the section.  A
+            # HAL object references a compool by section name with the field
+            # offset in its text, so the mark reaches assembler externals
+            # that name a field directly.  A field the runtime library or
+            # any linked module defines is resolved before the table is
+            # read and is never marked.
             contents = entry.get('contents')
             if contents:
+                if entry.get('linkInfo') == 'placement':
+                    self.placementOnlySymbols.update(contents)
                 for ldName, ldVal in contents.items():
                     if isinstance(ldVal, dict):
                         offsetHW = ldVal.get('offset', 0)

@@ -39,6 +39,17 @@ foreach(_prog bench02 bench08)
     )
 endforeach()
 
+# A CSECT-table entry marked "linkInfo": "placement" is placed and its
+# contents are defined, and none of them resolves a relocation.
+add_test(NAME "lnk101_placement_only"
+    COMMAND "${SDL_VENV_PYTHON}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/srcTest/lnk101/test_placement_only.py"
+)
+set_tests_properties("lnk101_placement_only" PROPERTIES
+    LABELS "linker"
+    TIMEOUT 30
+)
+
 discover_hal_tests(
     MAX_STEPS 100000
     EXCLUDE
