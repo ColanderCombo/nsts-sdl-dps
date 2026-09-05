@@ -166,13 +166,21 @@ _RUNTIME_RE = re.compile(r"^(#?[QZ]|#?L|#?0|\$0|\$Y|\$X|#Y|#T)")
 # Patch-area decks: a source PCHnnSRC (SSSRC) is assembled to an object
 # whose CON80 object-library member name is PCHnnTXT -- the deck pulls it in
 # with INCLUDE SYSLIBL1(PCHnnTXT) and then INSERTs the csects it defines.
+# The source filename may or may not carry its .asm extension (both OI301700
+# and, since 00d1051b, OI340600 have it; ASM101S requires it), so every match
+# against a patch-deck filename goes through _src_stem() first.
 _PATCH_SRC_RE = re.compile(r"^PCH\d+SRC$")
 _PATCH_MEMBER_RE = re.compile(r"^PCH\d+TXT$")
 
 
+def _src_stem(name: str) -> str:
+    """Filename with a trailing .asm extension removed, if it has one."""
+    return name[:-4] if name.lower().endswith(".asm") else name
+
+
 def patch_member(src_name: str) -> str:
-    """PCHnnSRC source filename -> PCHnnTXT object-library member name."""
-    return src_name[:-3] + "TXT"
+    """PCHnnSRC[.asm] source filename -> PCHnnTXT object-library member name."""
+    return _src_stem(src_name)[:-3] + "TXT"
 
 
 # An IS-macro invocation in a patch deck: <label> IS <len>,<prefix>,<fill>.
@@ -217,14 +225,25 @@ class SourceIndex:
                 if not p.is_file():
                     continue
                 self.by_name.setdefault(p.name, p)
-                self.by_stem6.setdefault(p.name[:6], p)
+                # Object-module/csect names (INCLUDE members, patch decks'
+                # PCHnnTXT -> PCHnnSRC[.asm]) are always looked up without a
+                # .asm extension -- index each file's extensionless stem too,
+                # so a .asm-suffixed source still resolves by its bare name.
+                # For a stem longer than 6 characters this is a no-op below
+                # (by_stem6 only ever looks at the first 6), but a <=6-char
+                # stem like FAZ2 would otherwise have its 6-char window bleed
+                # into ".asm" (FAZ2.asm[:6] == "FAZ2.a", not "FAZ2").
+                stem = _src_stem(p.name)
+                if stem != p.name:
+                    self.by_name.setdefault(stem, p)
+                self.by_stem6.setdefault(stem[:6], p)
                 # Some source filenames embed a '#' that is NOT part of the
                 # 6-char stem encoded in the csect name (e.g. the file
                 # DCI#STK backs csect #DDCISTK -> stem DCISTK).
                 # Index a '#'-stripped stem too so those resolve; setdefault
                 # keeps an exact-named file's claim on the key.
-                stripped = p.name.replace("#", "")[:6]
-                if stripped != p.name[:6]:
+                stripped = stem.replace("#", "")[:6]
+                if stripped != stem[:6]:
                     self.by_stem6.setdefault(stripped, p)
 
     def resolve(self, module: str) -> Path | None:
@@ -369,7 +388,7 @@ def included_csects(graph, src: SourceIndex) -> dict:
             continue
         # Patch decks define their csects through the IS macro, so the generic
         # CSECT/ENTRY scan finds nothing -- derive the names from the IS lines.
-        if _PATCH_SRC_RE.match(f.name):
+        if _PATCH_SRC_RE.match(_src_stem(f.name)):
             for nm in patch_csects(f):
                 provided.setdefault(nm, f)
             continue
@@ -393,7 +412,7 @@ def patch_index(src: SourceIndex) -> dict[str, Path]:
         if not sub.is_dir():
             continue
         for p in sorted(sub.iterdir()):
-            if p.is_file() and _PATCH_SRC_RE.match(p.name):
+            if p.is_file() and _PATCH_SRC_RE.match(_src_stem(p.name)):
                 for nm in patch_csects(p):
                     idx.setdefault(nm, p)
     return idx
@@ -433,7 +452,7 @@ def resolve_worklist(deck_dir: Path, root: str, src: SourceIndex,
         # filename-stem heuristic (which conflates split-source csects like
         # #DDCICYC -> DCI#DATA with the code file DCICYC).
         path = csect_defs.get(m) or src.resolve(m) or provided.get(m)
-        if path is not None and _PATCH_SRC_RE.match(path.name):
+        if path is not None and _PATCH_SRC_RE.match(_src_stem(path.name)):
             patches.setdefault(path, patch_member(path.name))
             continue
         if path is None:
