@@ -8,6 +8,13 @@ INSTALL_DIR="$PROJECT_DIR/inst"
 GENERATOR="Unix Makefiles"
 #GENERATOR="Ninja"
 
+# The project is C only; cmake's compiler check fails when CC names a C++
+# compiler.  Substitute the matching C compiler and say so.
+case "${CC:-}" in
+    *clang++) echo "CC=$CC is a C++ compiler; using CC=clang"; export CC=clang ;;
+    *g++)     echo "CC=$CC is a C++ compiler; using CC=gcc";   export CC=gcc ;;
+esac
+
 cmake -B "$BUILD_DIR" \
       -S "$PROJECT_DIR" \
       -G "$GENERATOR" \

@@ -11,8 +11,9 @@
 #   4. Variant decks (per-file _CARDTYPE entries) parse with the parm's
 #      change-flag map: inactive variant headers (A->C on GKRORB) are
 #      skipped, the active one (O->M) wins, flag->D includes count
-#      (G->D on GKRORB, B->D on CPTOSV) and flag->C ones do not; files
-#      without an entry keep the standard card types.
+#      (G->D on GKRORB) and flag->C ones do not (A->C and B->C on
+#      CPTOSV, the SM2O form); files without an entry keep the standard
+#      card types.
 #   5. get_parms maps the 'T' change-flag card type (CARDTYPE=...TM);
 #      unmapped, PASS1 comments those cards out and the unit abends
 #      (OI340600 APPLSRC/GKFHOR).
@@ -145,8 +146,9 @@ def cardtype_variant_decks():
 
 
 def cardtype_b_include():
-  """CPTOSV-style B->D: a B-flagged INCLUDE TEMPLATE card is live; the
-  A-flagged one (A->C) is not."""
+  """CPTOSV in the SM2O form: the B-flagged `INCLUDE TEMPLATE CS4_PDT`
+  (B->C) and the A-flagged card (A->C) are comments; only the D include
+  counts."""
   with tempfile.TemporaryDirectory() as td:
     p = _write(Path(td), "CPTOSV", "\n".join([
         "D INCLUDE TEMPLATE CSA_PDT",
@@ -158,7 +160,7 @@ def cardtype_b_include():
     ]))
     name, deps = halorder.parse_hal(p)
   check("b_include_name", name == "CPTOSV", f"{name}")
-  check("b_include_deps", deps == ["CSAPDT", "CS4PDT"], f"{deps}")
+  check("b_include_deps", deps == ["CSAPDT"], f"{deps}")
 
 
 def cardtype_t_mapped():

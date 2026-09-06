@@ -129,7 +129,7 @@ def _code_lines(path) -> list[str]:
     each change-flagged line is rewritten with its *mapped* type in
     column 1, so e.g. GKRORB's inactive `A GKD_...: PROCEDURE` header
     (A->C) disappears while the active `O GKR_...: PROCEDURE` (O->M)
-    and a B-flagged `B INCLUDE TEMPLATE ...` (B->D, CPTOSV) read as the
+    and a G-flagged `G INCLUDE TEMPLATE ...` (G->D) read as the
     code/directive cards the compiler sees.
     """
     path = Path(path)
