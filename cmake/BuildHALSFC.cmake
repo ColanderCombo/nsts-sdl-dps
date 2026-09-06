@@ -43,7 +43,7 @@ if(WIN32)
     endif()
 else() # Unix
     find_program(GNU_MAKE_PROGRAM NAMES make gmake)
-    set(GNU_C_COMPILER "cc")
+    set(GNU_C_COMPILER "${CMAKE_C_COMPILER}")
 endif()
 
 if(NOT GNU_MAKE_PROGRAM)
@@ -52,6 +52,14 @@ endif()
 
 if(NOT GNU_C_COMPILER)
     set(GNU_C_COMPILER "${CMAKE_C_COMPILER}")
+endif()
+
+# Warnings clang raises on the C that XCOM-I emits (measured on Apple clang 21:
+# 599 across the eleven passes, pointer-sign and constant-conversion the bulk).
+# The generated Makefile takes them through its EXTRA variable.
+set(HALSFC_CC_EXTRA "")
+if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    set(HALSFC_CC_EXTRA "-Wno-pointer-sign -Wno-constant-conversion -Wno-format-security -Wno-tautological-constant-out-of-range-compare -Wno-dangling-else -Wno-comment")
 endif()
 
 # Build a single HAL/S-FC compiler pass
@@ -111,7 +119,7 @@ function(build_halsfc_pass PASS_NAME SRC_FOLDER IDENTIFIER CONDITIONS OUTPUT_NAM
     # keep the binary in the build dir (prevents perpetual recompilation).
     add_custom_command(
         OUTPUT "${PASS_OUTPUT}"
-        COMMAND ${GNU_MAKE_PROGRAM} "CC=${GNU_C_COMPILER}" "TARGET=${PASS_BINARY}" "MV=true"
+        COMMAND ${GNU_MAKE_PROGRAM} "CC=${GNU_C_COMPILER}" "EXTRA=${HALSFC_CC_EXTRA}" "TARGET=${PASS_BINARY}" "MV=true"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${PASS_BUILD_DIR}/${PASS_BINARY}" "${PASS_OUTPUT}"
         WORKING_DIRECTORY "${PASS_BUILD_DIR}"

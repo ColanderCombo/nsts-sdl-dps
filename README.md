@@ -72,6 +72,14 @@ pipx ensurepath
 # open a new shell to make sure 'uv' is findable
 ```
 
+On macOS, with the Xcode command line tools and [Homebrew](https://brew.sh):
+```
+xcode-select --install
+brew install cmake node uv
+```
+`GENERATE_CMAKE.sh` substitutes `clang` for a `CC` that names a C++
+compiler.
+
 Building
 --------
 
