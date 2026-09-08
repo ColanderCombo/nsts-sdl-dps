@@ -69,7 +69,12 @@ def align_word(hw: int) -> int:
 # @-stack frames are runtime-written and stay unprotected.  Prefix rules
 # mirror lnk101's zone classification (_ZONE_BY_PREFIX), plus '#R' (REMOTE
 # data), which that table does not name.
-_UNPROT_PREFIXES = ("@", "#D", "#P", "#0", "#E", "#L", "#R", "#X")
+# "#0" is deliberately NOT here.  It is a PLACEMENT convention, not a
+# content class: ROUND.asm's own header says "CSECT NAME IS #0ROUND TO
+# INSURE LOCATION IN SECTOR ZERO".  Treating it as unprotected data left
+# #0ETOH, #0ROUND, #0ITOE and #0ITOD -- HAL library CODE -- unprotected
+# while the other 27 library code sections were protected.
+_UNPROT_PREFIXES = ("@", "#D", "#P", "#E", "#L", "#R", "#X")
 
 
 def default_protected(name: str) -> bool:
