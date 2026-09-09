@@ -1375,6 +1375,41 @@ def display(sources, objdir: Path, gendir: Path, halsc: str, python: str,
     return len(sources) - len(fails), fails
 
 
+_SD_NAMES_CACHE: dict = {}
+
+
+def _obj_sd_names(obj: Path) -> list:
+    """Non-DSECT SD csect names an 80-byte-card object deck defines.
+
+    ESD card: byte 0 = 0x02, bytes 1-3 the record type in EBCDIC, a byte count
+    at 10-11 and 16-byte entries from 16, each `name(8) type(1) addr(3) _ len(3)`
+    with type 0x00 = SD."""
+    key = str(obj)
+    hit = _SD_NAMES_CACHE.get(key)
+    if hit is not None:
+        return hit
+    out: list = []
+    try:
+        raw = obj.read_bytes()
+    except OSError:
+        _SD_NAMES_CACHE[key] = out
+        return out
+    for o in range(0, len(raw) - 79, 80):
+        c = raw[o:o + 80]
+        if c[0] != 0x02 or bytes(c[1:4]).decode("cp037", "replace") != "ESD":
+            continue
+        n = (c[10] << 8) | c[11]
+        for i in range(n // 16):
+            e = c[16 + i * 16:32 + i * 16]
+            if len(e) < 16 or e[8] != 0x00:
+                continue
+            nm = bytes(e[0:8]).decode("cp037", "replace").strip()
+            if nm:
+                out.append(nm)
+    _SD_NAMES_CACHE[key] = out
+    return out
+
+
 def runtime_csect_index(linklibs) -> dict[str, Path]:
     """Map every csect a runtime-library object provides -> that object.
 
@@ -1386,6 +1421,24 @@ def runtime_csect_index(linklibs) -> dict[str, Path]:
     for d in linklibs:
         d = Path(d)
         if not d.is_dir():
+            continue
+        if not any(d.glob("*.asmg.json")):
+            # NO SIDECARS: READ THE OBJECTS THEMSELVES.  Nothing in this tree
+            # has ever carried a .asmg.json -- 0 of them beside SYSLIBL1's 4277
+            # objects, RUN's 205 and ZCON's 284 -- so this index was ALWAYS
+            # EMPTY, inserted_runtime_objects() always returned nothing, and
+            # every CON80 INSERT of a resident-library csect was silently
+            # dropped from every build.  The visible consequence was three
+            # layers down: phase 2 carried none of the HAL/S runtime (#0ITOE,
+            # #LACOS, ACOS, DSQRT, SQRT ...), so `MAP 2,LIBZERO,LIBRESD,LIBRESC`
+            # reserved nothing for the overlay phases, phase 8 then placed
+            # #PCPSSLT and #EVVCSLD on top of the library's addresses, and the
+            # G9 transition died after phase 8 with a store-protect in
+            # FPMSVCEP.  An object's own ESD is the authority and costs one
+            # pass, cached per directory.
+            for obj in sorted(d.glob("*.obj")):
+                for name in _obj_sd_names(obj):
+                    idx.setdefault(name, obj)
             continue
         for ag in sorted(d.glob("*.asmg.json")):
             obj = ag.parent / (ag.name[:-len(".asmg.json")] + ".obj")
@@ -1404,8 +1457,39 @@ def runtime_csect_index(linklibs) -> dict[str, Path]:
     return idx
 
 
+def _mapped_csect_names(map_libs) -> set:
+    """Csect names the MAPped earlier phases already provide.
+
+    A CON80 `MAP n,<region>` is a RESERVATION: phase n has already placed that
+    region, and this phase must neither place nor duplicate it.  So an INSERT
+    satisfied by a MAPped phase must NOT be included again --
+    `MAP 2,LIBZERO,LIBRESD,LIBRESC` is precisely how the deck keeps ONE copy of
+    the HAL/S resident library, in phase 2, for every overlay phase to share.
+    Without this, including the deck's INSERTs (itself a fix) gives every phase
+    its own copy, and phases 12 and 14 overrun their allocations."""
+    names: set = set()
+    for spec in map_libs or []:
+        _, _, libPath = str(spec).partition('=')
+        if not libPath:
+            continue
+        lib = Path(libPath)
+        symj = lib.parent / lib.stem / (lib.stem + ".sym.json")
+        if not symj.exists():
+            continue
+        try:
+            meta = json.loads(symj.read_text())
+        except (OSError, ValueError):
+            continue
+        for sec in meta.get("sections", []):
+            n = sec.get("name")
+            if n:
+                names.add(n)
+    return names
+
+
 def inserted_runtime_objects(deck_dir: Path, root: str, linklibs,
-                             already: set[Path]) -> tuple[list[Path], list[str]]:
+                             already: set[Path],
+                             provided: set = ()) -> tuple[list[Path], list[str]]:
     """Runtime-library objects that supply CON80-INSERTed csects.
 
     The deck's linkage editor runs with NCAL (no automatic library call), so a
@@ -1420,6 +1504,8 @@ def inserted_runtime_objects(deck_dir: Path, root: str, linklibs,
     objs: list[Path] = []
     seen = set(already)
     for name in inserts:
+        if name in provided:
+            continue          # a MAPped phase already places it
         obj = idx.get(name)
         if obj is not None and obj not in seen:
             seen.add(obj)
@@ -1454,7 +1540,9 @@ def link(objdir: Path, fcm: Path, deck_dir: Path, concard_root: str,
          lib: Path | None = None,
          warn_unresolved: bool = False,
          autocall_json: Path | None = None,
-         link_order: Path | None = None) -> bool:
+         link_order: Path | None = None,
+         external_syms: Path | None = None,
+         generate_stacks: str | None = None) -> bool:
     """Link objects into `fcm`, placing csects from the CON80 deck (lnk101
     --concard).  `objs` is the explicit object list to link; when None, every
     *.obj in `objdir` is linked."""
@@ -1475,6 +1563,10 @@ def link(objdir: Path, fcm: Path, deck_dir: Path, concard_root: str,
         cmd.append("--Wunresolved-phases")
     if json_symbols is not None:
         cmd += ["--json-symbols", str(json_symbols)]
+    if external_syms is not None:
+        cmd += ["--external-syms", str(external_syms)]
+    if generate_stacks:
+        cmd += ["--generate-stacks", str(generate_stacks)]
     if allow_undefined:
         cmd.append("--allow-undefined")
     if nocall:
@@ -1602,6 +1694,34 @@ def main(
         help="model the LE automatic library call for decks without a "
              "NOCALLER card: iteratively compile+pull modules resolving "
              "leftover external refs (LIBRARY *(...) stubs excluded)")] = True,
+    insert_root: Annotated[Optional[str], typer.Option("--insert-root",
+        metavar="CARD",
+        help="scan INSERT cards from THIS deck root while laying out at "
+             "--concard-root.  The two are the same card by default, which "
+             "forces a choice: root at the phase and the SSW segment's "
+             "INSERTs are never seen (FPMRESET and 17 other resident-library "
+             "csects go missing, leaving holes control can fall into), or "
+             "root at SSW and the whole SSW is laid out.  Separating them "
+             "gets the INSERTed csects with the phase's own layout.")] = None,
+    force_call: Annotated[bool, typer.Option("--nocall/--no-nocall",
+        help="override the NOCALLER card in the target's deck.  --no-nocall "
+             "lets lnk101 autocall the -L libraries, which is how the "
+             "known-good ipl-demo phase 2 acquires the HAL/S runtime math "
+             "(#LEXP from EXP.obj, #LDSQRT from DSQRT.obj, #0ITOE from "
+             "ITOE.obj) -- the deck INSERTs none of them.")] = True,
+    generate_stacks: Annotated[Optional[str], typer.Option("--generate-stacks",
+        help="passthrough to lnk101: auto-generate the @-stack BSS csects, "
+             "with this fallback size in halfwords for stacks whose program "
+             "block is not in the link.  WITHOUT IT NO STACKS ARE CREATED AT "
+             "ALL -- the flight machine has 30 of them totalling 1918 "
+             "halfwords, and a store into a missing stack faults against the "
+             "blanket store-protect.")] = None,
+    external_syms: Annotated[Optional[str], typer.Option("--external-syms",
+        metavar="FILE",
+        help="pin this phase's section placement to the addresses in FILE "
+             "(the DASS index), forwarded to lnk101.  problems.md 8.22: pin "
+             "PHASE02 only -- pinning PHASE10 strips 97%% of GPCIPL's "
+             "relocations and PHASE03 loses 18%%.")] = None,
     prune_objs: Annotated[bool, typer.Option("--prune-objs",
         help="delete .obj files in this phase's objdir that neither the "
              "worklist nor autocall produced (stale leftovers pollute the "
@@ -2015,6 +2135,8 @@ def main(
     # SSL copy references FIOMUWB2, resolved only in the phase that actually
     # runs the SSL).
     nocall = concard.has_nocall(concard.ConcardDeck(str(con80_dir)), target)
+    if not force_call:
+        nocall = False          # --no-nocall: model the LE WITHOUT NCAL
 
     if emit_cmake:
         if (by_type["ASM"] or patches) and mlib_dir is None:
@@ -2380,8 +2502,20 @@ def main(
         # the resident library is not autocalled, so INSERTed library csects
         # must be loaded explicitly from -L or they go missing (and whatever
         # does load lands in reference order, not the deck's INSERT order).
+        # SKIP BY CSECT NAME, NOT BY PATH.  The same csect can reach the link
+        # from two different files -- #CDSPSPC.obj sits in the worklist objdir
+        # AND in the phase's minimal library -- and `already` only compared
+        # paths, so the INSERT pass added a second copy.  The LE keeps the
+        # first definition and deletes the later one, which left the csect
+        # table's pin holding an EMPTY section: #DDSPSPC, #DDPDSPC, #DDXCCCS
+        # and #DDXRDMM (the display data) became holes, and PASS loaded and
+        # then sat at POLL IDLE having fallen into #PCGNCOM.
+        _have = set(_mapped_csect_names(map_libs))
+        for _o in objs:
+            _have.update(_obj_sd_names(_o))
         extra_objs, _ = inserted_runtime_objects(
-            con80_dir, concard_root, linklibs, set(objs))
+            con80_dir, insert_root or concard_root, linklibs, set(objs),
+            provided=_have)
         if extra_objs:
             print(f"  [link] +{len(extra_objs)} INSERTed runtime object(s) "
                   f"loaded explicitly (NCAL: no autocall)")
@@ -2394,7 +2528,10 @@ def main(
                     verbose=verbose, objs=objs, map_libs=map_libs,
                     lib=libout, warn_unresolved=warn_unresolved_phases,
                     autocall_json=autocall_path if autocall_live else None,
-                    link_order=link_order_path)
+                    link_order=link_order_path,
+                    external_syms=(Path(external_syms)
+                                   if external_syms else None),
+                    generate_stacks=generate_stacks)
         print(f"linked {len(objs)} objects -> {fcm} (+ {libout.name})"
               if good else "link FAILED (see above)")
         if not good:
