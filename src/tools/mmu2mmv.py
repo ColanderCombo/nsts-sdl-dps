@@ -580,6 +580,48 @@ def report(rows: list[dict], others: list[dict], mmdir: str | None,
           file=out)
 
 
+def checkStamped(mmuRoot: Path, fail) -> None:
+    """Refuse a phase tree that mmustamp has not been run over.
+
+    con80build writes the linkedit output; `tools.mmustamp` then writes the
+    Mass Memory Build's own tables into it -- above all #PFCMGPT, the
+    in-core phase table FCMMGBOV indexes to find an overlay phase's load
+    blocks.  Nothing joins the two steps, so a tape built straight from
+    con80build output carries a phase table of zeros, every descriptor
+    reads a segment count of zero, and no OPS transition can load anything.
+    That produced a run of misdiagnoses; the check costs nothing.
+    """
+    lib = mmuRoot / "PHASE02.lib"
+    if not lib.is_file():
+        return                             # a partial tree: nothing to say
+    try:
+        from ap101Utils import mmbstamp
+        sym = mmbstamp._lib_sym(lib)
+        sec = {x["name"]: x for x in sym.get("sections", [])}.get(
+            mmbstamp.GPT_CSECT)
+        if sec is None:
+            return
+        text = LibModule.read(lib)
+        ext = mmbstamp._extent_for(text, sec["address"], mmbstamp.GPT_SIZE)
+        if ext is None:
+            return                         # declared, not carried here
+        base = sec["address"] - ext.address // 2
+        words = [(ext.data[2 * (base + i)] << 8) | ext.data[2 * (base + i) + 1]
+                 for i in range(mmbstamp.GPT_SIZE)]
+    except Exception as e:                 # never block the tape on this
+        log.debug("stamp check skipped: %s", e)
+        return
+    if any(words):
+        return
+    fail(f"{lib}: {mmbstamp.GPT_CSECT} is all zeros -- the Mass-Memory-Build "
+         f"tables have not been stamped into this tree.  Run\n"
+         f"    mmustamp --mmu {mmuRoot} --con80 <CON80>\n"
+         f"first, or pass --allow-unstamped to write the volume anyway.  "
+         f"Without the in-core phase table the overlay loader reads a "
+         f"segment count of zero for every phase and no OPS transition can "
+         f"load.")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="mmu2mmv",
@@ -608,6 +650,10 @@ def main(argv=None):
                          "repeatable")
     ap.add_argument("--write-protect", action="store_true",
                     help="mark the volume write protected")
+    ap.add_argument("--allow-unstamped", action="store_true",
+                    help="write the volume even though the Mass-Memory-Build "
+                         "tables have not been stamped into the load modules "
+                         "-- for geometry work, not for a tape to be booted")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
@@ -615,6 +661,8 @@ def main(argv=None):
 
     if not a.con80.is_dir():
         ap.error(f"{a.con80}: card deck not found")
+
+    checkStamped(a.mmu, ap.error if not a.allow_unstamped else log.warning)
 
     images: dict[str, Path] = {}
     for spec in a.loadmod:
