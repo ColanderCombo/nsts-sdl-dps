@@ -848,10 +848,23 @@ def tape_text(mmu_root: Path, phase: int) -> dict[int, int]:
     return text
 
 
-def generate(mmu_root: Path, con80: Path) -> PhaseTables:
+def generate(mmu_root: Path, con80: Path,
+             skip: set[int] | None = None) -> PhaseTables:
+    """`skip` names phases to treat as UNASSIGNED even though the MMUSYS
+    cards assign them -- the placeholder row phases 11 and 17 already get.
+
+    A phase that cannot be linked otherwise stops the whole table, and with
+    it the tape, even when nothing in the configuration under test loads it.
+    Only the running displacement of the phases that follow moves, and
+    FCMMGBOV reads that displacement out of the descriptor, so the shift is
+    self-describing.  What is lost is the ability to load the skipped phase:
+    its descriptor reads a segment count of zero.
+    """
     mmu_root = Path(mmu_root)
     src = load_phase_source(con80)
     areas, assigned = src.areas, src.assigned
+    if skip:
+        assigned = [p for p in assigned if p not in skip]
 
     notes: list[str] = []
     per_phase: dict[int, tuple[list[LoadBlock], int, int, bool]] = {}

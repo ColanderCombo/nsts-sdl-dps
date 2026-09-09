@@ -67,6 +67,15 @@ def main(argv=None):
     ap.add_argument("--restore", action="store_true",
                     help="put the linkedit content back from the sidecars "
                          "and drop them")
+    ap.add_argument("--skip-phase", type=int, action="append", default=[],
+                    metavar="N",
+                    help="treat phase N as unassigned, giving it the "
+                         "placeholder descriptor phases 11 and 17 get, "
+                         "instead of failing when its load module is "
+                         "missing.  The skipped phase can no longer be "
+                         "loaded; the others are unaffected but for the "
+                         "running displacement, which is read from the "
+                         "descriptor.  Repeatable.")
     ap.add_argument("--report", action="store_true",
                     help="say what would be written and change nothing")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -88,7 +97,7 @@ def main(argv=None):
 
         if not a.con80.is_dir():
             ap.error(f"{a.con80}: card deck not found")
-        tables = mmbstamp.generate(a.mmu, a.con80)
+        tables = mmbstamp.generate(a.mmu, a.con80, skip=set(a.skip_phase))
         for n in tables.notes:
             log.debug("mmbstamp: %s", n)
         stamps = mmbstamp.stamp_libs(a.mmu, tables, dry_run=a.report)
