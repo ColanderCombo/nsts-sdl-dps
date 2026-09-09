@@ -1224,6 +1224,18 @@ class Linker:
         # Apply relocations:
         #
         relocErrors = 0
+        import os as _os
+        _tr = _os.environ.get("LNK_TRACE")
+        if _tr:
+            for _m in self.modules:
+                _n = [r for r in _m.relocations
+                      if (_m.sections.get(r.posId) is not None and
+                          _m.sections[r.posId].name.strip() == _tr)]
+                if _n or _tr in [x.name.strip() for x in _m.sections.values()]:
+                    _self = [r for r in _n if r.relId == r.posId]
+                    open("/tmp/claude-1000/lnk.trace","a").write(
+                        "module %s: %d relocations positioned in %s, %d self-referential\n"
+                        % (_os.path.basename(_m.filename), len(_n), _tr, len(_self)))
         for module in self.modules:
             for reloc in module.relocations:
                 # Find the section containing the relocation (P section)
@@ -1249,6 +1261,15 @@ class Linker:
                 if targetSection is not None:
                     if targetSection.baseAddress is not None:
                         targetAddr = targetSection.baseAddress - targetSection.address
+                        import os as _o
+                        if _o.environ.get("LNK_TRACE") and \
+                           posSection is not None and \
+                           posSection.name.strip()==_o.environ["LNK_TRACE"] and \
+                           reloc.relId==reloc.posId:
+                            open("/tmp/claude-1000/lnk.trace","a").write(
+                              "self addr=%05X base=%s secaddr=%s delta=%s\n"
+                              % (reloc.address, targetSection.baseAddress,
+                                 targetSection.address, targetAddr))
                     else:
                         resolved = False
 
@@ -1284,6 +1305,19 @@ class Linker:
                     resolved = False
 
                 if not resolved and not lenient and not self.args.force:
+                    import os as _os
+                    if _os.environ.get("LNK_TRACE"):
+                        _t = _os.environ["LNK_TRACE"]
+                        _nm = (targetSection.name.strip() if targetSection
+                               else module.externals[reloc.relId].name
+                               if reloc.relId in module.externals else "?")
+                        _ps = posSection.name.strip() if posSection else "?"
+                        if _t in (_nm, _ps):
+                            open("/tmp/claude-1000/lnk.trace","a").write(
+                                "drop %s in %s addr=%05X relId=%d section=%s base=%s\n"
+                                % (_nm, _ps, reloc.address, reloc.relId,
+                                   targetSection is not None,
+                                   targetSection.baseAddress if targetSection else None))
                     continue
 
                 # Calculate the image offset for this relocation (in bytes)
@@ -1368,7 +1402,18 @@ class Linker:
                         log.debug(f"  -> {zcon}")
                 else:
                     # YCON / ACON: single-value relocation
-                    self._applyRelocationValue(imageOffset, targetAddr, reloc)
+                    import os as _o
+                    if _o.environ.get("LNK_TRACE") and posSection is not None \
+                       and posSection.name.strip()==_o.environ["LNK_TRACE"] \
+                       and reloc.relId==reloc.posId:
+                        _b=int.from_bytes(self.image[imageOffset:imageOffset+2],'big')
+                        self._applyRelocationValue(imageOffset, targetAddr, reloc)
+                        _a=int.from_bytes(self.image[imageOffset:imageOffset+2],'big')
+                        open("/tmp/claude-1000/lnk.trace","a").write(
+                            "APPLY addr=%05X off=%s before=%04X after=%04X\n"
+                            % (reloc.address, imageOffset, _b, _a))
+                    else:
+                        self._applyRelocationValue(imageOffset, targetAddr, reloc)
 
                 # Record the applied relocation for diagnostics / JSON output.
                 if flagType not in (RLD_DSR_ONLY, RLD_BSR_ONLY):  # skip sector-only
@@ -1816,7 +1861,36 @@ class Linker:
             sizeBytes = AddrDisp.from_hw(sizeHW)
             module = self._getOrCreateSyntheticModule("<generated-stacks>", 
                                                       "<stacks>")
+            # PIN A GENERATED STACK the same way a real csect is pinned.
+            # The --external-syms csect table carries every stack's address
+            # (all 30 of SSW's), but the pin pass walks self.modules and runs
+            # BEFORE these synthetic sections exist, so without this they are
+            # placed by sequential allocation instead.  Where the surrounding
+            # csects ARE pinned, that lands the stack inside one of them:
+            # @0DMPMMM came out at 0A638 inside #DDMPMMM (0A52E..0A6A4), 100
+            # halfwords of DMPMMMSG's own data overwritten by its stack, and
+            # @0VMELOA likewise inside #DVMELOA.
+            _pin = self.csectTable.get(symName) if self.csectTable else None
+            _base = (Addr.from_hw(_pin['start'])
+                     if _pin is not None and 'start' in _pin else None)
+            # TAKE THE SIZE FROM THE TABLE TOO, NOT JUST THE ADDRESS.  The
+            # longest-call-chain sizer is an ESTIMATE, and it moves when the
+            # graph it walks changes: linking the resident HAL/S library into
+            # phase 2 (itself a fix) took @0ARBIDL from 214 halfwords to 76 and
+            # @0DMCSUP from 206 to 192.  A stack smaller than the process needs
+            # is silently overrun, and @0DMCSUP is the display manager's -- the
+            # machine loaded PASS and then sat at POLL IDLE with no display.
+            # The csect table states what the flight machine actually
+            # allocated; prefer it over any estimate.
+            if _pin is not None and 'start' in _pin and 'end' in _pin:
+                _pinHw = int(_pin['end']) - int(_pin['start']) + 1
+                if _pinHw > 0 and _pinHw != sizeHW:
+                    log.info(f"stack '{symName}': size {sizeHW} -> {_pinHw} hw "
+                             f"(from the csect table, not the call-chain "
+                             f"estimate)")
+                    sizeBytes = AddrDisp.from_hw(_pinHw)
             self._addSyntheticSection(module, symName, sizeBytes,
+                                      baseAddress=_base,
                                       fill=STACK_FILL_BYTE)
             added = True
             log.info(f"Generated stack section '{symName}' ({sizeHW} HW / {sizeBytes} bytes, {source})")
